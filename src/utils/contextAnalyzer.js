@@ -124,13 +124,18 @@ class ContextAnalyzer {
      * Extract imports from code
      */
     extractImports(code) {
+        // Handle null/undefined code
+        if (!code || typeof code !== 'string') {
+            return [];
+        }
+
         // JavaScript/TypeScript imports
         const esImports = code.match(/import\s+(?:[\w\s{},*]+\s+from\s+)?['"]([^'"]+)['"]/g) || [];
         const requireImports = code.match(/require\(['"]([^'"]+)['"]\)/g) || [];
-        
+
         // Python imports
         const pyImports = code.match(/(?:from\s+([\w.]+)\s+)?import\s+([\w\s,]+)/g) || [];
-        
+
         // Java imports
         const javaImports = code.match(/import\s+([\w.]+);/g) || [];
 
@@ -161,8 +166,12 @@ class ContextAnalyzer {
      * Extract exports from code
      */
     extractExports(code) {
+        if (!code || typeof code !== 'string') {
+            return [];
+        }
+
         const exports = [];
-        
+
         // ES6 exports
         const namedExports = code.match(/export\s+(?:const|let|var|function|class)\s+(\w+)/g) || [];
         const defaultExport = code.match(/export\s+default\s+(\w+)/);
@@ -521,6 +530,9 @@ class ContextAnalyzer {
      * Estimate token count
      */
     estimateTokens(text) {
+        if (!text || typeof text !== 'string') {
+            return 0;
+        }
         // Rough estimation: 1 token ≈ 4 characters
         return Math.ceil(text.length / 4);
     }

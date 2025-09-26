@@ -10,13 +10,26 @@ export class EncryptionService {
         this.auditLog = [];
         this.keyCache = new Map();
 
-        this.initialize();
+        // Don't auto-initialize in constructor to avoid race conditions
+        // Initialize will be called explicitly by the BackgroundService
+    }
+
+    /**
+     * Get crypto object that works in both window and service worker contexts
+     */
+    getCrypto() {
+        return typeof window !== 'undefined' ? window.crypto : crypto;
     }
 
     /**
      * Initialize encryption service with secure key derivation
      */
     async initialize() {
+        // Prevent double initialization
+        if (this.isInitialized) {
+            return;
+        }
+
         try {
             // Generate or retrieve master key
             this.masterKey = await this.getMasterKey();
@@ -55,7 +68,7 @@ export class EncryptionService {
 
             // Derive key from browser fingerprint and salt
             const keyMaterial = await this.deriveKeyMaterial();
-            const key = await window.crypto.subtle.deriveKey(
+            const key = await this.getCrypto().subtle.deriveKey(
                 {
                     name: 'PBKDF2',
                     salt: salt,
@@ -87,7 +100,7 @@ export class EncryptionService {
         const encoder = new TextEncoder();
         const keyData = encoder.encode(keyString);
 
-        return await window.crypto.subtle.importKey(
+        return await this.getCrypto().subtle.importKey(
             'raw',
             keyData,
             'PBKDF2',
@@ -106,29 +119,39 @@ export class EncryptionService {
         components.push(navigator.userAgent || 'unknown');
         components.push(navigator.language || 'en');
         components.push(navigator.platform || 'unknown');
-        components.push(screen.width + 'x' + screen.height);
+        components.push((typeof screen !== 'undefined' ? screen.width + 'x' + screen.height : '1920x1080'));
         components.push(new Date().getTimezoneOffset().toString());
 
-        // Canvas fingerprinting (if available)
+        // Canvas fingerprinting (if available and in DOM context)
         try {
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            ctx.textBaseline = 'top';
-            ctx.font = '14px Arial';
-            ctx.fillText('RepoSpector fingerprint', 2, 2);
-            components.push(canvas.toDataURL());
+            if (typeof document !== 'undefined') {
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                ctx.textBaseline = 'top';
+                ctx.font = '14px Arial';
+                ctx.fillText('RepoSpector fingerprint', 2, 2);
+                components.push(canvas.toDataURL());
+            } else {
+                components.push('canvas-serviceworker');
+            }
         } catch (error) {
             components.push('canvas-unavailable');
         }
 
-        // WebGL fingerprinting (if available)
+        // WebGL fingerprinting (if available and in DOM context)
         try {
-            const canvas = document.createElement('canvas');
-            const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-            if (gl) {
-                const renderer = gl.getParameter(gl.RENDERER);
-                const vendor = gl.getParameter(gl.VENDOR);
-                components.push(`${vendor}-${renderer}`);
+            if (typeof document !== 'undefined') {
+                const canvas = document.createElement('canvas');
+                const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+                if (gl) {
+                    const renderer = gl.getParameter(gl.RENDERER);
+                    const vendor = gl.getParameter(gl.VENDOR);
+                    components.push(`${vendor}-${renderer}`);
+                } else {
+                    components.push('webgl-unavailable');
+                }
+            } else {
+                components.push('webgl-serviceworker');
             }
         } catch (error) {
             components.push('webgl-unavailable');
@@ -139,7 +162,7 @@ export class EncryptionService {
         // Hash the fingerprint for consistency
         const encoder = new TextEncoder();
         const data = encoder.encode(fingerprint);
-        const hashBuffer = await window.crypto.subtle.digest('SHA-256', data);
+        const hashBuffer = await this.getCrypto().subtle.digest('SHA-256', data);
         const hashArray = Array.from(new Uint8Array(hashBuffer));
 
         return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
@@ -170,7 +193,7 @@ export class EncryptionService {
             const encoder = new TextEncoder();
             const encodedData = encoder.encode(data);
 
-            const encryptedBuffer = await window.crypto.subtle.encrypt(
+            const encryptedBuffer = await this.getCrypto().subtle.encrypt(
                 {
                     name: 'AES-GCM',
                     iv: iv
@@ -224,7 +247,8 @@ export class EncryptionService {
      */
     async decryptAES(encryptedBase64) {
         if (!this.isInitialized) {
-            throw new Error('Encryption service not initialized');
+            console.warn('AES decryption attempted before initialization, falling back to legacy');
+            return await this.decryptLegacy(encryptedBase64);
         }
 
         try {
@@ -238,7 +262,7 @@ export class EncryptionService {
             const encryptedData = combined.slice(12);
 
             // Decrypt
-            const decryptedBuffer = await window.crypto.subtle.decrypt(
+            const decryptedBuffer = await this.getCrypto().subtle.decrypt(
                 {
                     name: 'AES-GCM',
                     iv: iv
@@ -361,7 +385,7 @@ export class EncryptionService {
     }
 
     generateSecureRandom(length) {
-        return window.crypto.getRandomValues(new Uint8Array(length));
+        return this.getCrypto().getRandomValues(new Uint8Array(length));
     }
 
     isValidApiKey(key) {

@@ -8,22 +8,43 @@ import { BatchProcessor } from '../utils/batchProcessor.js';
 import { CodeChunker } from '../utils/chunking.js';
 import { TestGenerator } from '../utils/testGenerator.js';
 import { CacheManager } from '../utils/cacheManager.js';
-import { PLATFORM_PATTERNS as _PLATFORM_PATTERNS } from '../utils/constants.js';
+import { PLATFORM_PATTERNS as _PLATFORM_PATTERNS, MODELS } from '../utils/constants.js';
 
 class BackgroundService {
     constructor() {
-        this.encryptionService = new EncryptionService();
-        this.errorHandler = new ErrorHandler();
-        this.contextAnalyzer = new ContextAnalyzer();
-        this.batchProcessor = new BatchProcessor();
-        this.codeChunker = new CodeChunker();
-        this.testGenerator = new TestGenerator();
-        this.cacheManager = new CacheManager();
         this.isProcessing = false;
         this.processingQueue = [];
-        
+
+        // Initialize services
+        try {
+            this.errorHandler = new ErrorHandler();
+            this.encryptionService = new EncryptionService();
+            this.contextAnalyzer = new ContextAnalyzer();
+            this.batchProcessor = new BatchProcessor();
+            this.codeChunker = new CodeChunker();
+            this.testGenerator = new TestGenerator();
+            this.cacheManager = new CacheManager();
+
+            console.log('RepoSpector services initialized successfully');
+        } catch (error) {
+            console.error('Failed to initialize services:', error);
+        }
+
         this.setupMessageHandlers();
         this.setupInstallHandler();
+
+        // Initialize encryption service asynchronously
+        this.initializeEncryptionAsync();
+    }
+
+    async initializeEncryptionAsync() {
+        try {
+            // Wait for encryption service to be fully initialized
+            await this.encryptionService.initialize();
+            console.log('Encryption service fully initialized');
+        } catch (error) {
+            console.error('Failed to fully initialize encryption service:', error);
+        }
     }
 
     setupInstallHandler() {
@@ -139,30 +160,37 @@ class BackgroundService {
                         });
                     } catch (contentScriptError) {
                         // Content script not loaded, try to inject it
-                        console.log('Content script not found, attempting dynamic injection...');
-                        
+                        console.log('Content script not found on page, attempting dynamic injection...');
+
                         try {
                             await chrome.scripting.executeScript({
                                 target: { tabId: tabId },
                                 files: ['content.js']
                             });
-                            
+
                             // Wait a moment for the script to initialize
-                            await new Promise(resolve => setTimeout(resolve, 500));
-                            
-                            // Try again
+                            await new Promise(resolve => setTimeout(resolve, 1000));
+
+                            // Try again with new content script
                             extractionResult = await chrome.tabs.sendMessage(tabId, {
                                 type: 'EXTRACT_CODE',
                                 options: {
                                     contextLevel: options.contextLevel || 'smart'
                                 }
                             });
+
+                            console.log('Dynamic injection successful');
                         } catch (injectionError) {
                             // Fallback: try legacy extraction method
-                            console.log('Dynamic injection failed, trying legacy method...');
-                            extractionResult = await chrome.tabs.sendMessage(tabId, {
-                                action: 'extractCode'
-                            });
+                            console.log('Dynamic injection not available, using legacy method (this is normal)...');
+                            try {
+                                extractionResult = await chrome.tabs.sendMessage(tabId, {
+                                    action: 'extractCode'
+                                });
+                            } catch (legacyError) {
+                                console.warn('All extraction methods failed:', legacyError);
+                                throw new Error('Unable to extract code from this page. Please refresh the page and try again.');
+                            }
                         }
                     }
                     
@@ -230,7 +258,7 @@ class BackgroundService {
             });
 
             // Determine if chunking is needed
-            const modelName = settings.model || 'gpt-4o-mini';
+            const modelName = this.getModelId(settings.model);
             const estimatedTokens = this.codeChunker.estimateTokens(extractedCode);
             const maxTokens = this.codeChunker.getMaxTokensForModel(modelName);
 
@@ -277,7 +305,7 @@ class BackgroundService {
     }
 
     async processWithChunking(code, options, context, settings) {
-        const chunks = this.codeChunker.createSemanticChunks(code, settings.model);
+        const chunks = this.codeChunker.createSemanticChunks(code, this.getModelId(settings.model));
         
         if (chunks.length === 1) {
             return await this.processDirect(code, options, context, settings);
@@ -298,7 +326,12 @@ class BackgroundService {
             (progress) => {
                 // Send progress updates to popup
                 chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-                    if (tabs[0]) {
+                    if (chrome.runtime.lastError) {
+                        console.warn('Failed to query tabs:', chrome.runtime.lastError);
+                        return;
+                    }
+
+                    if (tabs && tabs.length > 0 && tabs[0]) {
                         chrome.tabs.sendMessage(tabs[0].id, {
                             type: 'PROGRESS_UPDATE',
                             data: progress
@@ -314,9 +347,9 @@ class BackgroundService {
 
     async processDirect(code, options, context, settings) {
         const prompt = this.buildTestGenerationPrompt(code, options, context);
-        
+
         return await this.callOpenAI({
-            model: settings.model,
+            model: this.getModelId(settings.model),
             messages: [{ role: 'user', content: prompt }],
             temperature: 0.1,
             max_tokens: 4000
@@ -325,9 +358,9 @@ class BackgroundService {
 
     async generateTestsForChunk(chunk, options, settings) {
         const prompt = this.buildTestGenerationPrompt(chunk.content, options, chunk.context);
-        
+
         return await this.callOpenAI({
-            model: settings.model,
+            model: this.getModelId(settings.model),
             messages: [{ role: 'user', content: prompt }],
             temperature: 0.1,
             max_tokens: 2000
@@ -692,6 +725,29 @@ Do NOT include actual test code implementation.`;
 Return only the test code, properly formatted and ready to run.`;
     }
 
+    /**
+     * Get the correct model ID for API calls
+     * Extracts modelId from MODELS config if available, otherwise returns the model as-is
+     */
+    getModelId(modelIdentifier) {
+        if (!modelIdentifier) return 'gpt-4o-mini'; // default fallback
+
+        // If it's already a plain model name (no provider prefix), return as-is
+        if (!modelIdentifier.includes(':')) {
+            return modelIdentifier;
+        }
+
+        // Look up in MODELS config to get the correct modelId
+        const modelConfig = MODELS[modelIdentifier];
+        if (modelConfig && modelConfig.modelId) {
+            return modelConfig.modelId;
+        }
+
+        // Fallback: extract the part after the colon
+        const parts = modelIdentifier.split(':');
+        return parts.length > 1 ? parts[1] : modelIdentifier;
+    }
+
     async callOpenAI(requestData, apiKey) {
         const response = await fetch('https://api.openai.com/v1/chat/completions', {
             method: 'POST',
@@ -708,6 +764,15 @@ Return only the test code, properly formatted and ready to run.`;
         }
 
         const data = await response.json();
+
+        if (!data.choices || data.choices.length === 0) {
+            throw new Error('No response choices received from API');
+        }
+
+        if (!data.choices[0]?.message?.content) {
+            throw new Error('Invalid response format from API');
+        }
+
         return data.choices[0].message.content;
     }
 
@@ -889,16 +954,28 @@ Return only the test code, properly formatted and ready to run.`;
 
         try {
             chrome.contextMenus.removeAll(() => {
+                if (chrome.runtime.lastError) {
+                    console.warn('Error removing context menus:', chrome.runtime.lastError);
+                }
+
                 chrome.contextMenus.create({
                     id: 'generateTests',
                     title: 'Generate Test Cases',
                     contexts: ['selection', 'page']
+                }, () => {
+                    if (chrome.runtime.lastError) {
+                        console.warn('Error creating generateTests context menu:', chrome.runtime.lastError);
+                    }
                 });
-                
+
                 chrome.contextMenus.create({
                     id: 'analyzeCode',
                     title: 'Analyze Code Structure',
                     contexts: ['selection', 'page']
+                }, () => {
+                    if (chrome.runtime.lastError) {
+                        console.warn('Error creating analyzeCode context menu:', chrome.runtime.lastError);
+                    }
                 });
             });
         } catch (error) {

@@ -802,4 +802,135 @@ private {{className}} {{instanceName}};`;
         // Generate mock implementation for dependency
         return `// Mock for ${dep.path}`;
     }
+
+    /**
+     * Generate performance test patterns
+     */
+    async generatePerformanceTestPatterns(codeAnalysis, framework, _coverage) {
+        // Performance test generation logic
+        return [{
+            type: 'performance',
+            framework: framework,
+            tests: ['// Performance tests for ' + (codeAnalysis.filePath || 'code')]
+        }];
+    }
+
+    /**
+     * Generate security test patterns
+     */
+    async generateSecurityTestPatterns(codeAnalysis, framework, _coverage) {
+        // Security test generation logic
+        return [{
+            type: 'security',
+            framework: framework,
+            tests: ['// Security tests for ' + (codeAnalysis.filePath || 'code')]
+        }];
+    }
+
+    /**
+     * Generate accessibility test patterns
+     */
+    async generateA11yTestPatterns(codeAnalysis, framework, _coverage) {
+        // Accessibility test generation logic
+        return [{
+            type: 'accessibility',
+            framework: framework,
+            tests: ['// Accessibility tests for ' + (codeAnalysis.filePath || 'code')]
+        }];
+    }
+
+    /**
+     * Generate fallback test suite when main generation fails
+     */
+    async generateFallbackTestSuite(codeAnalysis, options) {
+        console.warn('Using fallback test suite generation');
+
+        const framework = options.framework || 'jest';
+        const testTypes = options.testTypes || ['unit'];
+
+        // Create basic test structure based on detected functions/classes
+        const fallbackTests = [];
+
+        // Generate basic unit tests for detected functions
+        if (codeAnalysis.functions && codeAnalysis.functions.length > 0) {
+            const functionTests = codeAnalysis.functions.map(func => {
+                return `describe('${func.name}', () => {
+    it('should be defined', () => {
+        expect(${func.name}).toBeDefined();
+    });
+
+    it('should handle basic functionality', () => {
+        // Add test implementation
+        // TODO: Implement specific tests for ${func.name}
+    });
+});`;
+            }).join('\n\n');
+
+            fallbackTests.push({
+                type: 'unit',
+                framework,
+                code: functionTests,
+                description: `Basic unit tests for ${codeAnalysis.functions.length} functions`
+            });
+        }
+
+        // Generate basic tests for detected classes
+        if (codeAnalysis.classes && codeAnalysis.classes.length > 0) {
+            const classTests = codeAnalysis.classes.map(cls => {
+                return `describe('${cls.name}', () => {
+    let instance;
+
+    beforeEach(() => {
+        instance = new ${cls.name}();
+    });
+
+    it('should create an instance', () => {
+        expect(instance).toBeInstanceOf(${cls.name});
+    });
+
+    ${cls.methods.map(method => `
+    describe('${method.name}', () => {
+        it('should exist', () => {
+            expect(typeof instance.${method.name}).toBe('function');
+        });
+
+        it('should handle basic functionality', () => {
+            // Add test implementation
+            // TODO: Implement specific tests for ${method.name}
+        });
+    });`).join('\n')}
+});`;
+            }).join('\n\n');
+
+            fallbackTests.push({
+                type: 'unit',
+                framework,
+                code: classTests,
+                description: `Basic class tests for ${codeAnalysis.classes.length} classes`
+            });
+        }
+
+        // If no functions or classes detected, create generic tests
+        if (fallbackTests.length === 0) {
+            fallbackTests.push({
+                type: 'unit',
+                framework,
+                code: `describe('Code Tests', () => {
+    it('should be testable', () => {
+        // Basic test structure
+        expect(true).toBe(true);
+    });
+
+    it('should have proper implementation', () => {
+        // TODO: Add specific tests based on code analysis
+        // File: ${codeAnalysis.filePath || 'unknown'}
+        // Language: ${codeAnalysis.language || 'unknown'}
+    });
+});`,
+                description: 'Basic fallback test structure'
+            });
+        }
+
+        return fallbackTests;
+    }
 } 

@@ -304,6 +304,9 @@ const PERFORMANCE_CONFIG = {
 
 const CODE_SELECTORS = [
     // GitHub
+    '#fileHolder',
+    '#read-only-cursor-text-area',
+    '[data-testid="blob-viewer-file-content"]',
     '.blob-code-inner',
     '.blob-code-content',
     'td.blob-code',
@@ -311,6 +314,13 @@ const CODE_SELECTORS = [
     '.diff-table',
     
     // GitLab
+    '[data-testid="blob-content"] pre code',
+    '[data-testid="blob-content"] pre',
+    '[data-testid="source-viewer"] pre',
+    '.blob-content pre code',
+    '.blob-content pre',
+    '.source-viewer pre',
+    '.highlight pre code',
     '.code.highlight',
     '.diff-content',
     

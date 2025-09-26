@@ -21,8 +21,7 @@
         }
     },
     "background": {
-        "service_worker": "background.js",
-        "type": "module"
+        "service_worker": "background.js"
     },
     "content_scripts": [
         {
@@ -40,7 +39,6 @@
                 "https://*.pagure.io/*"
             ],
             "js": ["content.js"],
-            "type": "module",
             "run_at": "document_idle"
         },
         {
@@ -49,7 +47,6 @@
                 "http://*/*"
             ],
             "js": ["content.js"],
-            "type": "module",
             "run_at": "document_idle",
             "all_frames": false
         }
@@ -69,6 +66,6 @@
         }
     ],
     "content_security_policy": {
-        "extension_pages": "script-src 'self'; object-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://api.openai.com https://api.github.com https://gitlab.com https://api.bitbucket.org https://dev.azure.com https://raw.githubusercontent.com https://sourceforge.net https://codeberg.org https://git.sr.ht https://*.gitea.io https://*.gitea.com https://*.pagure.io; font-src 'self';"
+        "extension_pages": "script-src 'self'; object-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' http://localhost:* https://api.openai.com https://api.github.com https://gitlab.com https://api.bitbucket.org https://dev.azure.com https://raw.githubusercontent.com https://sourceforge.net https://codeberg.org https://git.sr.ht https://*.gitea.io https://*.gitea.com https://*.pagure.io; font-src 'self';"
     }
 }

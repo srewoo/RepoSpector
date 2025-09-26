@@ -212,10 +212,12 @@ class ContentExtractor {
         try {
             // Simple extraction for legacy compatibility (like the simple version)
             const selectors = [
+                '#fileHolder',                              // Specific GitHub/GitLab element
+                '#read-only-cursor-text-area',              // GitHub editor
                 '[data-testid="blob-viewer-file-content"]', // GitHub's code view
+                '[data-testid="blob-content"]',             // GitLab code view
                 '.diffs.tab-pane.active',                  // Git diff view
                 '#diffs',
-                '#fileHolder',
                 'pre code',                                 // Common code block in web pages
                 '[id^="diff-content-"]'                    // IDs starting with 'diff-content-'
             ];
@@ -227,7 +229,8 @@ class ContentExtractor {
             }
 
             if (codeElement) {
-                const code = codeElement.textContent || codeElement.innerText;
+                const rawCode = codeElement.textContent || codeElement.innerText;
+                const code = this.cleanupExtractedCode(rawCode);
                 sendResponse({ success: true, code });
             } else {
                 console.error("No code element found.");
@@ -641,32 +644,101 @@ class ContentExtractor {
      * Extract GitHub file content
      */
     extractGitHubFileContent() {
-        // Try various GitHub selectors
+        console.log('Attempting to extract GitHub file content...');
+
+        // Comprehensive GitHub selectors (most specific first)
         const selectors = [
-            '.blob-wrapper .blob-code-content',
-            '.file-content .blob-code-content',
-            '.highlight .blob-code-content',
+            // Specific ID selectors
+            '#fileHolder',
             '#read-only-cursor-text-area',
-            '.react-code-text'
+
+            // Modern GitHub file view selectors
+            '[data-testid="blob-viewer-file-content"]',
+            '[data-testid="blob-content"]',
+            '[data-testid="blob-code-content"]',
+
+            // Classic GitHub selectors
+            '.blob-wrapper .blob-code-inner',
+            '.blob-wrapper .blob-code-content',
+            '.file-content .blob-code-inner',
+            '.file-content .blob-code-content',
+            '.highlight .blob-code-inner',
+            '.highlight .blob-code-content',
+            '.blob-code-inner',
+            '.blob-code-content',
+            'td.blob-code',
+            '.js-file-line-container',
+
+            // React-based GitHub
+            '.react-code-text',
+            '.react-code-lines',
+
+            // Generic code containers
+            '.highlight table td',
+            '.highlight pre',
+            '.file-content pre',
+            '.blob-wrapper pre'
         ];
 
+        // Try each selector in order of preference
         for (const selector of selectors) {
-            const elements = document.querySelectorAll(selector);
-            if (elements.length > 0) {
-                return Array.from(elements)
-                    .map(el => el.textContent || el.innerText || '')
-                    .join('\n');
+            try {
+                const elements = document.querySelectorAll(selector);
+                console.log(`Trying GitHub selector "${selector}": found ${elements.length} elements`);
+
+                if (elements.length > 0) {
+                    const content = Array.from(elements)
+                        .map(el => el.textContent || el.innerText || '')
+                        .join('\n');
+
+                    if (content.trim().length > 10) { // Ensure we have meaningful content
+                        console.log(`GitHub content extracted using selector: ${selector} (${content.length} chars)`);
+                        // Clean up line numbers and other artifacts
+                        return this.cleanupExtractedCode(content);
+                    }
+                }
+            } catch (error) {
+                console.warn(`Error with GitHub selector "${selector}":`, error);
             }
         }
 
-        // Fallback: look for any pre/code elements
-        const codeElements = document.querySelectorAll('pre, code');
-        const longestCode = Array.from(codeElements)
-            .map(el => el.textContent || el.innerText || '')
-            .reduce((longest, current) => 
-                current.length > longest.length ? current : longest, '');
+        // Enhanced fallback for GitHub
+        console.log('Trying GitHub fallback selectors...');
+        const fallbackSelectors = [
+            '.file-content',
+            '.blob-content',
+            '.highlight',
+            'main pre',
+            'main code',
+            '[role="main"] pre',
+            '[role="main"] code',
+            'pre code',
+            'pre',
+            'code'
+        ];
 
-        return longestCode;
+        for (const selector of fallbackSelectors) {
+            try {
+                const elements = document.querySelectorAll(selector);
+                if (elements.length > 0) {
+                    const longestCode = Array.from(elements)
+                        .map(el => el.textContent || el.innerText || '')
+                        .filter(text => text.trim().length > 10)
+                        .reduce((longest, current) =>
+                            current.length > longest.length ? current : longest, '');
+
+                    if (longestCode.trim().length > 10) {
+                        console.log(`GitHub content extracted using fallback selector: ${selector} (${longestCode.length} chars)`);
+                        return this.cleanupExtractedCode(longestCode);
+                    }
+                }
+            } catch (error) {
+                console.warn(`Error with GitHub fallback selector "${selector}":`, error);
+            }
+        }
+
+        console.warn('No GitHub file content could be extracted');
+        return '';
     }
 
     /**
@@ -675,31 +747,48 @@ class ContentExtractor {
     extractGitLabFileContent() {
         console.log('Attempting to extract GitLab file content...');
         
-        // Updated selectors for modern GitLab interface (2024)
+        // Updated selectors for modern GitLab interface (2025)
         const selectors = [
             // Modern GitLab file view selectors (most specific first)
+            '[data-testid="blob-content"] pre code',
+            '[data-testid="blob-content"] .line',
+            '[data-testid="blob-content"] pre',
+            '[data-testid="blob-content"] code',
+            '[data-testid="source-viewer"] pre',
+            '[data-testid="source-viewer"] code',
+            '[data-testid="source-viewer"] .line',
+            '.blob-content pre code',
+            '.blob-content .line',
+            '.blob-content pre',
+            '.file-content pre code',
+            '.file-content .line',
+            '.file-content pre',
+            '.source-viewer pre',
+            '.source-viewer code',
+            '.source-viewer .line',
+            // More specific GitLab selectors
+            'div[class*="blob-viewer"] pre',
+            'div[class*="blob-viewer"] code',
+            'div[class*="source-code"] pre',
+            'div[class*="source-code"] code',
+            '.highlight pre code',
+            '.highlight .line',
+            '.file-holder .line',
+            '.file-holder pre',
+            // Fallback selectors
             '[data-testid="blob-viewer"] pre',
             '[data-testid="blob-viewer"] .line',
             '[data-testid="blob-viewer"] code',
             '[data-testid="blob-viewer-file-content"]', // GitHub's code view
-            '.file-content .code pre',
-            '.file-content .code .line',
-            '.file-content pre',
             '.blob-viewer pre',
             '.blob-viewer .line',
             '.blob-viewer code',
-            '.highlight .line',
-            '.file-holder .line',
-            '.file-holder pre',
-            '.source-code pre',
-            '.source-code .line',
             '.diffs.tab-pane.active',                  // Git diff view
             '#diffs',
             '#fileHolder',
             'pre code',                                 // Common code block in web pages
             '[id^="diff-content-"]',                    // IDs starting with 'diff-content-'
             // Legacy selectors
-            '.blob-content .line',
             '.code.highlight pre',
             '.code.highlight .line'
         ];
@@ -717,7 +806,8 @@ class ContentExtractor {
                     
                     if (content.trim().length > 10) { // Ensure we have meaningful content
                         console.log(`GitLab content extracted using selector: ${selector} (${content.length} chars)`);
-                        return content;
+                        // Clean up line numbers and other artifacts
+                        return this.cleanupExtractedCode(content);
                     }
                 }
             } catch (error) {
@@ -727,6 +817,10 @@ class ContentExtractor {
 
         // Enhanced fallback for GitLab with more comprehensive selectors
         const fallbackSelectors = [
+            // Specific ID selectors (works on both GitLab and GitHub)
+            '#fileHolder',
+            '#read-only-cursor-text-area',
+
             // More specific fallbacks
             '.file-content',
             '.blob-content',
@@ -734,12 +828,13 @@ class ContentExtractor {
             'main code',
             '[role="main"] pre',
             '[role="main"] code',
+
             // Additional code view selectors
             '[data-testid="blob-viewer-file-content"]', // GitHub's code view
             '.diffs.tab-pane.active',                  // Git diff view
             '#diffs',
-            '#fileHolder',
             '[id^="diff-content-"]',                    // IDs starting with 'diff-content-'
+
             // Generic fallbacks
             'pre code',
             '.file-content pre',
@@ -764,7 +859,7 @@ class ContentExtractor {
                     
                     if (longestCode.trim().length > 10) {
                         console.log(`GitLab content extracted using fallback selector: ${selector} (${longestCode.length} chars)`);
-                        return longestCode;
+                        return this.cleanupExtractedCode(longestCode);
                     }
                 }
             } catch (error) {
@@ -785,16 +880,27 @@ class ContentExtractor {
                 
                 // Calculate a "code-likeness" score
                 let score = 0;
+                // JavaScript/C-style languages
                 if (text.includes('{') || text.includes('}')) score += 2;
                 if (text.includes(';')) score += 2;
                 if (text.includes('function')) score += 3;
                 if (text.includes('const') || text.includes('let') || text.includes('var')) score += 3;
                 if (text.includes('import') || text.includes('export')) score += 3;
-                if (text.includes('class')) score += 3;
+                if (text.includes('//') || text.includes('/*')) score += 1;
+                if (text.includes('=>')) score += 1;
+
+                // Python-specific patterns
+                if (text.includes('def ')) score += 3;
+                if (text.includes('class ')) score += 3;
+                if (text.includes('import ') || text.includes('from ')) score += 3;
+                if (text.includes('if __name__')) score += 4;
+                if (text.includes(':') && text.includes('\n    ')) score += 2; // Python indentation
+                if (text.includes('#')) score += 1; // Python comments
+
+                // General programming patterns
                 if (text.includes('return')) score += 2;
                 if (text.includes('if') || text.includes('for') || text.includes('while')) score += 2;
-                if (text.includes('//') || text.includes('/*')) score += 1;
-                if (text.includes('=') || text.includes('=>')) score += 1;
+                if (text.includes('=')) score += 1;
                 
                 // Bonus for proper indentation
                 const lines = text.split('\n');
@@ -813,7 +919,7 @@ class ContentExtractor {
 
         if (bestContent.trim().length > 50 && bestScore > 5) {
             console.log(`GitLab content extracted using last resort method (score: ${bestScore}, ${bestContent.length} chars)`);
-            return bestContent;
+            return this.cleanupExtractedCode(bestContent);
         }
 
         console.warn('No GitLab file content could be extracted');
@@ -822,6 +928,36 @@ class ContentExtractor {
         console.log('Page title:', document.title);
         
         return '';
+    }
+
+    /**
+     * Clean up extracted code by removing line numbers and other artifacts
+     */
+    cleanupExtractedCode(code) {
+        if (!code) return code;
+
+        let cleaned = code;
+
+        // Remove line numbers at the beginning of lines (common in GitLab/GitHub)
+        // Matches: "1  some code" or "123  some code"
+        cleaned = cleaned.replace(/^\d+\s{2,}/gm, '');
+
+        // Remove line numbers with tabs or multiple spaces
+        cleaned = cleaned.replace(/^\d+\t/gm, '');
+
+        // Remove copy button text or other UI elements that might be included
+        cleaned = cleaned.replace(/^\s*Copy\s*$/gm, '');
+        cleaned = cleaned.replace(/^\s*View\s*$/gm, '');
+        cleaned = cleaned.replace(/^\s*Raw\s*$/gm, '');
+        cleaned = cleaned.replace(/^\s*Blame\s*$/gm, '');
+
+        // Remove excessive empty lines
+        cleaned = cleaned.replace(/\n\s*\n\s*\n/g, '\n\n');
+
+        // Trim whitespace from start and end
+        cleaned = cleaned.trim();
+
+        return cleaned;
     }
 
     /**
@@ -857,12 +993,72 @@ class ContentExtractor {
      * Extract generic file content
      */
     extractGenericFileContent() {
-        const codeElements = document.querySelectorAll('pre, code, .highlight, .source-code');
-        
-        return Array.from(codeElements)
+        console.log('Attempting to extract generic file content...');
+
+        // Comprehensive generic selectors that should work on most code hosting platforms
+        const selectors = [
+            // Specific ID selectors
+            '#fileHolder',
+            '#read-only-cursor-text-area',
+
+            // Common data attributes
+            '[data-testid="blob-content"]',
+            '[data-testid="blob-viewer-file-content"]',
+            '[data-testid="source-viewer"]',
+
+            // Common class-based selectors
+            '.blob-content',
+            '.file-content',
+            '.source-code',
+            '.highlight',
+            '.code-container',
+
+            // Generic code elements
+            'pre code',
+            'pre.highlight',
+            'div.highlight pre',
+            'pre',
+            'code'
+        ];
+
+        // Try each selector in order of preference
+        for (const selector of selectors) {
+            try {
+                const elements = document.querySelectorAll(selector);
+                console.log(`Trying generic selector "${selector}": found ${elements.length} elements`);
+
+                if (elements.length > 0) {
+                    const content = Array.from(elements)
+                        .map(el => el.textContent || el.innerText || '')
+                        .join('\n');
+
+                    if (content.trim().length > 10) {
+                        console.log(`Generic content extracted using selector: ${selector} (${content.length} chars)`);
+                        return this.cleanupExtractedCode(content);
+                    }
+                }
+            } catch (error) {
+                console.warn(`Error with generic selector "${selector}":`, error);
+            }
+        }
+
+        // Last resort: get all text from elements that might contain code
+        console.log('Using last resort generic extraction...');
+        const allCodeElements = document.querySelectorAll('pre, code, .highlight, .source-code, .file-content, .blob-content');
+
+        const longestCode = Array.from(allCodeElements)
             .map(el => el.textContent || el.innerText || '')
-            .filter(text => text.trim().length > 0)
-            .join('\n\n');
+            .filter(text => text.trim().length > 10)
+            .reduce((longest, current) =>
+                current.length > longest.length ? current : longest, '');
+
+        if (longestCode.trim()) {
+            console.log(`Generic content extracted using last resort (${longestCode.length} chars)`);
+            return this.cleanupExtractedCode(longestCode);
+        }
+
+        console.warn('No generic file content could be extracted');
+        return '';
     }
 
     /**
