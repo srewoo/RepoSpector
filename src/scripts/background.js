@@ -40,8 +40,12 @@ class BackgroundService {
     async initializeEncryptionAsync() {
         try {
             // Wait for encryption service to be fully initialized
-            await this.encryptionService.initialize();
-            console.log('Encryption service fully initialized');
+            if (this.encryptionService && typeof this.encryptionService.initialize === 'function') {
+                await this.encryptionService.initialize();
+                console.log('Encryption service fully initialized');
+            } else {
+                console.error('Encryption service not properly initialized');
+            }
         } catch (error) {
             console.error('Failed to fully initialize encryption service:', error);
         }
@@ -55,7 +59,11 @@ class BackgroundService {
             await this.loadSettings();
             
             // Initialize cache
-            await this.cacheManager.initialize();
+            if (this.cacheManager && typeof this.cacheManager.initialize === 'function') {
+                await this.cacheManager.initialize();
+            } else {
+                console.error('Cache manager not properly initialized');
+            }
             
             // Set up context menus
             this.setupContextMenus();
@@ -248,14 +256,37 @@ class BackgroundService {
                 platform: extractedContext?.platform || 'unknown'
             });
 
-            // Generate intelligent test suite using the new TestGenerator
-            await this.testGenerator.generateTestSuite(enhancedContext, {
-                testTypes: Array.isArray(options.testType) ? options.testType : [options.testType || 'unit'],
-                framework: 'auto',
-                includeSetup: true,
-                generateMocks: true,
-                coverage: options.contextLevel === 'full' ? 'comprehensive' : 'standard'
-            });
+            // Generate intelligent test suite using the enhanced TestGenerator
+            let testSuiteResults;
+            try {
+                // Try enhanced generation first
+                testSuiteResults = await this.testGenerator.generateEnhancedTestSuite(
+                    { code: extractedCode, language: 'javascript', ...enhancedContext },
+                    {
+                        testTypes: Array.isArray(options.testType) ? options.testType : [options.testType || 'unit'],
+                        framework: options.testFramework || 'auto',
+                        includeSetup: true,
+                        generateMocks: true,
+                        coverage: options.contextLevel === 'full' ? 'comprehensive' : 'standard'
+                    },
+                    {
+                        filePath: extractedContext?.filePath || 'unknown',
+                        dependencies: extractedContext?.dependencies || {},
+                        existingTests: extractedContext?.existingTests || []
+                    }
+                );
+                console.log('✨ Enhanced test generation completed');
+            } catch (error) {
+                console.warn('Enhanced generation failed, falling back to standard generation:', error);
+                // Fallback to original method
+                testSuiteResults = await this.testGenerator.generateTestSuite(enhancedContext, {
+                    testTypes: Array.isArray(options.testType) ? options.testType : [options.testType || 'unit'],
+                    framework: options.testFramework || 'auto',
+                    includeSetup: true,
+                    generateMocks: true,
+                    coverage: options.contextLevel === 'full' ? 'comprehensive' : 'standard'
+                });
+            }
 
             // Determine if chunking is needed
             const modelName = this.getModelId(settings.model);
@@ -388,7 +419,7 @@ class BackgroundService {
 **Context Information:**
 - Language: ${context.language || 'JavaScript'}
 - File: ${context.filePath || 'unknown'}
-- Testing Framework: ${context.testingFramework || 'Jest (default)'}
+- Testing Framework: ${options.testFramework || context.testingFramework || 'Auto-detect'}
 - Context Level: ${options.contextLevel || 'smart'}
 - E2E Framework: ${options.e2eFramework || 'Playwright'}
 `;
@@ -398,7 +429,7 @@ class BackgroundService {
 **Context Information:**
 - Language: ${context.language || 'JavaScript'}
 - File: ${context.filePath || 'unknown'}
-- Testing Framework: ${context.testingFramework || 'Jest (default)'}
+- Testing Framework: ${options.testFramework || context.testingFramework || 'Auto-detect'}
 - Context Level: ${options.contextLevel || 'smart'}
 `;
         }

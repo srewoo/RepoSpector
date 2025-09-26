@@ -108,6 +108,32 @@
                     </select>
                 </div>
 
+                <div class="option-group" id="frameworkGroup">
+                    <label for="testFramework" class="section-label">Testing Framework <span class="info-icon" title="Choose the testing framework for generated tests. 'Auto' detects from your project.">i</span></label>
+                    <select id="testFramework" class="setting-select">
+                        <option value="auto" selected>Auto-Detect</option>
+                        <optgroup label="JavaScript/TypeScript">
+                            <option value="jest">Jest</option>
+                            <option value="vitest">Vitest</option>
+                            <option value="mocha">Mocha</option>
+                            <option value="jasmine">Jasmine</option>
+                            <option value="qunit">QUnit</option>
+                            <option value="ava">Ava</option>
+                        </optgroup>
+                        <optgroup label="End-to-End">
+                            <option value="playwright">Playwright</option>
+                            <option value="cypress">Cypress</option>
+                        </optgroup>
+                        <optgroup label="Other Languages">
+                            <option value="pytest">pytest (Python)</option>
+                            <option value="junit">JUnit (Java)</option>
+                            <option value="nunit">NUnit (C#)</option>
+                            <option value="rspec">RSpec (Ruby)</option>
+                            <option value="go-test">Go Testing</option>
+                        </optgroup>
+                    </select>
+                </div>
+
                 <div class="option-group">
                     <label for="contextLevel" class="section-label">Context Level <span class="info-icon" title="Controls how much surrounding code is analyzed. 'Smart' is recommended.">i</span></label>
                     <select id="contextLevel" class="setting-select">

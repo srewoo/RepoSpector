@@ -34,6 +34,7 @@ const elements = {
     
     // Options
     testTypeSelect: document.getElementById('testType'),
+    testFrameworkSelect: document.getElementById('testFramework'),
     contextLevelSelect: document.getElementById('contextLevel'),
     
     // Results
@@ -185,13 +186,17 @@ function updateUIForPageType(detection) {
 
 // Set initial UI state
 function setInitialUIState() {
+    // Initialize framework options based on current test type
+    const currentTestType = elements.testTypeSelect?.value || 'unit';
+    updateFrameworkOptions(currentTestType);
+
     // Show/hide E2E framework select based on initial test type
     const isE2E = elements.testTypeSelect.value === 'e2e';
     const e2eGroup = document.getElementById('e2eFrameworkGroup');
     if (e2eGroup) {
         e2eGroup.style.display = isE2E ? 'block' : 'none';
     }
-    
+
     // Populate model dropdown
     populateModelSelect();
 }
@@ -334,11 +339,27 @@ function setupEventListeners() {
     // Test type change
     if (elements.testTypeSelect) {
         elements.testTypeSelect.addEventListener('change', (e) => {
-            const isE2E = e.target.value === 'e2e';
+            const testType = e.target.value;
+            const isE2E = testType === 'e2e';
             const e2eGroup = document.getElementById('e2eFrameworkGroup');
+
             if (e2eGroup) {
                 e2eGroup.style.display = isE2E ? 'block' : 'none';
             }
+
+            // Update framework options based on test type
+            updateFrameworkOptions(testType);
+        });
+    }
+
+    // Framework selection handler
+    if (elements.testFrameworkSelect) {
+        elements.testFrameworkSelect.addEventListener('change', (e) => {
+            const framework = e.target.value;
+            console.log(`Selected framework: ${framework}`);
+
+            // Show framework-specific hints or settings if needed
+            showFrameworkInfo(framework);
         });
     }
     
@@ -423,6 +444,7 @@ async function handleGenerate() {
         // Get generation options
         const options = {
             testType: elements.testTypeSelect?.value || 'unit',
+            testFramework: elements.testFrameworkSelect?.value || 'auto',
             testMode: elements.testModeSelect?.value || 'implementation',
             contextLevel: elements.contextLevelSelect?.value || 'smart',
             model: elements.modelSelect?.value || 'gpt-4o-mini',
@@ -998,6 +1020,149 @@ function showContextVerification(verification) {
     
     // Show the verification panel
     contextVerificationPanel.style.display = 'block';
+}
+
+/**
+ * Update framework options based on selected test type
+ */
+function updateFrameworkOptions(testType) {
+    if (!elements.testFrameworkSelect) return;
+
+    const frameworks = {
+        unit: ['auto', 'jest', 'vitest', 'mocha', 'jasmine', 'qunit', 'ava', 'pytest', 'junit', 'nunit', 'rspec', 'go-test'],
+        integration: ['auto', 'jest', 'vitest', 'mocha', 'pytest', 'junit', 'nunit', 'rspec', 'go-test'],
+        api: ['auto', 'jest', 'vitest', 'mocha', 'pytest', 'junit', 'nunit', 'rspec'],
+        e2e: ['auto', 'playwright', 'cypress'],
+        all: ['auto', 'jest', 'vitest', 'mocha', 'jasmine', 'qunit', 'ava', 'playwright', 'cypress', 'pytest', 'junit', 'nunit', 'rspec', 'go-test']
+    };
+
+    const availableFrameworks = frameworks[testType] || frameworks.unit;
+    const currentValue = elements.testFrameworkSelect.value;
+
+    // Clear existing options
+    elements.testFrameworkSelect.innerHTML = '';
+
+    // Add new options
+    if (testType === 'e2e') {
+        // For E2E tests, show E2E frameworks
+        const option = document.createElement('option');
+        option.value = 'auto';
+        option.textContent = 'Auto-Detect';
+        option.selected = currentValue === 'auto';
+        elements.testFrameworkSelect.appendChild(option);
+
+        const e2eGroup = document.createElement('optgroup');
+        e2eGroup.label = 'End-to-End Frameworks';
+
+        const e2eFrameworks = [
+            { value: 'playwright', text: 'Playwright' },
+            { value: 'cypress', text: 'Cypress' }
+        ];
+
+        e2eFrameworks.forEach(fw => {
+            const opt = document.createElement('option');
+            opt.value = fw.value;
+            opt.textContent = fw.text;
+            opt.selected = currentValue === fw.value;
+            e2eGroup.appendChild(opt);
+        });
+
+        elements.testFrameworkSelect.appendChild(e2eGroup);
+    } else {
+        // For other test types, show all relevant frameworks
+        addFrameworkOption('auto', 'Auto-Detect', currentValue === 'auto');
+
+        // JavaScript/TypeScript frameworks
+        const jsGroup = document.createElement('optgroup');
+        jsGroup.label = 'JavaScript/TypeScript';
+
+        const jsFrameworks = [
+            { value: 'jest', text: 'Jest' },
+            { value: 'vitest', text: 'Vitest' },
+            { value: 'mocha', text: 'Mocha' },
+            { value: 'jasmine', text: 'Jasmine' },
+            { value: 'qunit', text: 'QUnit' },
+            { value: 'ava', text: 'Ava' }
+        ];
+
+        jsFrameworks.forEach(fw => {
+            if (availableFrameworks.includes(fw.value)) {
+                const opt = document.createElement('option');
+                opt.value = fw.value;
+                opt.textContent = fw.text;
+                opt.selected = currentValue === fw.value;
+                jsGroup.appendChild(opt);
+            }
+        });
+
+        if (jsGroup.children.length > 0) {
+            elements.testFrameworkSelect.appendChild(jsGroup);
+        }
+
+        // Other languages
+        const otherGroup = document.createElement('optgroup');
+        otherGroup.label = 'Other Languages';
+
+        const otherFrameworks = [
+            { value: 'pytest', text: 'pytest (Python)' },
+            { value: 'junit', text: 'JUnit (Java)' },
+            { value: 'nunit', text: 'NUnit (C#)' },
+            { value: 'rspec', text: 'RSpec (Ruby)' },
+            { value: 'go-test', text: 'Go Testing' }
+        ];
+
+        otherFrameworks.forEach(fw => {
+            if (availableFrameworks.includes(fw.value)) {
+                const opt = document.createElement('option');
+                opt.value = fw.value;
+                opt.textContent = fw.text;
+                opt.selected = currentValue === fw.value;
+                otherGroup.appendChild(opt);
+            }
+        });
+
+        if (otherGroup.children.length > 0) {
+            elements.testFrameworkSelect.appendChild(otherGroup);
+        }
+    }
+}
+
+function addFrameworkOption(value, text, selected = false) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = text;
+    option.selected = selected;
+    elements.testFrameworkSelect.appendChild(option);
+}
+
+/**
+ * Show framework-specific information or hints
+ */
+function showFrameworkInfo(framework) {
+    // This could be enhanced to show framework-specific tips
+    const frameworkInfo = {
+        jest: 'Jest: Popular JavaScript testing framework with built-in mocking',
+        vitest: 'Vitest: Fast unit testing framework powered by Vite',
+        mocha: 'Mocha: Flexible JavaScript test framework with various assertion libraries',
+        jasmine: 'Jasmine: Behavior-driven testing framework for JavaScript',
+        playwright: 'Playwright: Modern end-to-end testing for web applications',
+        cypress: 'Cypress: JavaScript-based E2E testing framework',
+        pytest: 'pytest: Python testing framework with powerful fixtures',
+        junit: 'JUnit: Standard unit testing framework for Java',
+        nunit: 'NUnit: Unit testing framework for .NET languages',
+        rspec: 'RSpec: Behavior-driven testing framework for Ruby',
+        qunit: 'QUnit: JavaScript unit testing framework',
+        ava: 'Ava: Futuristic JavaScript testing framework',
+        'go-test': 'Go Testing: Built-in testing package for Go language'
+    };
+
+    const info = frameworkInfo[framework];
+    if (info && framework !== 'auto') {
+        console.log(`Framework selected: ${info}`);
+
+        // Could show a tooltip or info panel here
+        // For now, just log it for debugging
+    }
 }
 
 // Initialize when DOM is ready

@@ -615,7 +615,7 @@ class ContextAnalyzer {
             }
             
             // Updated regex to handle more GitLab URL patterns including blob, merge requests, tree, etc.
-            const urlParts = url.match(/gitlab\.com\/([^/]+\/[^/]+)(?:\/-\/(?:blob|tree|merge_requests|issues|commits)\/([^/]+)\/?(.*?))?(?:\?.*)?$/);
+            const urlParts = url.match(/gitlab\.com\/([\w.-]+(?:\/[\w.-]+)*?)(?:\/-\/(?:blob|tree|merge_requests|issues|commits)\/([^/]+)\/?(.*?))?(?:\?.*)?$/);
             if (!urlParts) {
                 console.warn('GitLab URL pattern not recognized:', url);
                 return;
@@ -1203,7 +1203,7 @@ class ContextAnalyzer {
                 return;
             }
             
-            const urlParts = url.match(/gitlab\.com\/([^/]+\/[^/]+)(?:\/-\/(?:blob|tree|merge_requests|issues|commits)\/([^/]+)\/?(.*?))?(?:\?.*)?$/);
+            const urlParts = url.match(/gitlab\.com\/([\w.-]+(?:\/[\w.-]+)*?)(?:\/-\/(?:blob|tree|merge_requests|issues|commits)\/([^/]+)\/?(.*?))?(?:\?.*)?$/);
             if (!urlParts) {
                 console.warn('GitLab URL pattern not recognized:', url);
                 return;

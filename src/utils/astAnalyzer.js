@@ -18,17 +18,17 @@ export class ASTAnalyzer {
      */
     async initializeParsers() {
         try {
-            // JavaScript/TypeScript parser using Acorn-like functionality
+            // JavaScript/TypeScript parser using available functionality
             this.parsers.set('javascript', new JavaScriptParser());
             this.parsers.set('typescript', new TypeScriptParser());
 
-            // Python parser (basic implementation)
+            // Python parser
             this.parsers.set('python', new PythonParser());
 
-            // Java parser (basic implementation)
+            // Java parser
             this.parsers.set('java', new JavaParser());
 
-            console.log('AST parsers initialized');
+            console.log('AST parsers initialized for multi-language support');
         } catch (error) {
             console.error('Failed to initialize parsers:', error);
         }
