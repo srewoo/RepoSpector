@@ -1,0 +1,87 @@
+{
+  "name": "ai-RepoSpector",
+  "version": "1.0.1",
+  "description": "AI-powered Chrome extension for generating comprehensive test cases from code",
+  "author": "AI RepoSpector Team",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "jest",
+    "test:coverage": "jest --coverage",
+    "lint": "eslint src/**/*.js test/**/*.js",
+    "lint:fix": "eslint src/**/*.js test/**/*.js --fix",
+    "build": "webpack",
+    "build:dev": "webpack --mode development",
+    "build:watch": "webpack --mode development --watch",
+    "package": "npm run build && mkdir -p build && cd dist && zip -r ../build/ai-RepoSpector.zip .",
+    "validate": "npm run lint && npm test",
+    "prepackage": "npm run validate",
+    "start": "npm run build:watch"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.23.0",
+    "@babel/preset-env": "^7.23.0",
+    "@testing-library/jest-dom": "^6.1.4",
+    "@types/chrome": "^0.0.251",
+    "@types/jest": "^29.5.8",
+    "@types/node": "^20.9.0",
+    "babel-jest": "^29.7.0",
+    "babel-loader": "^10.0.0",
+    "copy-webpack-plugin": "^13.0.0",
+    "eslint": "^8.52.0",
+    "jest": "^29.7.0",
+    "jest-environment-jsdom": "^29.7.0",
+    "typescript": "^5.2.2",
+    "webpack": "^5.99.9",
+    "webpack-cli": "^6.0.1"
+  },
+  "jest": {
+    "testEnvironment": "jsdom",
+    "setupFilesAfterEnv": [
+      "<rootDir>/test/setup.js"
+    ],
+    "moduleNameMapper": {
+      "^@/(.*)$": "<rootDir>/src/$1"
+    },
+    "transform": {
+      "^.+\\.js$": "babel-jest"
+    },
+    "transformIgnorePatterns": [
+      "node_modules/(?!(@testing-library/jest-dom)/)"
+    ],
+    "collectCoverageFrom": [
+      "src/**/*.js",
+      "!src/**/*.test.js"
+    ]
+  },
+  "eslintConfig": {
+    "env": {
+      "browser": true,
+      "es2021": true,
+      "jest": true,
+      "webextensions": true
+    },
+    "extends": "eslint:recommended",
+    "parserOptions": {
+      "ecmaVersion": "latest",
+      "sourceType": "module"
+    },
+    "rules": {
+      "no-console": [
+        "warn",
+        {
+          "allow": [
+            "warn",
+            "error"
+          ]
+        }
+      ],
+      "no-unused-vars": [
+        "error",
+        {
+          "argsIgnorePattern": "^_"
+        }
+      ]
+    }
+  }
+}

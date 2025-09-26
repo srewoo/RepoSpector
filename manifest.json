@@ -1,0 +1,74 @@
+{
+    "manifest_version": 3,
+    "name": "RepoSpector",
+    "version": "2.0.0",
+    "description": "Because your code deserves a safety net",
+    "permissions": [
+        "activeTab",
+        "storage",
+        "scripting"
+    ],
+    "host_permissions": [
+        "https://*/*",
+        "http://*/*"
+    ],
+    "action": {
+        "default_popup": "pages/popup.html",
+        "default_icon": {
+            "16": "assets/icons/icon.png",
+            "48": "assets/icons/icon.png",
+            "128": "assets/icons/icon.png"
+        }
+    },
+    "background": {
+        "service_worker": "background.js",
+        "type": "module"
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "https://github.com/*",
+                "https://gitlab.com/*",
+                "https://bitbucket.org/*",
+                "https://dev.azure.com/*",
+                "https://*.visualstudio.com/*",
+                "https://sourceforge.net/*",
+                "https://codeberg.org/*",
+                "https://*.gitea.io/*",
+                "https://*.gitea.com/*",
+                "https://git.sr.ht/*",
+                "https://*.pagure.io/*"
+            ],
+            "js": ["content.js"],
+            "type": "module",
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "https://*/*",
+                "http://*/*"
+            ],
+            "js": ["content.js"],
+            "type": "module",
+            "run_at": "document_idle",
+            "all_frames": false
+        }
+    ],
+    "icons": {
+        "16": "assets/icons/icon.png",
+        "48": "assets/icons/icon.png",
+        "128": "assets/icons/icon.png"
+    },
+    "web_accessible_resources": [
+        {
+            "resources": [
+                "*.js",
+                "assets/*"
+            ],
+            "matches": ["<all_urls>"]
+        }
+    ],
+    "content_security_policy": {
+        "extension_pages": "script-src 'self'; object-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://api.openai.com https://api.github.com https://gitlab.com https://api.bitbucket.org https://dev.azure.com https://raw.githubusercontent.com https://sourceforge.net https://codeberg.org https://git.sr.ht https://*.gitea.io https://*.gitea.com https://*.pagure.io; font-src 'self';"
+    }
+}
