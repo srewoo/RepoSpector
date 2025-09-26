@@ -76,13 +76,13 @@ export class TestGenerator {
             const {
                 testTypes = ['unit'],
                 framework = 'auto',
-                includeSetup = true,
-                generateMocks = true,
-                coverage = 'comprehensive',
-                ensureAllFunctions = true,
+                _includeSetup = true,
+                _generateMocks = true,
+                _coverage = 'comprehensive',
+                _ensureAllFunctions = true,
                 validateQuality = true,
-                compileCheck = true,
-                maxRetries = 3
+                _compileCheck = true,
+                _maxRetries = 3
             } = options;
 
             console.log('🚀 Starting enhanced test suite generation with Smart AST Analysis...');
@@ -985,7 +985,7 @@ private {{className}} {{instanceName}};`;
         console.warn('Using fallback test suite generation');
 
         const framework = options.framework || 'jest';
-        const testTypes = options.testTypes || ['unit'];
+        const _testTypes = options.testTypes || ['unit'];
 
         // Create basic test structure based on detected functions/classes
         const fallbackTests = [];
@@ -1077,7 +1077,7 @@ private {{className}} {{instanceName}};`;
      * Enhanced helper methods for the new functionality
      */
 
-    async validateTestQuality(testResults) {
+    async validateTestQuality(_testResults) {
         return {
             score: 85, // Default high score
             coverage: 'high',

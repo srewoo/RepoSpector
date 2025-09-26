@@ -257,10 +257,10 @@ class BackgroundService {
             });
 
             // Generate intelligent test suite using the enhanced TestGenerator
-            let testSuiteResults;
+            let _testSuiteResults;
             try {
                 // Try enhanced generation first
-                testSuiteResults = await this.testGenerator.generateEnhancedTestSuite(
+                _testSuiteResults = await this.testGenerator.generateEnhancedTestSuite(
                     { code: extractedCode, language: 'javascript', ...enhancedContext },
                     {
                         testTypes: Array.isArray(options.testType) ? options.testType : [options.testType || 'unit'],
@@ -279,7 +279,7 @@ class BackgroundService {
             } catch (error) {
                 console.warn('Enhanced generation failed, falling back to standard generation:', error);
                 // Fallback to original method
-                testSuiteResults = await this.testGenerator.generateTestSuite(enhancedContext, {
+                _testSuiteResults = await this.testGenerator.generateTestSuite(enhancedContext, {
                     testTypes: Array.isArray(options.testType) ? options.testType : [options.testType || 'unit'],
                     framework: options.testFramework || 'auto',
                     includeSetup: true,

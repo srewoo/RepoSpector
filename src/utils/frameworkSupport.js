@@ -358,7 +358,7 @@ class BaseFramework {
         };
     }
 
-    generateBasicIntegrationTests(codeAnalysis, _options) {
+    generateBasicIntegrationTests(_codeAnalysis, _options) {
         return [{
             type: 'integration',
             description: 'Basic integration test template',
@@ -366,7 +366,7 @@ class BaseFramework {
         }];
     }
 
-    generateBasicE2ETests(codeAnalysis, _options) {
+    generateBasicE2ETests(_codeAnalysis, _options) {
         return [{
             type: 'e2e',
             description: 'Basic E2E test template',
@@ -374,7 +374,7 @@ class BaseFramework {
         }];
     }
 
-    generateBasicAPITests(codeAnalysis, _options) {
+    generateBasicAPITests(_codeAnalysis, _options) {
         return [{
             type: 'api',
             description: 'Basic API test template',
@@ -793,7 +793,7 @@ class PlaywrightFramework extends BaseFramework {
 
         if (count > 0) {
             await navLinks.first().click();
-            await expect(page).toHaveURL(/.*\/.+/);
+            await expect(page).toHaveURL(/.*.+/);
         }
     });
 });`;
