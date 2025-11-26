@@ -18,7 +18,8 @@ export class EncryptionService {
      * Get crypto object that works in both window and service worker contexts
      */
     getCrypto() {
-        return typeof window !== 'undefined' ? window.crypto : crypto;
+        // Service worker safe - use globalThis which works everywhere
+        return globalThis.crypto || self.crypto || crypto;
     }
 
     /**
@@ -421,7 +422,7 @@ export class EncryptionService {
             event,
             details,
             userAgent: navigator.userAgent,
-            url: window.location.href
+            url: globalThis.location?.href || 'service-worker'
         };
 
         this.auditLog.push(logEntry);

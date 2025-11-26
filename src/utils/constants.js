@@ -71,7 +71,7 @@ const MODELS = {
         name: 'GPT-4o Mini',
         provider: LLM_PROVIDERS.OPENAI,
         modelId: 'gpt-4o-mini',
-        maxTokens: 128000,
+        maxTokens: 16000,
         contextWindow: 128000,
         costPer1kTokens: { input: 0.00015, output: 0.0006 },
         supportsImages: false,
@@ -82,7 +82,7 @@ const MODELS = {
         name: 'GPT-4o',
         provider: LLM_PROVIDERS.OPENAI,
         modelId: 'gpt-4o',
-        maxTokens: 128000,
+        maxTokens: 16000,
         contextWindow: 128000,
         costPer1kTokens: { input: 0.005, output: 0.015 },
         supportsImages: true,
@@ -93,7 +93,7 @@ const MODELS = {
         name: 'GPT-4 Turbo',
         provider: LLM_PROVIDERS.OPENAI,
         modelId: 'gpt-4-turbo-preview',
-        maxTokens: 128000,
+        maxTokens: 16000,
         contextWindow: 128000,
         costPer1kTokens: { input: 0.01, output: 0.03 },
         supportsImages: true,
@@ -137,11 +137,23 @@ const MODELS = {
     },
 
     // Google Models
+    'google:gemini-2.0-flash': {
+        name: 'Gemini 2.0 Flash',
+        provider: LLM_PROVIDERS.GOOGLE,
+        modelId: 'gemini-2.0-flash-exp',
+        maxTokens: 16000,
+        contextWindow: 1000000,
+        costPer1kTokens: { input: 0, output: 0 },
+        supportsImages: true,
+        supportsCode: true,
+        quality: 'premium',
+        speed: 'fast'
+    },
     'google:gemini-1.5-pro': {
         name: 'Gemini 1.5 Pro',
         provider: LLM_PROVIDERS.GOOGLE,
         modelId: 'gemini-1.5-pro-latest',
-        maxTokens: 8192,
+        maxTokens: 16000,
         contextWindow: 2000000,
         costPer1kTokens: { input: 0.00125, output: 0.005 },
         supportsImages: true,
@@ -152,7 +164,7 @@ const MODELS = {
         name: 'Gemini 1.5 Flash',
         provider: LLM_PROVIDERS.GOOGLE,
         modelId: 'gemini-1.5-flash-latest',
-        maxTokens: 8192,
+        maxTokens: 16000,
         contextWindow: 1000000,
         costPer1kTokens: { input: 0.000075, output: 0.0003 },
         supportsImages: true,
@@ -174,21 +186,44 @@ const MODELS = {
     },
 
     // Mistral Models
+    'mistral:mistral-large-latest': {
+        name: 'Mistral Large',
+        provider: LLM_PROVIDERS.MISTRAL,
+        modelId: 'mistral-large-latest',
+        maxTokens: 16000,
+        contextWindow: 128000,
+        costPer1kTokens: { input: 0.002, output: 0.006 },
+        supportsImages: false,
+        supportsCode: true,
+        quality: 'premium'
+    },
     'mistral:mixtral-8x7b': {
         name: 'Mixtral 8x7B',
         provider: LLM_PROVIDERS.MISTRAL,
-        modelId: 'mistral-large-latest',
-        maxTokens: 4096,
+        modelId: 'open-mixtral-8x7b',
+        maxTokens: 16000,
         contextWindow: 32768,
-        costPer1kTokens: { input: 0.004, output: 0.012 },
+        costPer1kTokens: { input: 0.0007, output: 0.0007 },
         supportsImages: false,
         supportsCode: true,
         quality: 'high'
     },
 
     // Groq Models (Fast)
+    'groq:llama-3.3-70b': {
+        name: 'Llama 3.3 70B (Groq)',
+        provider: LLM_PROVIDERS.GROQ,
+        modelId: 'llama-3.3-70b-versatile',
+        maxTokens: 8192,
+        contextWindow: 128000,
+        costPer1kTokens: { input: 0.00059, output: 0.00079 },
+        supportsImages: false,
+        supportsCode: true,
+        quality: 'premium',
+        speed: 'ultrafast'
+    },
     'groq:llama3-70b': {
-        name: 'Llama 3 70B (Groq)',
+        name: 'Llama 3.1 70B (Groq)',
         provider: LLM_PROVIDERS.GROQ,
         modelId: 'llama3-70b-8192',
         maxTokens: 8192,
@@ -303,31 +338,44 @@ const PERFORMANCE_CONFIG = {
 };
 
 const CODE_SELECTORS = [
-    // GitHub
+    // GitHub (updated for 2024/2025 UI)
+    '[data-testid="code-editor"]',
+    '[data-testid="blob-viewer-file-content"]',
+    '[data-hpc="true"]', // GitHub's new code view
+    '.react-code-text',
+    '.react-blob-view-code-line-content',
     '#fileHolder',
     '#read-only-cursor-text-area',
-    '[data-testid="blob-viewer-file-content"]',
     '.blob-code-inner',
     '.blob-code-content',
     'td.blob-code',
     '.js-file-line-container',
     '.diff-table',
-    
-    // GitLab
+    '.file-diff',
+    '[data-split-pane="blob-content"]',
+
+    // GitLab (updated selectors)
     '[data-testid="blob-content"] pre code',
     '[data-testid="blob-content"] pre',
     '[data-testid="source-viewer"] pre',
+    '[data-testid="source-editor"]',
     '.blob-content pre code',
     '.blob-content pre',
     '.source-viewer pre',
     '.highlight pre code',
     '.code.highlight',
     '.diff-content',
-    
+    '.gl-diff-file-content',
+
     // Bitbucket
     '.refract-content-container',
     '.source',
-    
+    '[data-qa="bui-code-block"]',
+
+    // Azure DevOps
+    '.monaco-editor',
+    '.file-content',
+
     // Generic code blocks
     'pre code',
     'pre.highlight',
@@ -344,16 +392,18 @@ const CODE_SELECTORS = [
     '.language-php',
     '.language-ruby',
     '.language-swift',
-    
+
     // CodeMirror
     '.CodeMirror-code',
-    
+    '.cm-content',
+
     // Monaco Editor
     '.monaco-editor .view-lines',
-    
+    '.monaco-editor-background',
+
     // Ace Editor
     '.ace_content',
-    
+
     // Generic
     'code',
     'pre',

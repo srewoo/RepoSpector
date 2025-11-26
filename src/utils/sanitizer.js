@@ -8,7 +8,7 @@ export class Sanitizer {
             apiKey: 1000,
             filename: 255,
             selector: 500,
-            customInput: 10000
+            customInput: 500000  // Increased to 500KB for large code files
         };
     }
 

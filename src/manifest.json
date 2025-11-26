@@ -1,0 +1,67 @@
+{
+    "manifest_version": 3,
+    "name": "RepoSpector",
+    "version": "3.0.0",
+    "description": "AI-powered code analysis and test generation for GitHub, GitLab, and more",
+    "permissions": [
+        "activeTab",
+        "storage",
+        "scripting"
+    ],
+    "host_permissions": [
+        "https://*/*",
+        "http://*/*"
+    ],
+    "action": {
+        "default_popup": "src/popup/index.html",
+        "default_icon": {
+            "16": "assets/icons/icon.png",
+            "48": "assets/icons/icon.png",
+            "128": "assets/icons/icon.png"
+        }
+    },
+    "background": {
+        "service_worker": "assets/background.js"
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "https://github.com/*",
+                "https://gitlab.com/*",
+                "https://bitbucket.org/*",
+                "https://dev.azure.com/*",
+                "https://*.visualstudio.com/*",
+                "https://sourceforge.net/*",
+                "https://codeberg.org/*",
+                "https://*.gitea.io/*",
+                "https://*.gitea.com/*",
+                "https://git.sr.ht/*",
+                "https://*.pagure.io/*"
+            ],
+            "js": [
+                "assets/content.js"
+            ],
+            "run_at": "document_idle",
+            "all_frames": false
+        }
+    ],
+    "icons": {
+        "16": "assets/icons/icon.png",
+        "48": "assets/icons/icon.png",
+        "128": "assets/icons/icon.png"
+    },
+    "web_accessible_resources": [
+        {
+            "resources": [
+                "assets/*",
+                "src/popup/*"
+            ],
+            "matches": [
+                "<all_urls>"
+            ]
+        }
+    ],
+    "content_security_policy": {
+        "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' http://localhost:* https://api.openai.com https://api.github.com https://gitlab.com https://api.bitbucket.org https://dev.azure.com https://raw.githubusercontent.com https://sourceforge.net https://codeberg.org https://git.sr.ht https://*.gitea.io https://*.gitea.com https://*.pagure.io https://huggingface.co https://*.huggingface.co https://cdn-lfs.huggingface.co https://cas-bridge.xethub.hf.co https://*.xethub.hf.co https://cdn.jsdelivr.net https://*.jsdelivr.net; font-src 'self';"
+    }
+}

@@ -1,11 +1,27 @@
 // Context analyzer for smart test generation
 
-class ContextAnalyzer {
+// Forward declaration - RateLimiter is defined at the end of this file
+let RateLimiter;
+
+export class ContextAnalyzer {
     constructor() {
         this.cache = new Map();
-        this.rateLimiter = new RateLimiter();
+        // Initialize RateLimiter only if it's been defined
+        this.rateLimiter = null; // Will be initialized after class definitions
         this.MAX_CONTEXT_TOKENS = 4000; // Reserve tokens for context
         this.MAX_FILES_TO_ANALYZE = 10; // Limit for performance
+        this.ragService = null;
+    }
+
+    setRagService(service) {
+        this.ragService = service;
+    }
+
+    // Initialize rate limiter - call this after the class is loaded
+    initRateLimiter() {
+        if (!this.rateLimiter && RateLimiter) {
+            this.rateLimiter = new RateLimiter();
+        }
     }
 
     /**
@@ -15,11 +31,7 @@ class ContextAnalyzer {
      * @returns {object} Enhanced context for test generation
      */
     async analyzeWithContext(code, options = {}) {
-        const {
-            url = window.location.href,
-            platform = this.detectPlatform(url),
-            level = 'smart' // 'minimal', 'smart', 'full'
-        } = options;
+        const { url, level = 'smart', platform } = options;
 
         // Ensure we have a valid URL
         if (!url) {
@@ -47,6 +59,24 @@ class ContextAnalyzer {
             projectPatterns: {},
             tokenCount: this.estimateTokens(code)
         };
+
+        // If Deep Context is enabled and RAG service is available
+        if (level === 'deep' && this.ragService) {
+            console.log('Using Deep Context (RAG)...');
+            try {
+                // Use the code itself as the query to find semantically similar chunks
+                // In a real scenario, we might want to extract keywords or use a specific query
+                const relevantChunks = await this.ragService.retrieveContext(
+                    options.repoId || 'current', // We need repoId passed in options
+                    code.substring(0, 500) // Use first 500 chars as query
+                );
+
+                context.ragContext = relevantChunks.map(c => c.content).join('\n\n');
+                context.ragSources = relevantChunks.map(c => c.filePath);
+            } catch (error) {
+                console.warn('RAG retrieval failed:', error);
+            }
+        }
 
         // Return minimal context if requested
         if (level === 'minimal') {
@@ -82,7 +112,7 @@ class ContextAnalyzer {
         if (!url || typeof url !== 'string') {
             return 'unknown';
         }
-        
+
         if (url.includes('github.com')) return 'github';
         if (url.includes('gitlab.com') || url.includes('gitlab.')) return 'gitlab';
         if (url.includes('bitbucket.org')) return 'bitbucket';
@@ -175,11 +205,11 @@ class ContextAnalyzer {
         // ES6 exports
         const namedExports = code.match(/export\s+(?:const|let|var|function|class)\s+(\w+)/g) || [];
         const defaultExport = code.match(/export\s+default\s+(\w+)/);
-        
+
         if (defaultExport) {
             exports.push({ name: 'default', type: 'default' });
         }
-        
+
         namedExports.forEach(exp => {
             const match = exp.match(/export\s+(?:const|let|var|function|class)\s+(\w+)/);
             if (match) {
@@ -200,7 +230,7 @@ class ContextAnalyzer {
                 console.warn('URL is null or undefined in enhanceWithGitHubContext');
                 return;
             }
-            
+
             const urlParts = url.match(/github\.com\/([^/]+)\/([^/]+)(?:\/blob\/([^/]+)\/(.+))?/);
             if (!urlParts) return;
 
@@ -220,7 +250,9 @@ class ContextAnalyzer {
             }
 
             // Rate limit check
-            if (!await this.rateLimiter.canMakeRequest()) {
+            // Initialize rate limiter if needed
+            this.initRateLimiter();
+            if (this.rateLimiter && !await this.rateLimiter.canMakeRequest()) {
                 console.log('GitHub API rate limit reached, using basic context');
                 return;
             }
@@ -229,28 +261,28 @@ class ContextAnalyzer {
             if (level === 'smart') {
                 // Analyze imports to determine what files to fetch
                 const relativeImports = context.imports.filter(imp => imp.isRelative);
-                
+
                 if (relativeImports.length > 0 && filePath) {
                     const currentDir = filePath.substring(0, filePath.lastIndexOf('/'));
-                    
+
                     // Fetch up to 5 most relevant imported files
                     const filesToFetch = relativeImports
                         .slice(0, 5)
                         .map(imp => this.resolveImportPath(imp.path, currentDir, filePath));
-                    
+
                     context.dependencies = await this.fetchGitHubFiles(
-                        owner, 
-                        repo, 
-                        branch, 
+                        owner,
+                        repo,
+                        branch,
                         filesToFetch.filter(Boolean),
                         context
                     );
                 }
-                
+
                 // Try to detect testing framework from package.json
                 await this.detectTestingFrameworkFromGitHub(context, owner, repo, branch);
             }
-            
+
             // For 'full' level, get broader repository context
             if (level === 'full') {
                 try {
@@ -262,23 +294,23 @@ class ContextAnalyzer {
 
                     if (treeResponse.ok) {
                         const tree = await treeResponse.json();
-                        
+
                         // Analyze repository structure
                         const analysis = this.analyzeRepoStructure(tree.tree, filePath);
-                        
+
                         // Detect testing framework
                         context.testingFramework = this.detectTestingFramework(analysis);
-                        
+
                         // Detect project patterns
                         context.projectPatterns = this.detectProjectPatterns(analysis);
-                        
+
                         // For full context, also fetch test examples if available
                         if (analysis.testDirs.length > 0 && context.language) {
                             const testExamples = await this.fetchTestExamples(
-                                owner, 
-                                repo, 
-                                branch, 
-                                analysis.testDirs[0], 
+                                owner,
+                                repo,
+                                branch,
+                                analysis.testDirs[0],
                                 context.language
                             );
                             if (testExamples) {
@@ -289,7 +321,7 @@ class ContextAnalyzer {
                 } catch (error) {
                     console.error('Failed to fetch repository structure:', error);
                 }
-                
+
                 // Add detailed logging for full context verification
                 if (level === 'full') {
                     console.log('🔍 FULL CONTEXT VERIFICATION - GitHub API Enhancement:');
@@ -297,7 +329,7 @@ class ContextAnalyzer {
                     console.log('🧪 Testing Framework Detected:', context.testingFramework);
                     console.log('🔧 Project Patterns:', context.projectPatterns);
                     console.log('🧩 Test Examples:', context.testExamples ? 'Extracted' : 'None found');
-                    
+
                     // Store verification data for user inspection
                     context.fullContextVerification = {
                         timestamp: new Date().toISOString(),
@@ -346,7 +378,7 @@ class ContextAnalyzer {
 
             const path = item.path;
             const ext = path.substring(path.lastIndexOf('.') + 1);
-            
+
             // Count file types
             analysis.fileTypes[ext] = (analysis.fileTypes[ext] || 0) + 1;
 
@@ -391,7 +423,9 @@ class ContextAnalyzer {
 
         // Fetch files in parallel with token limit
         const fetchPromises = filesToFetch.map(async (path) => {
-            if (!await this.rateLimiter.canMakeRequest()) return null;
+            // Initialize rate limiter if needed
+            this.initRateLimiter();
+            if (this.rateLimiter && !await this.rateLimiter.canMakeRequest()) return null;
 
             try {
                 const fileUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`;
@@ -403,7 +437,7 @@ class ContextAnalyzer {
 
                 const data = await response.json();
                 const content = atob(data.content);
-                
+
                 // Only include if it doesn't exceed token limit
                 const tokens = this.estimateTokens(content);
                 if (context.tokenCount + tokens < this.MAX_CONTEXT_TOKENS) {
@@ -446,7 +480,7 @@ class ContextAnalyzer {
                 blockLines = [line];
             } else if (inRelevantBlock) {
                 blockLines.push(line);
-                
+
                 // End block on empty line or closing brace at start of line
                 if (line.trim() === '' || line.match(/^[}\]]/)) {
                     relevantParts.push({
@@ -556,19 +590,19 @@ class ContextAnalyzer {
     resolvePossiblePaths(importPath, currentDir, analysis) {
         const possibleExtensions = ['.js', '.ts', '.jsx', '.tsx', '/index.js', '/index.ts'];
         const basePath = currentDir ? `${currentDir}/${importPath}` : importPath;
-        
+
         const paths = [];
-        
+
         // Try exact path first
         paths.push(basePath);
-        
+
         // Try with extensions
         possibleExtensions.forEach(ext => {
             paths.push(basePath + ext);
         });
 
         // Filter to only paths that exist in the repo
-        return paths.filter(path => 
+        return paths.filter(path =>
             analysis.possibleDependencies.some(dep => dep === path || dep.startsWith(path))
         );
     }
@@ -595,7 +629,7 @@ class ContextAnalyzer {
                 console.warn('URL is null or undefined in enhanceWithGitLabContext');
                 return;
             }
-            
+
             // Check if we have a GitLab token stored for API-based enhancement
             let gitlabToken = null;
             try {
@@ -607,13 +641,13 @@ class ContextAnalyzer {
             } catch (error) {
                 console.warn('Could not retrieve GitLab token:', error);
             }
-            
+
             // If we have a token and full context is requested, use API-based enhancement
             if (gitlabToken && level === 'full') {
                 console.log('Using GitLab API for full context enhancement');
                 return await this.enhanceWithGitLabContextAPI(context, url, level, gitlabToken);
             }
-            
+
             // Updated regex to handle more GitLab URL patterns including blob, merge requests, tree, etc.
             const urlParts = url.match(/gitlab\.com\/([\w.-]+(?:\/[\w.-]+)*?)(?:\/-\/(?:blob|tree|merge_requests|issues|commits)\/([^/]+)\/?(.*?))?(?:\?.*)?$/);
             if (!urlParts) {
@@ -630,7 +664,7 @@ class ContextAnalyzer {
                 // Extract directory path for repository navigation
                 const dirPath = filePath.substring(0, filePath.lastIndexOf('/'));
                 context.currentDirectory = dirPath;
-                
+
                 // For smart level, try to get some repository context
                 if (level === 'smart') {
                     await this.extractRepositoryContextFromPath(context, projectPath, branch || 'master', dirPath);
@@ -647,18 +681,20 @@ class ContextAnalyzer {
             }
 
             // Rate limit check
-            if (!await this.rateLimiter.canMakeRequest()) {
+            // Initialize rate limiter if needed
+            this.initRateLimiter();
+            if (this.rateLimiter && !await this.rateLimiter.canMakeRequest()) {
                 // Rate limit reached, using basic context
                 return;
             }
 
             // Try to extract project info from the page itself
             const projectInfo = this.extractGitLabProjectInfo();
-            
+
             if (projectInfo) {
                 context.testingFramework = this.detectTestingFrameworkFromPage(projectInfo);
                 context.projectPatterns = this.detectProjectPatternsFromPage(projectInfo);
-                
+
                 // For smart and full levels, extract more comprehensive context
                 if (level === 'smart' || level === 'full') {
                     context.repositoryStructure = {
@@ -676,7 +712,7 @@ class ContextAnalyzer {
                 try {
                     console.log('Using GitLab API for smart context enhancement');
                     const projectId = encodeURIComponent(projectPath);
-                    
+
                     // Get basic project information
                     const projectResponse = await fetch(`https://gitlab.com/api/v4/projects/${projectId}`, {
                         headers: {
@@ -728,13 +764,13 @@ class ContextAnalyzer {
             // Start from current directory and work backwards to find relevant context
             const pathSegments = currentPath.split('/').filter(Boolean);
             const contextPaths = [];
-            
+
             // Generate paths going up the directory tree
             for (let i = pathSegments.length; i >= 0; i--) {
                 const path = pathSegments.slice(0, i).join('/');
                 contextPaths.push(path);
             }
-            
+
             // Look for important files at each level
             const _importantFiles = [
                 'package.json',
@@ -750,7 +786,7 @@ class ContextAnalyzer {
                 'yarn.lock',
                 'package-lock.json'
             ];
-            
+
             context.repositoryStructure = {
                 projectPath,
                 branch,
@@ -759,11 +795,11 @@ class ContextAnalyzer {
                 configFiles: [],
                 testDirectories: []
             };
-            
+
             // For now, we'll extract what we can from the current page
             // In a full implementation, we'd make API calls to GitLab to fetch these files
             this.extractVisibleRepositoryInfo(context);
-            
+
         } catch (error) {
             console.error('Error extracting repository context from path:', error);
         }
@@ -774,6 +810,11 @@ class ContextAnalyzer {
      */
     extractVisibleRepositoryInfo(context) {
         try {
+            // Skip if not in browser context (e.g., running in service worker)
+            if (typeof document === 'undefined') {
+                return;
+            }
+
             // Look for breadcrumb navigation to understand repository structure
             const breadcrumbs = document.querySelectorAll('.breadcrumb-item, .breadcrumb-link');
             if (breadcrumbs.length > 0) {
@@ -782,30 +823,30 @@ class ContextAnalyzer {
                     .filter(Boolean);
                 context.repositoryStructure.breadcrumbs = breadcrumbPaths;
             }
-            
+
             // Look for file tree in sidebar or main content
             const fileTreeItems = document.querySelectorAll(
                 '.tree-item-file-name, .file-row-name, .tree-item .str-truncated, [data-testid="file-tree-item"]'
             );
-            
+
             if (fileTreeItems.length > 0) {
                 const visibleFiles = Array.from(fileTreeItems)
                     .map(el => el.textContent?.trim())
                     .filter(Boolean)
                     .slice(0, 20); // Limit to avoid too much data
-                
+
                 context.repositoryStructure.discoveredFiles = visibleFiles;
-                
+
                 // Identify config and test files
-                context.repositoryStructure.configFiles = visibleFiles.filter(file => 
+                context.repositoryStructure.configFiles = visibleFiles.filter(file =>
                     file.includes('config') || file.includes('package.json') || file.includes('tsconfig')
                 );
-                
+
                 context.repositoryStructure.testDirectories = visibleFiles.filter(file =>
                     file.includes('test') || file.includes('spec') || file.includes('__tests__')
                 );
             }
-            
+
             // Look for language information
             const languageStats = document.querySelectorAll('.language-color, [data-testid="repository-language"]');
             if (languageStats.length > 0) {
@@ -814,7 +855,7 @@ class ContextAnalyzer {
                     .filter(Boolean);
                 context.repositoryStructure.languages = languages;
             }
-            
+
         } catch (error) {
             console.error('Error extracting visible repository info:', error);
         }
@@ -825,6 +866,11 @@ class ContextAnalyzer {
      */
     extractGitLabProjectInfo() {
         try {
+            // Skip if not in browser context (e.g., running in service worker)
+            if (typeof document === 'undefined') {
+                return null;
+            }
+
             // Look for file tree or project files
             const fileTreeItems = document.querySelectorAll('.tree-item');
             const files = Array.from(fileTreeItems).map(item => {
@@ -857,18 +903,18 @@ class ContextAnalyzer {
         if (!projectInfo || !projectInfo.files) return null;
 
         const { files } = projectInfo;
-        
+
         // Check for common test config files
         if (files.some(f => f.includes('jest.config'))) return 'jest';
         if (files.some(f => f.includes('mocha.opts') || f === '.mocharc.js')) return 'mocha';
         if (files.some(f => f.includes('vitest.config'))) return 'vitest';
         if (files.some(f => f.includes('pytest.ini') || f === 'setup.cfg')) return 'pytest';
         if (files.some(f => f.includes('phpunit.xml'))) return 'phpunit';
-        
+
         // Check for test directories
         if (files.some(f => f.includes('__tests__'))) return 'jest';
         if (files.some(f => f.includes('spec/') && projectInfo.languages?.includes('ruby'))) return 'rspec';
-        
+
         return null;
     }
 
@@ -879,7 +925,7 @@ class ContextAnalyzer {
         if (!projectInfo) return {};
 
         const { files, languages } = projectInfo;
-        
+
         return {
             hasTypeScript: files.some(f => f.endsWith('.ts') || f.endsWith('.tsx')),
             hasReact: files.some(f => f.endsWith('.jsx') || f.endsWith('.tsx')),
@@ -898,13 +944,13 @@ class ContextAnalyzer {
             if (files.some(f => f === 'vue.config.js')) return 'vue';
             return 'node';
         }
-        
+
         if (languages?.includes('python')) return 'python';
         if (languages?.includes('java')) return 'java';
         if (languages?.includes('c#')) return 'csharp';
         if (languages?.includes('ruby')) return 'ruby';
         if (languages?.includes('go')) return 'go';
-        
+
         return 'unknown';
     }
 
@@ -914,7 +960,7 @@ class ContextAnalyzer {
     resolveImportPath(importPath, currentDir, _currentFile) {
         // Remove quotes if present
         importPath = importPath.replace(/['"]/g, '');
-        
+
         // Handle different import patterns
         if (importPath.startsWith('./')) {
             importPath = importPath.substring(2);
@@ -927,10 +973,10 @@ class ContextAnalyzer {
             }
             currentDir = parts.join('/');
         }
-        
+
         // Construct the full path
         const basePath = currentDir ? `${currentDir}/${importPath}` : importPath;
-        
+
         // Try common extensions
         const extensions = ['.js', '.ts', '.jsx', '.tsx', '.mjs', '.cjs'];
         const possiblePaths = [
@@ -939,31 +985,33 @@ class ContextAnalyzer {
             ...extensions.map(ext => basePath + ext),
             ...extensions.map(ext => `${basePath}/index${ext}`)
         ];
-        
+
         // Return the most likely path (without extension checking since we can't access the file system)
         return possiblePaths[0];
     }
-    
+
     /**
      * Fetch files from GitHub
      */
     async fetchGitHubFiles(owner, repo, branch, filePaths, context) {
         const fetchedFiles = [];
-        
+
         for (const filePath of filePaths.slice(0, 5)) { // Limit to 5 files
-            if (!await this.rateLimiter.canMakeRequest()) break;
-            
+            // Initialize rate limiter if needed
+            this.initRateLimiter();
+            if (this.rateLimiter && !await this.rateLimiter.canMakeRequest()) break;
+
             try {
                 const fileUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${filePath}?ref=${branch}`;
                 const response = await fetch(fileUrl, {
                     headers: this.getGitHubHeaders()
                 });
-                
+
                 if (response.ok) {
                     const data = await response.json();
                     if (data.content) {
                         const content = atob(data.content);
-                        
+
                         // Only include if it doesn't exceed token limit
                         const tokens = this.estimateTokens(content);
                         if (context.tokenCount + tokens < this.MAX_CONTEXT_TOKENS) {
@@ -979,10 +1027,10 @@ class ContextAnalyzer {
                 console.error(`Failed to fetch ${filePath}:`, error);
             }
         }
-        
+
         return fetchedFiles;
     }
-    
+
     /**
      * Detect testing framework from package.json
      */
@@ -992,18 +1040,18 @@ class ContextAnalyzer {
             const response = await fetch(packageUrl, {
                 headers: this.getGitHubHeaders()
             });
-            
+
             if (response.ok) {
                 const data = await response.json();
                 if (data.content) {
                     const packageJson = JSON.parse(atob(data.content));
-                    
+
                     // Check dependencies for testing frameworks
                     const allDeps = {
                         ...packageJson.dependencies,
                         ...packageJson.devDependencies
                     };
-                    
+
                     if (allDeps.jest || allDeps['@jest/core']) {
                         context.testingFramework = 'jest';
                     } else if (allDeps.mocha) {
@@ -1015,7 +1063,7 @@ class ContextAnalyzer {
                     } else if (allDeps.jasmine) {
                         context.testingFramework = 'jasmine';
                     }
-                    
+
                     // Also check test script
                     if (!context.testingFramework && packageJson.scripts?.test) {
                         const testScript = packageJson.scripts.test;
@@ -1029,7 +1077,7 @@ class ContextAnalyzer {
             console.error('Failed to detect testing framework from package.json:', error);
         }
     }
-    
+
     /**
      * Fetch test examples from the repository
      */
@@ -1039,11 +1087,11 @@ class ContextAnalyzer {
             const response = await fetch(testDirUrl, {
                 headers: this.getGitHubHeaders()
             });
-            
+
             if (!response.ok) return null;
-            
+
             const files = await response.json();
-            
+
             // Find test files matching the language
             const testFilePatterns = {
                 javascript: /\.(test|spec)\.(js|jsx)$/,
@@ -1052,20 +1100,20 @@ class ContextAnalyzer {
                 java: /Test\.java$/,
                 csharp: /Tests?\.cs$/
             };
-            
+
             const pattern = testFilePatterns[language] || testFilePatterns.javascript;
-            const testFiles = files.filter(file => 
+            const testFiles = files.filter(file =>
                 file.type === 'file' && pattern.test(file.name)
             ).slice(0, 2); // Get up to 2 test examples
-            
+
             if (testFiles.length === 0) return null;
-            
+
             // Fetch one test file as an example
             const exampleUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${testFiles[0].path}?ref=${branch}`;
             const exampleResponse = await fetch(exampleUrl, {
                 headers: this.getGitHubHeaders()
             });
-            
+
             if (exampleResponse.ok) {
                 const data = await exampleResponse.json();
                 if (data.content) {
@@ -1080,10 +1128,10 @@ class ContextAnalyzer {
         } catch (error) {
             console.error('Failed to fetch test examples:', error);
         }
-        
+
         return null;
     }
-    
+
     /**
      * Detect testing framework from code content
      */
@@ -1106,7 +1154,7 @@ class ContextAnalyzer {
                 console.warn('URL is null or undefined in enhanceWithBitbucketContext');
                 return;
             }
-            
+
             // Basic implementation for Bitbucket
             const urlParts = url.match(/bitbucket\.org\/([^/]+)\/([^/]+)(?:\/src\/([^/]+)\/(.+))?/);
             if (!urlParts) return;
@@ -1114,7 +1162,7 @@ class ContextAnalyzer {
             const [, owner, repo, branch = 'main', filePath] = urlParts;
             context.filePath = filePath;
             context.repository = { owner, repo, branch };
-            
+
             // For now, just set basic context - can be enhanced with API calls later
             context.platform = 'bitbucket';
         } catch (error) {
@@ -1132,7 +1180,7 @@ class ContextAnalyzer {
                 console.warn('URL is null or undefined in enhanceWithAzureContext');
                 return;
             }
-            
+
             // Basic implementation for Azure DevOps
             const urlParts = url.match(/dev\.azure\.com\/([^/]+)\/([^/]+)\/_git\/([^/]+)/);
             if (!urlParts) return;
@@ -1155,7 +1203,7 @@ class ContextAnalyzer {
                 console.warn('URL is null or undefined in enhanceWithCodebergContext');
                 return;
             }
-            
+
             // Basic implementation for Codeberg (Gitea-based)
             const urlParts = url.match(/codeberg\.org\/([^/]+)\/([^/]+)(?:\/src\/branch\/([^/]+)\/(.+))?/);
             if (!urlParts) return;
@@ -1179,7 +1227,7 @@ class ContextAnalyzer {
                 console.warn('URL is null or undefined in enhanceWithGiteaContext');
                 return;
             }
-            
+
             // Basic implementation for Gitea instances
             const urlParts = url.match(/\/([^/]+)\/([^/]+)(?:\/src\/branch\/([^/]+)\/(.+))?/);
             if (!urlParts) return;
@@ -1202,7 +1250,7 @@ class ContextAnalyzer {
                 console.warn('URL is null or undefined in enhanceWithGitLabContextAPI');
                 return;
             }
-            
+
             const urlParts = url.match(/gitlab\.com\/([\w.-]+(?:\/[\w.-]+)*?)(?:\/-\/(?:blob|tree|merge_requests|issues|commits)\/([^/]+)\/?(.*?))?(?:\?.*)?$/);
             if (!urlParts) {
                 console.warn('GitLab URL pattern not recognized:', url);
@@ -1211,10 +1259,11 @@ class ContextAnalyzer {
 
             const [, projectPath, branch, filePath] = urlParts;
             const projectId = encodeURIComponent(projectPath);
-            
+
             if (!token) {
-                console.log('No GitLab token provided, falling back to web scraping method');
-                return await this.enhanceWithGitLabContext(context, url, level);
+                console.log('No GitLab token provided, skipping API enhancement');
+                // Don't call back to enhanceWithGitLabContext to avoid recursion
+                return;
             }
 
             try {
@@ -1227,8 +1276,9 @@ class ContextAnalyzer {
                 });
 
                 if (!testResponse.ok) {
-                    console.warn('GitLab token is invalid, falling back to web scraping');
-                    return await this.enhanceWithGitLabContext(context, url, level);
+                    console.warn('GitLab token is invalid, skipping API enhancement');
+                    // Don't call back to enhanceWithGitLabContext to avoid recursion
+                    return;
                 }
 
                 // Get project information
@@ -1260,9 +1310,9 @@ class ContextAnalyzer {
 
                 if (treeResponse.ok) {
                     const treeData = await treeResponse.json();
-                    
+
                     // Extract important files
-                    const importantFiles = treeData.filter(item => 
+                    const importantFiles = treeData.filter(item =>
                         item.type === 'blob' && (
                             item.name === 'package.json' ||
                             item.name === 'tsconfig.json' ||
@@ -1288,7 +1338,7 @@ class ContextAnalyzer {
                                         }
                                     }
                                 );
-                                
+
                                 if (fileResponse.ok) {
                                     const content = await fileResponse.text();
                                     return {
@@ -1306,10 +1356,10 @@ class ContextAnalyzer {
 
                     const validFiles = fileContents.filter(Boolean);
                     let testFiles = [];
-                    
+
                     if (validFiles.length > 0) {
                         context.repositoryFiles = validFiles;
-                        
+
                         // Analyze package.json for testing framework
                         const packageJson = validFiles.find(f => f.path === 'package.json');
                         if (packageJson) {
@@ -1331,7 +1381,7 @@ class ContextAnalyzer {
                             context.existingTestPatterns = this.analyzeTestPatterns(testFiles);
                         }
                     }
-                
+
                     // Set current file context
                     if (filePath) {
                         context.filePath = filePath;
@@ -1339,7 +1389,7 @@ class ContextAnalyzer {
                     }
 
                     console.log('GitLab API enhancement completed successfully');
-                    
+
                     // Add detailed logging for full context verification
                     if (level === 'full') {
                         console.log('🔍 FULL CONTEXT VERIFICATION - GitLab API Enhancement:');
@@ -1350,7 +1400,7 @@ class ContextAnalyzer {
                         console.log('🔬 Test Files Analyzed:', testFiles.length);
                         console.log('📄 Config Files:', validFiles.filter(f => f.type === 'config').map(f => f.path));
                         console.log('🧩 Test Patterns:', context.existingTestPatterns ? 'Extracted' : 'None found');
-                        
+
                         // Store verification data for user inspection
                         context.fullContextVerification = {
                             timestamp: new Date().toISOString(),
@@ -1370,14 +1420,15 @@ class ContextAnalyzer {
                 }
 
             } catch (apiError) {
-                console.warn('GitLab API request failed, falling back to web scraping:', apiError);
-                return await this.enhanceWithGitLabContext(context, url, level);
+                console.warn('GitLab API request failed:', apiError);
+                // Don't call back to enhanceWithGitLabContext to avoid recursion
+                return;
             }
 
         } catch (error) {
             console.error('Failed to enhance with GitLab API context:', error);
-            // Fallback to regular method
-            return await this.enhanceWithGitLabContext(context, url, level);
+            // Don't call back to enhanceWithGitLabContext to avoid recursion
+            return;
         }
     }
 
@@ -1386,7 +1437,7 @@ class ContextAnalyzer {
      */
     categorizeFile(filePath) {
         const path = filePath.toLowerCase();
-        
+
         if (path.includes('test') || path.includes('spec') || path.includes('__tests__')) {
             return 'test';
         }
@@ -1399,7 +1450,7 @@ class ContextAnalyzer {
         if (path.endsWith('.js') || path.endsWith('.ts') || path.endsWith('.jsx') || path.endsWith('.tsx')) {
             return 'code';
         }
-        
+
         return 'other';
     }
 
@@ -1419,7 +1470,7 @@ class ContextAnalyzer {
         if (allDeps.playwright) return 'playwright';
         if (allDeps['@testing-library/react']) return 'react-testing-library';
         if (allDeps.enzyme) return 'enzyme';
-        
+
         return null;
     }
 
@@ -1436,22 +1487,22 @@ class ContextAnalyzer {
 
         testFiles.forEach(file => {
             const content = file.content;
-            
+
             // Extract import patterns
             const imports = content.match(/import .+ from .+/g) || [];
             patterns.commonImports.push(...imports);
-            
+
             // Extract test structures
             if (content.includes('describe(')) patterns.testStructures.push('describe-it');
             if (content.includes('test(')) patterns.testStructures.push('test-function');
             if (content.includes('beforeEach(')) patterns.testStructures.push('beforeEach');
             if (content.includes('afterEach(')) patterns.testStructures.push('afterEach');
-            
+
             // Extract mocking patterns
             if (content.includes('jest.mock(')) patterns.mockingPatterns.push('jest.mock');
             if (content.includes('vi.mock(')) patterns.mockingPatterns.push('vitest.mock');
             if (content.includes('sinon.')) patterns.mockingPatterns.push('sinon');
-            
+
             // Extract assertion styles
             if (content.includes('expect(')) patterns.assertionStyles.push('expect');
             if (content.includes('assert.')) patterns.assertionStyles.push('assert');
@@ -1467,10 +1518,8 @@ class ContextAnalyzer {
     }
 }
 
-/**
- * Simple rate limiter
- */
-class RateLimiter {
+// Assign RateLimiter class to the variable
+RateLimiter = class RateLimiter {
     constructor() {
         this.requests = [];
         this.maxRequests = 60; // GitHub's rate limit
@@ -1479,18 +1528,15 @@ class RateLimiter {
 
     async canMakeRequest() {
         const now = Date.now();
-        
+
         // Remove old requests
         this.requests = this.requests.filter(time => now - time < this.windowMs);
-        
+
         if (this.requests.length < this.maxRequests) {
             this.requests.push(now);
             return true;
         }
-        
+
         return false;
     }
-}
-
-// Export the ContextAnalyzer class
-export { ContextAnalyzer };
+};

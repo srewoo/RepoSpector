@@ -1,0 +1,193 @@
+/* Floating Panel Styles - Injected into host page */
+.repospector-floating-panel {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    width: 420px;
+    max-height: calc(100vh - 40px);
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 16px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05);
+    z-index: 2147483647; /* Maximum z-index */
+    display: flex;
+    flex-direction: column;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+    color: #f1f5f9;
+    backdrop-filter: blur(20px);
+    transition: width 0.3s ease, height 0.3s ease, top 0.3s ease, right 0.3s ease;
+}
+
+/* Maximized state - double the size */
+.repospector-floating-panel.repospector-maximized {
+    width: 840px; /* 420px * 2 */
+    height: calc((100vh - 40px) * 2);
+    max-height: calc(100vh - 40px);
+    top: 20px;
+    right: 20px;
+}
+
+.repospector-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    background: rgba(255, 255, 255, 0.02);
+    border-radius: 16px 16px 0 0;
+    cursor: move; /* For dragging functionality */
+}
+
+.repospector-panel-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(139, 92, 246, 0.3) rgba(255, 255, 255, 0.05);
+}
+
+.repospector-panel-content::-webkit-scrollbar {
+    width: 6px;
+}
+
+.repospector-panel-content::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 3px;
+}
+
+.repospector-panel-content::-webkit-scrollbar-thumb {
+    background: rgba(139, 92, 246, 0.3);
+    border-radius: 3px;
+}
+
+.repospector-panel-content::-webkit-scrollbar-thumb:hover {
+    background: rgba(139, 92, 246, 0.5);
+}
+
+.repospector-icon-btn {
+    padding: 6px;
+    background: transparent;
+    border: none;
+    color: rgba(241, 245, 249, 0.7);
+    cursor: pointer;
+    border-radius: 6px;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.repospector-icon-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #f1f5f9;
+}
+
+.repospector-close-btn:hover {
+    background: rgba(239, 68, 68, 0.2);
+    color: #ef4444;
+}
+
+/* Minimized state */
+.repospector-floating-minimized {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    z-index: 2147483647;
+}
+
+.repospector-minimize-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 20px;
+    background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    color: white;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 8px 20px rgba(139, 92, 246, 0.4);
+    transition: all 0.3s;
+}
+
+.repospector-minimize-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 28px rgba(139, 92, 246, 0.5);
+}
+
+/* Toggle button (when panel is closed) */
+.repospector-toggle-btn {
+    position: fixed;
+    top: 80px;
+    right: 20px;
+    padding: 12px 16px;
+    background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    color: white;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 8px 20px rgba(139, 92, 246, 0.4);
+    z-index: 2147483646;
+    transition: all 0.3s;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.repospector-toggle-btn:hover {
+    transform: translateX(-4px);
+    box-shadow: 0 12px 28px rgba(139, 92, 246, 0.5);
+}
+
+/* Animation */
+@keyframes slideIn {
+    from {
+        transform: translateX(100%);
+        opacity: 0;
+    }
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
+}
+
+.repospector-floating-panel {
+    animation: slideIn 0.3s ease-out;
+}
+
+/* Ensure isolation from host page styles */
+.repospector-floating-panel * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+/* Override any host page styles that might interfere */
+.repospector-floating-panel,
+.repospector-floating-panel *,
+.repospector-floating-minimized,
+.repospector-floating-minimized * {
+    all: unset;
+}
+
+/* Then reapply our styles */
+.repospector-floating-panel {
+    all: initial;
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    width: 420px;
+    max-height: calc(100vh - 40px);
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 16px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05);
+    z-index: 2147483647;
+    display: flex;
+    flex-direction: column;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+    color: #f1f5f9;
+    backdrop-filter: blur(20px);
+    animation: slideIn 0.3s ease-out;
+}

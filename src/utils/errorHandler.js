@@ -343,7 +343,7 @@ export class ErrorHandler {
                 ...errorInfo,
                 severity: 'critical',
                 userAgent: navigator.userAgent,
-                url: window.location?.href || 'unknown'
+                url: (typeof window !== 'undefined' && window.location?.href) || 'service-worker'
             };
 
             // Store in Chrome storage

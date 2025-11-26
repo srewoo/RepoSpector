@@ -160,3 +160,6 @@ key.pem
 
 dist/
 build/
+.vscode/
+.qodo
+.claude
