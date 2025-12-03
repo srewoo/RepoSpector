@@ -1,6 +1,6 @@
 import { VectorStore } from './VectorStore';
 import { CodeChunker } from '../utils/chunking';
-import { TransformersEmbeddingService } from './TransformersEmbeddingService';
+import { OffscreenEmbeddingService } from './OffscreenEmbeddingService';
 
 export class RAGService {
     constructor(options = {}) {
@@ -8,13 +8,16 @@ export class RAGService {
         this.chunker = new CodeChunker();
 
         // Support for multiple embedding providers
-        this.provider = options.provider || 'openai'; // 'openai' or 'transformers'
+        this.provider = options.provider || 'local'; // 'openai' or 'local'
         this.apiKey = options.apiKey; // Only needed for OpenAI
         this.baseUrl = 'https://api.openai.com/v1';
 
         // Initialize embedding service based on provider
-        if (this.provider === 'transformers') {
-            this.embeddingService = new TransformersEmbeddingService();
+        if (this.provider === 'local') {
+            this.embeddingService = new OffscreenEmbeddingService();
+            console.log('✅ Using local embeddings (free, 100% private)');
+        } else {
+            console.log('✅ Using OpenAI embeddings (requires API key)');
         }
     }
 
@@ -25,13 +28,31 @@ export class RAGService {
     async init(onProgress) {
         await this.vectorStore.init();
 
-        // Initialize Transformers.js model if using that provider
-        if (this.provider === 'transformers' && this.embeddingService) {
+        // Initialize local embedding model if using that provider
+        if (this.provider === 'local' && this.embeddingService) {
             try {
+                console.log('🔄 Initializing local embedding model...');
                 await this.embeddingService.init(onProgress);
+                console.log('✅ Local embedding model ready!');
             } catch (error) {
-                console.error('Failed to initialize Transformers.js embedding service:', error);
-                throw new Error(`Embedding service initialization failed: ${error.message}. Please use OpenAI embedding provider in service worker context.`);
+                console.error('❌ Failed to initialize local embedding service:', error);
+                console.warn('⚠️ Falling back to manual embedding provider selection required');
+
+                // Don't throw immediately - allow graceful degradation
+                // User will need to configure OpenAI provider instead
+                this.embeddingService = null;
+
+                // Provide helpful error message - safely extract original error
+                const errMsg = error?.message || error?.toString?.() || String(error) || 'Unknown error';
+                const helpfulError = new Error(
+                    `Local embedding initialization failed. This is likely because:\n` +
+                    `1. You're in a service worker context (Transformers.js requires DOM)\n` +
+                    `2. The model download failed\n\n` +
+                    `To fix: Go to Settings and configure OpenAI embedding provider instead.\n\n` +
+                    `Original error: ${errMsg}`
+                );
+                helpfulError.isRecoverable = true;
+                throw helpfulError;
             }
         }
     }
@@ -128,11 +149,13 @@ export class RAGService {
      * @param {Array<string>} texts 
      */
     async generateEmbeddings(texts) {
-        if (this.provider === 'transformers') {
-            // Use Transformers.js (free, client-side)
+        if (this.provider === 'local') {
+            // Use local embeddings via offscreen document (free, 100% private)
+            console.log(`🔢 Generating ${texts.length} embeddings locally...`);
             return await this.embeddingService.generateEmbeddings(texts);
         } else {
             // Use OpenAI API (requires API key)
+            console.log(`🔢 Generating ${texts.length} embeddings via OpenAI...`);
             return await this.generateOpenAIEmbeddings(texts);
         }
     }

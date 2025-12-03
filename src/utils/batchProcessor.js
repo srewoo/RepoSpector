@@ -160,12 +160,14 @@ export class BatchProcessor {
         } catch (error) {
             this.failedRequests++;
             this.activeRequests--;
-            
+
             this.errorHandler.logError(`Batch item ${batchIndex}-${itemIndex}`, error);
-            
+
+            // Safely extract error message
+            const errMsg = error?.message || error?.toString?.() || String(error) || 'Unknown error';
             return {
                 success: false,
-                error: error.message,
+                error: errMsg,
                 batchIndex,
                 itemIndex
             };
@@ -231,8 +233,10 @@ export class BatchProcessor {
             /bad request/i,
             /invalid.*parameter/i
         ];
-        
-        return nonRetryablePatterns.some(pattern => pattern.test(error.message));
+
+        // Safely extract error message
+        const errMsg = error?.message || error?.toString?.() || String(error) || '';
+        return nonRetryablePatterns.some(pattern => pattern.test(errMsg));
     }
     
     /**

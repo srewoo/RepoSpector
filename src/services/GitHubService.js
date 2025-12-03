@@ -7,20 +7,87 @@ export class GitHubService {
         this.token = token;
         this.baseUrl = 'https://api.github.com';
 
-        // Common code file extensions to index
+        // Code file extensions to index (including documentation)
         this.codeExtensions = [
+            // JavaScript/TypeScript
             'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs',
-            'py', 'pyw',
-            'java', 'kt', 'scala',
-            'go', 'rs',
-            'rb', 'php',
-            'c', 'cpp', 'cc', 'h', 'hpp',
-            'cs', 'vb',
-            'swift', 'dart',
+            // Python
+            'py', 'pyw', 'pyx', 'pyi',
+            // Java/JVM
+            'java', 'kt', 'scala', 'groovy',
+            // Go
+            'go',
+            // Rust
+            'rs',
+            // Ruby
+            'rb', 'rake',
+            // PHP
+            'php', 'phtml',
+            // C/C++
+            'c', 'cpp', 'cc', 'cxx', 'h', 'hpp', 'hxx',
+            // C#/.NET
+            'cs', 'vb', 'fs',
+            // Swift
+            'swift',
+            // Dart
+            'dart',
+            // Shell scripts
             'sh', 'bash', 'zsh',
-            'yaml', 'yml', 'json', 'xml',
+            // Config files (useful for context)
+            'yaml', 'yml', 'json', 'toml', 'ini',
+            // Query languages
             'sql', 'graphql',
-            'vue', 'svelte'
+            // Web frameworks
+            'vue', 'svelte',
+            // Documentation (IMPORTANT for context!)
+            'md', 'markdown', 'mdx', 'txt', 'rst',
+            // Other useful files
+            'proto', 'thrift', 'gradle', 'cmake'
+        ];
+
+        // File extensions to EXCLUDE (ignore these completely)
+        this.excludeExtensions = [
+            // Styles
+            'css', 'scss', 'sass', 'less', 'styl',
+            // Images
+            'png', 'jpg', 'jpeg', 'gif', 'svg', 'ico', 'webp', 'bmp', 'tiff',
+            // Media
+            'mp4', 'avi', 'mov', 'wmv', 'flv', 'mp3', 'wav', 'ogg',
+            // Archives
+            'zip', 'tar', 'gz', 'rar', '7z', 'bz2',
+            // Databases
+            'db', 'sqlite', 'sqlite3', 'mdb', 'accdb',
+            // Binary/Compiled
+            'exe', 'dll', 'so', 'dylib', 'o', 'obj', 'class', 'jar', 'war',
+            // Lock files
+            'lock', 'lockb',
+            // Map files
+            'map',
+            // Fonts
+            'woff', 'woff2', 'ttf', 'eot', 'otf',
+            // Other binary/non-code
+            'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx'
+        ];
+
+        // Directories to exclude
+        this.excludeDirs = [
+            'node_modules',
+            'vendor',
+            'dist',
+            'build',
+            '.git',
+            '.github',
+            'coverage',
+            '__pycache__',
+            '.pytest_cache',
+            '.venv',
+            'venv',
+            'env',
+            '.idea',
+            '.vscode',
+            'target',  // Maven/Rust
+            'out',
+            'bin'
         ];
 
         this.maxFiles = 500; // Limit to avoid excessive indexing
@@ -32,23 +99,37 @@ export class GitHubService {
      * @returns {{owner: string, repo: string, branch: string} | null}
      */
     parseGitHubUrl(url) {
+        console.log('🔍 Parsing GitHub URL:', url);
+
         const patterns = [
-            /github\.com\/([^\/]+)\/([^\/]+)/,
+            /github\.com\/([^\/]+)\/([^\/]+)\/blob\/([^\/]+)/,
             /github\.com\/([^\/]+)\/([^\/]+)\/tree\/([^\/]+)/,
-            /github\.com\/([^\/]+)\/([^\/]+)\/blob\/([^\/]+)/
+            /github\.com\/([^\/]+)\/([^\/]+)/
         ];
 
         for (const pattern of patterns) {
             const match = url.match(pattern);
             if (match) {
+                const owner = match[1];
+                const repo = match[2].replace(/\.git$/, '');
+                const branch = match[3] || 'main';
+
+                console.log('✅ Parsed GitHub URL:', {
+                    owner,
+                    repo,
+                    branch,
+                    pattern: pattern.toString()
+                });
+
                 return {
-                    owner: match[1],
-                    repo: match[2].replace(/\.git$/, ''),
-                    branch: match[3] || 'main' // Default to main
+                    owner,
+                    repo,
+                    branch
                 };
             }
         }
 
+        console.warn('❌ Failed to parse GitHub URL');
         return null;
     }
 
@@ -83,7 +164,31 @@ export class GitHubService {
             );
 
             if (!response.ok) {
-                throw new Error(`GitHub API error: ${response.statusText}`);
+                // Try to get detailed error message
+                let errorMessage = `GitHub API error (${response.status}): ${response.statusText}`;
+                try {
+                    const errorData = await response.json();
+                    if (errorData.message) {
+                        errorMessage = `GitHub API error: ${errorData.message}`;
+                    }
+                } catch (e) {
+                    // If JSON parsing fails, use status text
+                }
+
+                // Add helpful context to error
+                if (response.status === 401) {
+                    errorMessage += '\n\n💡 Tip: This might be a private repository. Add your GitHub token in Settings.';
+                } else if (response.status === 404) {
+                    errorMessage += '\n\n💡 Tip: Repository not found. Check the URL or add GitHub token for private repos.';
+                } else if (response.status === 403) {
+                    if (errorMessage.includes('rate limit')) {
+                        errorMessage += '\n\n💡 Tip: Rate limit exceeded (60 req/hour). Add your GitHub token to increase to 5000 req/hour.';
+                    } else {
+                        errorMessage += '\n\n💡 Tip: Access forbidden. Your GitHub token might not have the required permissions (repo scope).';
+                    }
+                }
+
+                throw new Error(errorMessage);
             }
 
             const data = await response.json();
@@ -95,15 +200,32 @@ export class GitHubService {
     }
 
     /**
-     * Filter files by extension
+     * Filter files by extension and directory
      * @param {Array} tree
      * @returns {Array}
      */
     filterCodeFiles(tree) {
         return tree
-            .filter(item => item.type === 'blob') // Only files
+            .filter(item => item.type === 'blob') // Only files, not directories
             .filter(item => {
+                // Check if file is in excluded directory
+                const pathParts = item.path.split('/');
+                const isInExcludedDir = pathParts.some(part =>
+                    this.excludeDirs.includes(part)
+                );
+                if (isInExcludedDir) {
+                    return false;
+                }
+
+                // Get file extension
                 const ext = item.path.split('.').pop().toLowerCase();
+
+                // First check exclusion list (explicit deny)
+                if (this.excludeExtensions.includes(ext)) {
+                    return false;
+                }
+
+                // Then check inclusion list (explicit allow)
                 return this.codeExtensions.includes(ext);
             })
             .slice(0, this.maxFiles); // Limit number of files

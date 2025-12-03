@@ -12,13 +12,39 @@ export class ErrorHandler {
         this.maxLogSize = 50;
     }
 
+    /**
+     * Safely extract error message from any error type
+     * @param {*} error - Error object, string, or any value
+     * @returns {string} - Safe error message string
+     */
+    safeGetMessage(error) {
+        if (!error) return 'Unknown error';
+        if (typeof error === 'string') return error;
+        if (error.message && typeof error.message === 'string') return error.message;
+        try {
+            const str = error.toString?.();
+            if (str && typeof str === 'string' && str !== '[object Object]') {
+                return str;
+            }
+        } catch (e) {
+            // ignore toString errors
+        }
+        try {
+            return String(error);
+        } catch (e) {
+            return 'Unknown error';
+        }
+    }
+
     handleExtensionError(error, context = 'Unknown', userFriendly = true) {
+        // Safely extract error details
+        const safeMessage = this.safeGetMessage(error);
         const errorInfo = {
             timestamp: new Date().toISOString(),
             context,
-            message: error.message || 'Unknown error',
-            stack: error.stack,
-            type: error.constructor.name
+            message: safeMessage,
+            stack: error?.stack || '',
+            type: error?.constructor?.name || 'Unknown'
         };
 
         // Log the error
@@ -35,8 +61,9 @@ export class ErrorHandler {
     // Add handleApiError method expected by tests (lowercase 'a')
     handleApiError(error, endpoint = 'API') {
         let message = 'API request failed';
+        const errorMsg = this.safeGetMessage(error);
 
-        if (error.status) {
+        if (error?.status) {
             switch (error.status) {
                 case 401:
                     message = 'Invalid API key. Please check your OpenAI API key in the settings.';
@@ -56,15 +83,15 @@ export class ErrorHandler {
                     message = 'Invalid request. The code might be too long or contain invalid characters.';
                     break;
                 default:
-                    message = `API error (${error.status}): ${error.message || 'Unknown error'}`;
+                    message = `API error (${error.status}): ${errorMsg}`;
             }
-        } else if (error.message) {
-            if (error.message.includes('network') || error.message.includes('fetch')) {
+        } else if (errorMsg && errorMsg !== 'Unknown error') {
+            if (errorMsg.includes('network') || errorMsg.includes('fetch')) {
                 message = 'Network error. Please check your internet connection.';
-            } else if (error.message.includes('timeout')) {
+            } else if (errorMsg.includes('timeout')) {
                 message = 'Request timed out. Please check your internet connection and try again.';
             } else {
-                message = `An error occurred: ${error.message}`;
+                message = `An error occurred: ${errorMsg}`;
             }
         }
 
@@ -72,7 +99,7 @@ export class ErrorHandler {
         const logEntry = {
             timestamp: new Date().toISOString(),
             context: endpoint,
-            error: error.message || 'Unknown error',
+            error: errorMsg,
             type: 'api'
         };
 
@@ -94,8 +121,9 @@ export class ErrorHandler {
     handleAPIError(error, endpoint = 'API') {
         let message = 'API request failed';
         let code = 'UNKNOWN_ERROR';
+        const errorMsg = this.safeGetMessage(error);
 
-        if (error.status) {
+        if (error?.status) {
             switch (error.status) {
                 case 401:
                     message = 'Invalid API key. Please check your OpenAI API key in settings.';
@@ -120,18 +148,18 @@ export class ErrorHandler {
                     code = 'BAD_REQUEST';
                     break;
                 default:
-                    message = `API error (${error.status}): ${error.message || 'Unknown error'}`;
+                    message = `API error (${error.status}): ${errorMsg}`;
                     code = `HTTP_${error.status}`;
             }
-        } else if (error.message) {
-            if (error.message.includes('network') || error.message.includes('fetch')) {
+        } else if (errorMsg && errorMsg !== 'Unknown error') {
+            if (errorMsg.includes('network') || errorMsg.includes('fetch')) {
                 message = 'Network connection failed. Check your internet connection.';
                 code = 'NETWORK_ERROR';
-            } else if (error.message.includes('timeout')) {
+            } else if (errorMsg.includes('timeout')) {
                 message = 'Request timed out. The operation took too long to complete.';
                 code = 'TIMEOUT_ERROR';
             } else {
-                message = error.message;
+                message = errorMsg;
                 code = 'GENERAL_ERROR';
             }
         }
@@ -149,13 +177,14 @@ export class ErrorHandler {
 
     handleCodeExtractionError(error, pageUrl = '') {
         let message = 'Failed to extract code from the page';
+        const errorMsg = this.safeGetMessage(error);
 
-        if (error.message) {
-            if (error.message.includes('permission')) {
+        if (errorMsg && errorMsg !== 'Unknown error') {
+            if (errorMsg.includes('permission')) {
                 message = 'Permission denied. The extension may not have access to this page.';
-            } else if (error.message.includes('No code found')) {
+            } else if (errorMsg.includes('No code found')) {
                 message = 'No code was found on this page. Try selecting code manually or navigate to a code page.';
-            } else if (error.message.includes('selector')) {
+            } else if (errorMsg.includes('selector')) {
                 message = 'Unable to locate code on this page. The page structure may have changed.';
             }
         }
@@ -163,7 +192,7 @@ export class ErrorHandler {
         this.logError({
             timestamp: new Date().toISOString(),
             context: 'Code Extraction',
-            message: error.message || message,
+            message: errorMsg,
             pageUrl,
             originalError: error
         });
@@ -173,15 +202,16 @@ export class ErrorHandler {
 
     handleTestGenerationError(error, codeLength = 0) {
         let message = 'Failed to generate test cases';
+        const errorMsg = this.safeGetMessage(error);
 
-        if (error.message) {
-            if (error.message.includes('token') || error.message.includes('length')) {
+        if (errorMsg && errorMsg !== 'Unknown error') {
+            if (errorMsg.includes('token') || errorMsg.includes('length')) {
                 message = 'The code is too long for processing. Try selecting a smaller code section.';
-            } else if (error.message.includes('API key')) {
+            } else if (errorMsg.includes('API key')) {
                 message = 'Invalid API key. Please check your OpenAI API key in settings.';
-            } else if (error.message.includes('rate limit')) {
+            } else if (errorMsg.includes('rate limit')) {
                 message = 'Rate limit exceeded. Please wait a moment and try again.';
-            } else if (error.message.includes('model')) {
+            } else if (errorMsg.includes('model')) {
                 message = 'The selected AI model is not available. Try switching to a different model.';
             }
         }
@@ -189,7 +219,7 @@ export class ErrorHandler {
         this.logError({
             timestamp: new Date().toISOString(),
             context: 'Test Generation',
-            message: error.message || message,
+            message: errorMsg,
             codeLength,
             originalError: error
         });
@@ -198,7 +228,8 @@ export class ErrorHandler {
     }
 
     getUserFriendlyMessage(error, context) {
-        const errorMessage = error.message || '';
+        // Safely extract error message
+        const errorMessage = this.safeGetMessage(error);
         const _lowerMessage = errorMessage.toLowerCase();
 
         // Handle specific error patterns for extension errors
@@ -419,9 +450,10 @@ export class ErrorHandler {
         ];
 
         const retryableStatusCodes = [408, 429, 500, 502, 503, 504];
-        
-        return retryablePatterns.some(pattern => pattern.test(error.message)) ||
-               retryableStatusCodes.includes(error.status);
+        const errorMsg = this.safeGetMessage(error);
+
+        return retryablePatterns.some(pattern => pattern.test(errorMsg)) ||
+               retryableStatusCodes.includes(error?.status);
     }
 
     // Alias for compatibility - some code might call shouldRetry instead of isRetryableError

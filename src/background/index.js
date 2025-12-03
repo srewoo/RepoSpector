@@ -9,6 +9,7 @@ import { CodeChunker } from '../utils/chunking.js';
 import { TestGenerator } from '../utils/testGenerator.js';
 import { CacheManager } from '../utils/cacheManager.js';
 import { LanguageDetector } from '../utils/languageDetector.js';
+import { TokenManager } from '../utils/tokenManager.js';
 import { PLATFORM_PATTERNS as _PLATFORM_PATTERNS, MODELS } from '../utils/constants.js';
 import { RAGService } from '../services/RAGService.js';
 import { GitHubService } from '../services/GitHubService.js';
@@ -28,11 +29,23 @@ class BackgroundService {
             this.contextAnalyzer = new ContextAnalyzer();
             this.batchProcessor = new BatchProcessor();
             this.codeChunker = new CodeChunker();
+            this.tokenManager = new TokenManager();
             this.testGenerator = new TestGenerator();
             this.cacheManager = new CacheManager();
             this.languageDetector = new LanguageDetector();
 
-            console.log('RepoSpector services initialized successfully');
+            // Initialize RAG services
+            this.ragService = new RAGService({
+                provider: 'local',  // Use local embeddings (free, 100% private!)
+                apiKey: null  // Only needed if using OpenAI provider
+            });
+            this.githubService = new GitHubService();
+            this.gitlabService = new GitLabService();
+
+            // Wire up RAG service to context analyzer
+            this.contextAnalyzer.setRagService(this.ragService);
+
+            console.log('RepoSpector services initialized successfully (including RAG with local embeddings)');
         } catch (error) {
             console.error('Failed to initialize services:', error);
         }
@@ -144,7 +157,19 @@ class BackgroundService {
             }
 
             // Load settings on install
-            await this.loadSettings();
+            const settings = await this.loadSettings();
+
+            // Update RAG service with API keys from settings
+            if (settings && settings.apiKey) {
+                this.ragService.apiKey = settings.apiKey;
+                console.log('RAG service API key loaded from settings');
+            }
+            if (settings && settings.githubToken) {
+                this.githubService.token = settings.githubToken;
+            }
+            if (settings && settings.gitlabToken) {
+                this.gitlabService.token = settings.gitlabToken;
+            }
 
             // Initialize cache
             if (this.cacheManager && typeof this.cacheManager.initialize === 'function') {
@@ -243,13 +268,18 @@ class BackgroundService {
 
     async handleMessage(message, sender, sendResponse) {
         try {
+            // Determine if request came from popup or content script
+            // Popup messages have no sender.tab, content script messages have sender.tab
+            const isFromPopup = !sender || !sender.tab;
+            console.log('📍 Message received:', message.type, '| From:', isFromPopup ? 'Popup' : 'Content Script');
+
             switch (message.type) {
                 case 'GENERATE_TESTS':
-                    await this.handleGenerateTests(message, sendResponse);
+                    await this.handleGenerateTests(message, sendResponse, sender, isFromPopup);
                     break;
 
                 case 'CHAT_WITH_CODE':
-                    await this.handleChatWithCode(message, sendResponse);
+                    await this.handleChatWithCode(message, sendResponse, sender);
                     break;
 
                 case 'VALIDATE_API_KEY':
@@ -280,6 +310,26 @@ class BackgroundService {
                     this.handleGetTabId(message, sender, sendResponse);
                     break;
 
+                case 'INDEX_REPOSITORY':
+                    await this.handleIndexRepository(message, sender, sendResponse);
+                    break;
+
+                case 'CHECK_INDEX_STATUS':
+                    await this.handleCheckIndexStatus(message, sendResponse);
+                    break;
+
+                case 'CLEAR_INDEX':
+                    await this.handleClearIndex(message, sendResponse);
+                    break;
+
+                case 'GET_INDEX_STATS':
+                    await this.handleGetIndexStats(message, sendResponse);
+                    break;
+
+                case 'CANCEL_REQUEST':
+                    this.handleCancelRequest(message, sendResponse);
+                    break;
+
                 default:
                     sendResponse({
                         success: false,
@@ -290,13 +340,17 @@ class BackgroundService {
             this.errorHandler.logError('Background message handler', error);
             sendResponse({
                 success: false,
-                error: error.message
+                error: this.getErrorMessage(error)
             });
         }
     }
 
-    async handleGenerateTests(message, sendResponse) {
-        const { tabId, options, code, context } = message.payload || message.data || {};
+    async handleGenerateTests(message, sendResponse, sender, isFromPopup = true) {
+        const { tabId, options = {}, code, context, useDeepContext } = message.payload || message.data || {};
+
+        // CRITICAL: Store isFromPopup in options so it propagates through the call chain
+        options.isFromPopup = isFromPopup;
+        console.log('🧪 handleGenerateTests | isFromPopup:', isFromPopup, '| tabId:', tabId);
 
         try {
             // Add to processing queue if already processing
@@ -446,10 +500,15 @@ class BackgroundService {
                         console.log('✅ Code successfully extracted, length:', extractedCode.length);
                     } else {
                         console.error('❌ Extraction failed:', extractionResult);
-                        throw new Error(extractionResult?.error || 'Failed to extract code from page');
+                        // Safely extract error message from extraction result
+                        const extractError = extractionResult?.error;
+                        const errorMsg = typeof extractError === 'string'
+                            ? extractError
+                            : (extractError?.message || this.getErrorMessage(extractError) || 'Failed to extract code from page');
+                        throw new Error(errorMsg);
                     }
                 } catch (error) {
-                    throw new Error(`Code extraction failed: ${error.message}`);
+                    throw new Error(`Code extraction failed: ${this.getErrorMessage(error)}`);
                 }
             }
 
@@ -512,9 +571,13 @@ class BackgroundService {
             console.log(`🧪 Recommended test framework: ${languageDetection.defaultFramework || 'auto-detect'}`);
 
             // Analyze context for intelligent test generation
+            // Use 'deep' only if user enabled Deep Context toggle
+            const contextLevel = useDeepContext ? 'deep' : (options.contextLevel || 'smart');
+            console.log('🔍 Using context level:', contextLevel, '(Deep Context:', useDeepContext ? 'enabled' : 'disabled', ')');
+
             const enhancedContext = await this.contextAnalyzer.analyzeWithContext(extractedCode, {
                 url: extractedContext?.url || 'unknown',
-                level: options.contextLevel || 'smart',
+                level: contextLevel,
                 platform: extractedContext?.platform || 'unknown'
             });
 
@@ -538,13 +601,75 @@ class BackgroundService {
             console.log('🤖 Model:', settings.model || 'gpt-4');
             console.log('📊 API Key configured:', !!settings.apiKey);
 
-            // Determine if chunking is needed
+            // Determine if chunking is needed using TokenManager
+            // IMPORTANT: Account for ALL context, not just code
             const modelName = this.getModelId(settings.model);
-            const estimatedTokens = this.codeChunker.estimateTokens(extractedCode);
-            const maxTokens = this.codeChunker.getMaxTokensForModel(modelName);
+            const availableTokens = this.tokenManager.getAvailableTokens(modelName);
 
-            console.log('🔢 Estimated tokens:', estimatedTokens);
-            console.log('🔢 Model max tokens:', maxTokens);
+            // Calculate tokens for all context components
+            const codeTokens = this.tokenManager.estimateTokens(extractedCode);
+            const promptOverhead = 2000; // System prompt, instructions, formatting
+            const responseReserve = 4000; // Reserve for AI response
+
+            // Get RAG context if Deep Context is enabled
+            let ragContext = null;
+            let ragTokens = 0;
+            if (useDeepContext && this.ragService) {
+                try {
+                    const repoUrl = extractedContext?.url || '';
+                    ragContext = await this.ragService.search(repoUrl, extractedCode, 5);
+                    if (ragContext && ragContext.chunks) {
+                        ragTokens = this.tokenManager.estimateTokens(ragContext.chunks);
+                        console.log(`📚 RAG context found: ${ragTokens} tokens`);
+                    }
+                } catch (ragError) {
+                    console.warn('⚠️ RAG context retrieval failed:', ragError);
+                }
+            }
+
+            // Get conversation history tokens if available
+            const conversationHistory = options.conversationHistory || [];
+            let historyTokens = 0;
+            if (conversationHistory.length > 0) {
+                const historyText = conversationHistory.map(m => m.content || '').join('\n');
+                historyTokens = this.tokenManager.estimateTokens(historyText);
+                console.log(`📜 Conversation history: ${historyTokens} tokens (${conversationHistory.length} messages)`);
+            }
+
+            // Calculate total and determine if chunking needed
+            const totalContextTokens = codeTokens + ragTokens + historyTokens + promptOverhead + responseReserve;
+            const effectiveLimit = availableTokens * 0.85; // Use 85% of limit for safety
+            const needsChunking = totalContextTokens > effectiveLimit;
+
+            // Create comprehensive token budget object
+            const tokenBudget = {
+                codeTokens,
+                ragTokens,
+                historyTokens,
+                promptOverhead,
+                responseReserve,
+                totalContextTokens,
+                availableTokens,
+                effectiveLimit,
+                needsChunking,
+                utilizationPercent: Math.round((totalContextTokens / availableTokens) * 100)
+            };
+
+            console.log('📊 Comprehensive Token Budget Analysis:');
+            console.log(`  - Code: ${tokenBudget.codeTokens} tokens`);
+            console.log(`  - RAG context: ${tokenBudget.ragTokens} tokens`);
+            console.log(`  - Conversation history: ${tokenBudget.historyTokens} tokens`);
+            console.log(`  - Prompt overhead: ${tokenBudget.promptOverhead} tokens`);
+            console.log(`  - Response reserve: ${tokenBudget.responseReserve} tokens`);
+            console.log(`  - Total: ${tokenBudget.totalContextTokens} tokens`);
+            console.log(`  - Available: ${tokenBudget.availableTokens} tokens (effective: ${Math.round(tokenBudget.effectiveLimit)})`);
+            console.log(`  - Utilization: ${tokenBudget.utilizationPercent}%`);
+            console.log(`  - Needs chunking: ${tokenBudget.needsChunking ? 'YES' : 'NO'}`);
+
+            // Store RAG context and history in options for use in processDirect/processWithChunking
+            options.ragContext = ragContext;
+            options.conversationHistory = conversationHistory;
+            options.tokenBudget = tokenBudget;
 
             let testResults;
             let lastError = null;
@@ -557,7 +682,8 @@ class BackgroundService {
                         console.log(`🔄 Retry attempt ${attempt}/${maxRetries}...`);
                     }
 
-                    if (estimatedTokens > maxTokens * 0.8) { // Use chunking if > 80% of model limit
+                    // Use chunking if code is too large OR if processDirect fails with token error
+                    if (tokenBudget.needsChunking || (lastError && lastError.message.includes('too large'))) {
                         console.log('📦 Using chunked processing for large codebase');
                         console.log('🌐 Calling OpenAI API with chunking...');
                         testResults = await this.processWithChunking(extractedCode, options, enhancedContext, settings);
@@ -576,11 +702,35 @@ class BackgroundService {
                     }
                 } catch (error) {
                     lastError = error;
-                    console.error(`❌ LLM generation attempt ${attempt + 1} failed:`, error.message);
 
-                    // If this was the last attempt, throw the error
+                    // Safely get error message
+                    const errorMessage = error?.message || error?.toString() || String(error);
+                    console.error(`❌ LLM generation attempt ${attempt + 1} failed:`, errorMessage);
+
+                    // Check if it's a token error - if so, automatically switch to chunking
+                    const isTokenError = errorMessage.includes('maximum context length') ||
+                                        errorMessage.includes('token') ||
+                                        errorMessage.includes('too large');
+
+                    if (isTokenError && !tokenBudget.needsChunking) {
+                        console.log('⚠️ Token limit hit - automatically switching to chunked processing');
+                        // Force chunking on next attempt
+                        tokenBudget.needsChunking = true;
+                        // Don't count this as a failed attempt since we're switching strategy
+                        attempt--;
+                    }
+
+                    // If this was the last attempt, throw a user-friendly error
                     if (attempt === maxRetries) {
-                        throw new Error(`Test generation failed after ${maxRetries + 1} attempts: ${error.message}`);
+                        if (isTokenError) {
+                            // Even chunking failed, give helpful error
+                            throw new Error(
+                                `Code file is too large to process even with chunking. ` +
+                                `Try selecting a smaller section of code.`
+                            );
+                        } else {
+                            throw new Error(`Test generation failed after ${maxRetries + 1} attempts: ${errorMessage}`);
+                        }
                     }
 
                     // Wait before retrying (exponential backoff)
@@ -619,8 +769,8 @@ class BackgroundService {
                 languageDetection,
                 metadata: {
                     model: modelName,
-                    chunked: estimatedTokens > maxTokens * 0.8,
-                    tokensUsed: estimatedTokens,
+                    chunked: tokenBudget.needsChunking,
+                    tokensUsed: tokenBudget.codeTokens,
                     language: languageDetection.language,
                     framework: testFramework,
                     languageConfidence: languageDetection.confidence
@@ -643,14 +793,18 @@ class BackgroundService {
             this.errorHandler.logError('Test generation', error);
             sendResponse({
                 success: false,
-                error: error.message,
+                error: this.getErrorMessage(error),
                 retry: this.errorHandler.shouldRetry(error)
             });
         }
     }
 
-    async handleChatWithCode(message, sendResponse) {
-        const { tabId, question, conversationHistory } = message.payload || message.data || {};
+    async handleChatWithCode(message, sendResponse, sender) {
+        const { tabId, question, conversationHistory, useDeepContext } = message.payload || message.data || {};
+
+        // Determine if request came from popup or content script
+        const isFromPopup = !sender || !sender.tab;
+        console.log('📍 Request origin:', isFromPopup ? 'Popup' : 'Content Script');
 
         try {
             console.log('💬 Starting code chat session...');
@@ -731,8 +885,55 @@ class BackgroundService {
 
             console.log('🔍 Detected language:', languageDetection.language);
 
-            // Build messages array for OpenAI (including conversation history)
-            const messages = this.buildChatMessages(extractedCode, question, languageDetection, extractedContext, conversationHistory);
+            // Retrieve RAG context if available and user opted in
+            let ragContext = null;
+            if (useDeepContext && this.ragService && extractedContext?.url) {
+                try {
+                    const repoId = this.contextAnalyzer.extractRepoIdFromUrl(
+                        extractedContext.url,
+                        extractedContext.platform
+                    );
+
+                    if (repoId) {
+                        console.log('🔍 Retrieving RAG context for repo:', repoId, '(user enabled Deep Context)');
+
+                        // Build intelligent query combining user question with code context
+                        const codeContext = this.contextAnalyzer.buildSmartRAGQuery(extractedCode, extractedContext);
+                        const smartQuery = `User Question: ${question}\n\n${codeContext}`;
+                        console.log('🧠 Smart query preview:', smartQuery.substring(0, 150) + '...');
+
+                        const relevantChunks = await this.ragService.retrieveContext(repoId, smartQuery, 7);
+
+                        if (relevantChunks && relevantChunks.length > 0) {
+                            ragContext = {
+                                chunks: relevantChunks.map(c => c.content).join('\n\n'),
+                                sources: relevantChunks.map(c => c.filePath)
+                            };
+                            console.log(`✅ Retrieved ${relevantChunks.length} relevant chunks from RAG`);
+                        } else {
+                            console.log('ℹ️ No RAG context found for this repository');
+                        }
+                    }
+                } catch (error) {
+                    console.warn('RAG retrieval failed:', error);
+                }
+            } else if (!useDeepContext) {
+                console.log('ℹ️ Deep Context (RAG) disabled by user - using standard context');
+            }
+
+            // Get model identifier
+            const modelId = this.getModelId(settings.model);
+
+            // Build messages array for OpenAI (including conversation history, RAG context, and token management)
+            const messages = this.buildChatMessages(
+                extractedCode,
+                question,
+                languageDetection,
+                extractedContext,
+                conversationHistory,
+                ragContext,
+                modelId  // Pass model for token management
+            );
 
             console.log('📤 Sending chat request to OpenAI...');
             console.log('Messages count:', messages.length);
@@ -740,13 +941,15 @@ class BackgroundService {
 
             // Call OpenAI with streaming
             const result = await this.callOpenAI({
-                model: this.getModelId(settings.model),
+                model: modelId,
                 messages: messages,
                 temperature: 0.3,
                 max_tokens: 2000
             }, settings.apiKey, {
                 streaming: true,
-                tabId: tabId
+                tabId: tabId,
+                isFromPopup: isFromPopup,  // Pass sender context
+                requestId: `chat_${tabId}_${Date.now()}`  // Add request ID for cancellation
             });
 
             console.log('📥 Received response from OpenAI');
@@ -775,38 +978,108 @@ class BackgroundService {
             this.errorHandler.logError('Code chat', error);
             sendResponse({
                 success: false,
-                error: error.message
+                error: this.getErrorMessage(error)
             });
         }
     }
 
     /**
-     * Build messages array for chat (with conversation history support)
+     * Build messages array for chat (with conversation history support and token management)
      * @param {string} code - The code being discussed
      * @param {string} question - Current user question
      * @param {object} languageDetection - Language detection info
      * @param {object} context - Page context
      * @param {array} conversationHistory - Previous conversation messages
+     * @param {object} ragContext - RAG context (chunks and sources)
+     * @param {string} model - Model identifier for token limits
      * @returns {array} - Array of messages for OpenAI API
      */
-    buildChatMessages(code, question, languageDetection, context, conversationHistory = []) {
+    buildChatMessages(code, question, languageDetection, context, conversationHistory = [], ragContext = null, model = 'gpt-4o-mini') {
         const language = languageDetection.language || 'unknown';
+
+        // Get model limits
+        const availableTokens = this.tokenManager.getAvailableTokens(model);
+        console.log(`📊 Token budget: ${availableTokens} tokens available for ${model}`);
+
+        // Estimate tokens for fixed parts
+        const questionTokens = this.tokenManager.estimateTokens(question);
+        const codeTokens = this.tokenManager.estimateTokens(code);
+        const ragTokens = ragContext ? this.tokenManager.estimateTokens(ragContext.chunks) : 0;
+
+        console.log(`📊 Token breakdown:
+  - Question: ${questionTokens}
+  - Code: ${codeTokens}
+  - RAG context: ${ragTokens}
+  - Total fixed: ${questionTokens + codeTokens + ragTokens}`);
+
+        // Check if we need to truncate code
+        let processedCode = code;
+        let processedRAG = ragContext;
+        const systemPromptEstimate = 500; // Estimated tokens for system prompt text
+        const budgetForHistory = 4000; // Reserve tokens for conversation history
+
+        const fixedTokens = systemPromptEstimate + questionTokens + codeTokens + ragTokens;
+
+        if (fixedTokens > availableTokens - budgetForHistory) {
+            console.warn(`⚠️ Token limit approaching! Fixed content: ${fixedTokens}, Limit: ${availableTokens}`);
+
+            // Strategy 1: Reduce RAG context first
+            if (ragTokens > 0) {
+                const ragBudget = Math.floor(availableTokens * 0.2); // 20% for RAG
+                if (ragTokens > ragBudget) {
+                    console.log(`⚠️ Truncating RAG context from ${ragTokens} to ~${ragBudget} tokens`);
+                    const truncatedRAG = this.tokenManager.truncateCode(ragContext.chunks, ragBudget);
+                    processedRAG = {
+                        chunks: truncatedRAG,
+                        sources: ragContext.sources
+                    };
+                }
+            }
+
+            // Strategy 2: Truncate code if still too large
+            const codeBudget = availableTokens - budgetForHistory - systemPromptEstimate - questionTokens -
+                              (processedRAG ? this.tokenManager.estimateTokens(processedRAG.chunks) : 0);
+
+            if (codeTokens > codeBudget) {
+                console.log(`⚠️ Truncating code from ${codeTokens} to ~${codeBudget} tokens`);
+                processedCode = this.tokenManager.truncateCode(code, codeBudget);
+            }
+        }
+
         const messages = [];
 
-        // Add system message with code context
-        messages.push({
-            role: 'system',
-            content: `You are an expert code assistant helping a developer understand and work with code. You are discussing the following ${language} code:
+        // Build system message with code context and optional RAG context (using processed content)
+        let systemContent = `You are an expert code assistant helping a developer understand and work with code. You are discussing the following ${language} code:
 
 **Code:**
 \`\`\`${language}
-${code}
+${processedCode}
 \`\`\`
 
 **Context:**
 - File: ${context?.filePath || 'unknown'}
 - Language: ${language}
-- Platform: ${context?.platform || 'unknown'}
+- Platform: ${context?.platform || 'unknown'}`;
+
+        // Add RAG context if available (using processed RAG)
+        if (processedRAG && processedRAG.chunks) {
+            systemContent += `
+
+**Related Code from Repository (RAG Context):**
+The following code snippets from the repository may be relevant to the discussion:
+
+${processedRAG.chunks}
+
+**Sources:** ${processedRAG.sources.join(', ')}
+
+Use this repository context to provide more informed and comprehensive answers, especially when the user asks about:
+- How this code integrates with other parts of the codebase
+- Related functions, classes, or modules
+- Dependencies and imports
+- Overall architecture and patterns used in the project`;
+        }
+
+        systemContent += `
 
 Please provide clear, concise, and helpful responses. When answering:
 - For **explanations**: Explain what the code does, its purpose, and how it works
@@ -814,28 +1087,32 @@ Please provide clear, concise, and helpful responses. When answering:
 - For **improvements**: Suggest better patterns, optimizations, or refactoring opportunities
 - For **specific questions**: Answer directly based on the code
 
-Format responses in a developer-friendly way with code examples where appropriate.`
+Format responses in a developer-friendly way with code examples where appropriate.`;
+
+        messages.push({
+            role: 'system',
+            content: systemContent
         });
 
-        // Add conversation history if available
+        // Add conversation history if available (with token-aware pruning)
         if (conversationHistory && conversationHistory.length > 0) {
-            console.log(`📝 Adding ${conversationHistory.length} messages from conversation history`);
+            console.log(`📝 Processing ${conversationHistory.length} messages from conversation history`);
 
-            // Filter and add conversation messages (skip system messages and the initial welcome)
-            conversationHistory.forEach(msg => {
+            // Filter conversation messages (skip system messages and the initial welcome)
+            const filteredHistory = conversationHistory.filter(msg => {
                 // Skip system messages, error messages, and the initial welcome message
                 if (msg.role === 'system' || msg.type === 'error' || msg.id === 1) {
-                    return;
+                    return false;
                 }
+                // Keep user and assistant messages
+                return (msg.role === 'user' || msg.role === 'assistant');
+            }).map(msg => ({
+                role: msg.role,
+                content: msg.content
+            }));
 
-                // Add user and assistant messages
-                if (msg.role === 'user' || msg.role === 'assistant') {
-                    messages.push({
-                        role: msg.role,
-                        content: msg.content
-                    });
-                }
-            });
+            // Add filtered history to messages temporarily for pruning
+            messages.push(...filteredHistory);
         }
 
         // Add current question
@@ -844,7 +1121,99 @@ Format responses in a developer-friendly way with code examples where appropriat
             content: question
         });
 
-        return messages;
+        // Prune messages to fit within token limit
+        const prunedMessages = this.tokenManager.pruneMessages(messages, model);
+
+        // Log pruning results
+        const originalTokens = this.tokenManager.countMessagesTokens(messages);
+        const prunedTokens = this.tokenManager.countMessagesTokens(prunedMessages);
+
+        if (prunedTokens < originalTokens) {
+            console.warn(`⚠️ Pruned conversation: ${originalTokens} → ${prunedTokens} tokens (${messages.length} → ${prunedMessages.length} messages)`);
+        } else {
+            console.log(`✅ Token count OK: ${prunedTokens} tokens (${prunedMessages.length} messages)`);
+        }
+
+        // Final validation
+        const validation = this.tokenManager.validateTokenCount(prunedMessages, model);
+        if (!validation.valid) {
+            console.error(`❌ Token validation failed: ${validation.recommendation}`);
+            throw new Error(validation.recommendation);
+        } else {
+            console.log(`✅ Token validation passed: ${validation.utilizationPercent}% of limit`);
+        }
+
+        return prunedMessages;
+    }
+
+    /**
+     * Process large code in batches when it exceeds token limits
+     * Used for test generation on very large files
+     * @param {string} code - The code to process
+     * @param {string} model - Model identifier
+     * @param {string} systemPrompt - System prompt template
+     * @param {string} userPrompt - User prompt template
+     * @returns {array} - Array of results from each chunk
+     */
+    async processCodeInBatches(code, model, systemPrompt, userPrompt, apiKey) {
+        console.log('📦 Processing large code in batches...');
+
+        // Check if chunking is needed
+        const tokenBudget = this.tokenManager.getTokenBudget(model, code.length);
+
+        if (!tokenBudget.needsChunking) {
+            console.log('✅ Code fits in single request, no chunking needed');
+            return null; // Caller should handle normally
+        }
+
+        // Split code into chunks
+        const chunks = this.tokenManager.chunkCode(code, model);
+        console.log(`📦 Split code into ${chunks.length} chunks`);
+
+        const results = [];
+
+        for (const chunk of chunks) {
+            console.log(`📦 Processing chunk ${chunk.index + 1}/${chunk.total} (${chunk.tokens} tokens)`);
+
+            const chunkPrompt = userPrompt.replace('{{CODE}}', chunk.content) +
+                              `\n\n**Note:** This is chunk ${chunk.index + 1} of ${chunk.total} from a large file.`;
+
+            try {
+                const result = await this.callOpenAI({
+                    model: this.getModelId(model),
+                    messages: [
+                        { role: 'system', content: systemPrompt },
+                        { role: 'user', content: chunkPrompt }
+                    ],
+                    temperature: 0.3,
+                    max_tokens: 2000
+                }, apiKey, {
+                    streaming: false,
+                    requestId: `batch_${chunk.index}_${Date.now()}`
+                });
+
+                results.push({
+                    chunkIndex: chunk.index,
+                    result: result
+                });
+
+                console.log(`✅ Chunk ${chunk.index + 1} processed successfully`);
+
+                // Small delay between chunks to avoid rate limiting
+                if (chunk.index < chunk.total - 1) {
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+
+            } catch (error) {
+                console.error(`❌ Failed to process chunk ${chunk.index + 1}:`, error);
+                results.push({
+                    chunkIndex: chunk.index,
+                    error: this.getErrorMessage(error)
+                });
+            }
+        }
+
+        return results;
     }
 
     /**
@@ -887,7 +1256,18 @@ Format your response in a developer-friendly way with code examples where approp
 
         console.log(`Processing ${chunks.length} chunks in parallel`);
 
-        // Prepare chunks with context
+        // IMPORTANT: Add RAG context to the main context object so it's passed to each chunk
+        // This ensures Deep Context is used even when chunking
+        if (options.ragContext && options.ragContext.chunks) {
+            const ragChunks = options.ragContext.chunks;
+            context.ragContext = ragChunks.map(chunk =>
+                `// File: ${chunk.filePath || 'unknown'}\n${chunk.content || chunk.text || ''}`
+            ).join('\n\n---\n\n');
+            context.ragSources = ragChunks.map(chunk => chunk.filePath || 'unknown');
+            console.log(`📚 Added RAG context from ${ragChunks.length} chunks for all ${chunks.length} code chunks`);
+        }
+
+        // Prepare chunks with context (each chunk will now include RAG context)
         const chunksWithContext = this.codeChunker.prepareChunksWithContext(chunks, context);
 
         // Create batches for parallel processing
@@ -920,22 +1300,143 @@ Format your response in a developer-friendly way with code examples where approp
     }
 
     async processDirect(code, options, context, settings) {
-        const prompt = this.buildTestGenerationPrompt(code, options, context);
+        const modelId = this.getModelId(settings.model);
 
-        console.log('📤 Sending prompt to OpenAI...');
-        console.log('Prompt length:', prompt.length);
-        console.log('Model:', this.getModelId(settings.model));
+        // IMPORTANT: Merge RAG context from options into the context object
+        // This ensures buildTestGenerationPrompt has access to RAG data
+        if (options.ragContext && options.ragContext.chunks) {
+            const ragChunks = options.ragContext.chunks;
+            context.ragContext = ragChunks.map(chunk =>
+                `// File: ${chunk.filePath || 'unknown'}\n${chunk.content || chunk.text || ''}`
+            ).join('\n\n---\n\n');
+            context.ragSources = ragChunks.map(chunk => chunk.filePath || 'unknown');
+            console.log(`📚 Added RAG context from ${ragChunks.length} chunks to prompt`);
+        }
+
+        // Build initial prompt with all context
+        let prompt = this.buildTestGenerationPrompt(code, options, context);
+
+        // Add conversation history if available
+        if (options.conversationHistory && options.conversationHistory.length > 0) {
+            const historySection = this.formatConversationHistory(options.conversationHistory);
+            prompt = `${historySection}\n\n${prompt}`;
+            console.log(`📜 Added conversation history (${options.conversationHistory.length} messages) to prompt`);
+        }
+
+        console.log('📤 Preparing prompt for OpenAI...');
+        console.log('Initial prompt length:', prompt.length);
+        console.log('Model:', modelId);
+
+        // TOKEN MANAGEMENT: Check and truncate if needed
+        const messages = [{ role: 'user', content: prompt }];
+
+        // Validate token count
+        const validation = this.tokenManager.validateTokenCount(messages, modelId);
+        console.log(`📊 Token validation: ${validation.totalTokens} tokens (${validation.utilizationPercent}% of limit)`);
+
+        if (!validation.valid) {
+            console.warn(`⚠️ Token limit exceeded! ${validation.totalTokens} > ${validation.modelLimit}`);
+            console.warn(`⚠️ ${validation.recommendation}`);
+
+            // SMART TRUNCATION: Reduce context in order of priority
+            // 1. First truncate conversation history (least important)
+            // 2. Then truncate RAG context
+            // 3. Finally truncate code (most important, last resort)
+            const availableTokens = this.tokenManager.getAvailableTokens(modelId);
+            let needsRebuild = false;
+
+            // Step 1: Truncate or remove conversation history
+            if (options.conversationHistory && options.conversationHistory.length > 0) {
+                console.log('📉 Truncating conversation history to reduce tokens...');
+                // Keep only last 2 messages for context
+                if (options.conversationHistory.length > 2) {
+                    options.conversationHistory = options.conversationHistory.slice(-2);
+                    needsRebuild = true;
+                    console.log('   Reduced to last 2 messages');
+                } else {
+                    // Remove conversation history entirely
+                    options.conversationHistory = [];
+                    needsRebuild = true;
+                    console.log('   Removed conversation history entirely');
+                }
+            }
+
+            // Step 2: Truncate or remove RAG context
+            if (context.ragContext) {
+                console.log('📉 Truncating RAG context to reduce tokens...');
+                const ragTokens = this.tokenManager.estimateTokens(context.ragContext);
+                if (ragTokens > 2000) {
+                    // Keep only first 2000 tokens worth
+                    context.ragContext = this.tokenManager.truncateCode(context.ragContext, 2000);
+                    needsRebuild = true;
+                    console.log('   Truncated RAG context to ~2000 tokens');
+                } else {
+                    // Remove RAG context entirely
+                    context.ragContext = null;
+                    context.ragSources = null;
+                    needsRebuild = true;
+                    console.log('   Removed RAG context entirely');
+                }
+            }
+
+            // Rebuild prompt if we made changes
+            if (needsRebuild) {
+                prompt = this.buildTestGenerationPrompt(code, options, context);
+                if (options.conversationHistory && options.conversationHistory.length > 0) {
+                    const historySection = this.formatConversationHistory(options.conversationHistory);
+                    prompt = `${historySection}\n\n${prompt}`;
+                }
+                messages[0].content = prompt;
+
+                // Re-validate after context truncation
+                const midValidation = this.tokenManager.validateTokenCount(messages, modelId);
+                console.log(`📊 After context truncation: ${midValidation.totalTokens} tokens`);
+
+                if (midValidation.valid) {
+                    console.log('✅ Context truncation was sufficient');
+                }
+            }
+
+            // Step 3: If still exceeds, truncate the code itself
+            const finalValidation = this.tokenManager.validateTokenCount(messages, modelId);
+            if (!finalValidation.valid) {
+                const codeTokens = this.tokenManager.estimateTokens(code);
+                const codeBudget = availableTokens - 2000;
+
+                if (codeTokens > codeBudget) {
+                    console.log(`⚠️ Truncating code from ${codeTokens} to ~${codeBudget} tokens`);
+                    const truncatedCode = this.tokenManager.truncateCode(code, codeBudget);
+
+                    // Rebuild prompt with truncated code (no extra context since we removed it)
+                    prompt = this.buildTestGenerationPrompt(truncatedCode, options, context);
+                    messages[0].content = prompt;
+
+                    // Re-validate
+                    const revalidation = this.tokenManager.validateTokenCount(messages, modelId);
+                    console.log(`📊 After code truncation: ${revalidation.totalTokens} tokens`);
+
+                    if (!revalidation.valid) {
+                        // Still too large - force chunking
+                        throw new Error(`Code is too large even after truncation (${revalidation.totalTokens} tokens). Using automatic chunking...`);
+                    }
+                }
+            }
+        }
+
+        console.log('✅ Token validation passed, sending to OpenAI...');
+        console.log('📍 processDirect | isFromPopup:', options.isFromPopup);
 
         // Enable streaming for better responsiveness
         const result = await this.callOpenAI({
-            model: this.getModelId(settings.model),
-            messages: [{ role: 'user', content: prompt }],
+            model: modelId,
+            messages: messages,
             temperature: 0.1,
             max_tokens: 4000
         }, settings.apiKey, {
             streaming: true,
             tabId: options.tabId,
-            requestId: options.requestId
+            requestId: options.requestId || `test_direct_${Date.now()}`,
+            isFromPopup: options.isFromPopup  // CRITICAL: Pass isFromPopup for chunk routing
         });
 
         console.log('📥 Received result from OpenAI');
@@ -946,18 +1447,68 @@ Format your response in a developer-friendly way with code examples where approp
     }
 
     async generateTestsForChunk(chunk, options, settings) {
-        const prompt = this.buildTestGenerationPrompt(chunk.content, options, chunk.context);
+        const modelId = this.getModelId(settings.model);
+
+        // Add RAG context info to chunk's context if not already there
+        // This ensures Deep Context is included in each chunk's prompt
+        if (!chunk.context.ragContext && options.ragContext && options.ragContext.chunks) {
+            const ragChunks = options.ragContext.chunks;
+            chunk.context.ragContext = ragChunks.map(c =>
+                `// File: ${c.filePath || 'unknown'}\n${c.content || c.text || ''}`
+            ).join('\n\n---\n\n');
+            chunk.context.ragSources = ragChunks.map(c => c.filePath || 'unknown');
+        }
+
+        let prompt = this.buildTestGenerationPrompt(chunk.content, options, chunk.context);
+
+        // Add note that this is part of a larger file
+        prompt = `**Note**: This is chunk ${chunk.index + 1} of ${chunk.total} from a larger code file.\n\n${prompt}`;
+
+        // TOKEN MANAGEMENT: Validate chunk doesn't exceed limits
+        const messages = [{ role: 'user', content: prompt }];
+        const validation = this.tokenManager.validateTokenCount(messages, modelId);
+
+        if (!validation.valid) {
+            console.warn(`⚠️ Chunk ${chunk.index} exceeds token limit, truncating...`);
+            const availableTokens = this.tokenManager.getAvailableTokens(modelId);
+
+            // Smart truncation for chunks: truncate RAG first, then code
+            if (chunk.context.ragContext) {
+                const ragTokens = this.tokenManager.estimateTokens(chunk.context.ragContext);
+                if (ragTokens > 1000) {
+                    chunk.context.ragContext = this.tokenManager.truncateCode(chunk.context.ragContext, 1000);
+                    console.log(`   Truncated RAG context in chunk ${chunk.index + 1} to ~1000 tokens`);
+                } else {
+                    chunk.context.ragContext = null;
+                    chunk.context.ragSources = null;
+                    console.log(`   Removed RAG context from chunk ${chunk.index + 1}`);
+                }
+                prompt = this.buildTestGenerationPrompt(chunk.content, options, chunk.context);
+                prompt = `**Note**: This is chunk ${chunk.index + 1} of ${chunk.total} from a larger code file.\n\n${prompt}`;
+                messages[0].content = prompt;
+            }
+
+            // If still too large, truncate code
+            const revalidation = this.tokenManager.validateTokenCount(messages, modelId);
+            if (!revalidation.valid) {
+                const truncatedCode = this.tokenManager.truncateCode(chunk.content, availableTokens - 2000);
+                prompt = this.buildTestGenerationPrompt(truncatedCode, options, chunk.context);
+                prompt = `**Note**: This is chunk ${chunk.index + 1} of ${chunk.total} from a larger code file (truncated).\n\n${prompt}`;
+                messages[0].content = prompt;
+            }
+        }
 
         // Enable streaming for chunk processing too
         return await this.callOpenAI({
-            model: this.getModelId(settings.model),
-            messages: [{ role: 'user', content: prompt }],
+            model: modelId,
+            messages: messages,
             temperature: 0.1,
             max_tokens: 2000
         }, settings.apiKey, {
             streaming: true,
             tabId: options.tabId,
-            requestId: options.requestId
+            requestId: options.requestId || `test_chunk_${chunk.index}_${Date.now()}`,
+            isFromPopup: options.isFromPopup  // CRITICAL: Pass isFromPopup for chunk routing
         });
     }
 
@@ -1008,6 +1559,11 @@ Format your response in a developer-friendly way with code examples where approp
 4. Generate complete, runnable test code - DO NOT return empty results
 5. Use proper imports/requires for the testing framework
 `;
+        }
+
+        // Add RAG context if available
+        if (context.ragContext && context.ragSources) {
+            prompt += `\n**Related Code from Repository (RAG Context):**\nThe following code snippets from the repository may be relevant:\n\n${context.ragContext}\n\n**Sources:** ${context.ragSources.join(', ')}\n`;
         }
 
         if (context.dependencies && context.dependencies.length > 0) {
@@ -1255,14 +1811,44 @@ Return only the complete test code with proper syntax for the detected language,
         return parts.length > 1 ? parts[1] : modelIdentifier;
     }
 
+    /**
+     * Format conversation history for inclusion in prompt
+     * @param {Array} history - Array of conversation messages
+     * @returns {string} Formatted conversation history section
+     */
+    formatConversationHistory(history) {
+        if (!history || history.length === 0) {
+            return '';
+        }
+
+        let formatted = '**Previous Conversation Context:**\n';
+        formatted += 'The following conversation provides context for test generation:\n\n';
+
+        for (const message of history) {
+            const role = message.role === 'assistant' ? 'AI' : 'User';
+            const content = message.content || '';
+
+            // Truncate very long messages to avoid token bloat
+            const truncatedContent = content.length > 1000
+                ? content.substring(0, 1000) + '... [truncated]'
+                : content;
+
+            formatted += `**${role}:** ${truncatedContent}\n\n`;
+        }
+
+        formatted += '---\n\n';
+        return formatted;
+    }
+
     async callOpenAI(requestData, apiKey, options = {}) {
         try {
-            const { streaming = false, onChunk = null, tabId = null } = options;
+            const { streaming = false, onChunk = null, tabId = null, timeout = 120000 } = options; // 2 min default timeout
 
             console.log('🔑 API Key present:', !!apiKey);
             console.log('📋 Request model:', requestData.model);
             console.log('📏 Request size:', JSON.stringify(requestData).length, 'bytes');
             console.log('🌊 Streaming mode:', streaming);
+            console.log('⏱️ Timeout:', timeout, 'ms');
             console.log('🔍 API Key preview:', apiKey ? apiKey.substring(0, 20) + '...' : 'NONE');
 
             // Add stream parameter if streaming is enabled
@@ -1280,17 +1866,36 @@ Return only the complete test code with proper syntax for the detected language,
                 'Authorization': apiKey ? `Bearer ${apiKey.substring(0, 20)}...` : 'MISSING'
             });
 
-            // Test if we can access OpenAI at all
+            // Create AbortController for timeout and cancellation
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => {
+                console.warn('⏱️ Request timeout after', timeout, 'ms');
+                controller.abort();
+            }, timeout);
+
+            // Store controller for potential cancellation
+            if (options.requestId) {
+                this.activeRequests = this.activeRequests || new Map();
+                this.activeRequests.set(options.requestId, controller);
+            }
+
             try {
-                console.log('🧪 Testing basic connectivity to OpenAI...');
-                const testResponse = await fetch('https://api.openai.com/v1/models', {
-                    method: 'GET',
-                    headers: {
-                        'Authorization': `Bearer ${apiKey}`
-                    }
-                });
-                console.log('✅ Basic connectivity test:', testResponse.ok ? 'SUCCESS' : 'FAILED', testResponse.status);
+                // Test if we can access OpenAI at all (skip for faster requests)
+                if (!streaming) {
+                    console.log('🧪 Testing basic connectivity to OpenAI...');
+                    const testResponse = await fetch('https://api.openai.com/v1/models', {
+                        method: 'GET',
+                        headers: {
+                            'Authorization': `Bearer ${apiKey}`
+                        },
+                        signal: controller.signal
+                    });
+                    console.log('✅ Basic connectivity test:', testResponse.ok ? 'SUCCESS' : 'FAILED', testResponse.status);
+                }
             } catch (testError) {
+                if (testError.name === 'AbortError') {
+                    throw new Error('Request timeout during connectivity test');
+                }
                 console.error('❌ Basic connectivity test failed:', testError.message);
                 throw new Error(`Cannot connect to OpenAI API. Check if extension has permission for api.openai.com. Original error: ${testError.message}`);
             }
@@ -1301,8 +1906,12 @@ Return only the complete test code with proper syntax for the detected language,
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${apiKey}`
                 },
-                body: JSON.stringify(requestBody)
+                body: JSON.stringify(requestBody),
+                signal: controller.signal
             });
+
+            // Clear timeout if request succeeds
+            clearTimeout(timeoutId);
 
             console.log('📡 Response status:', response.status, response.statusText);
 
@@ -1355,6 +1964,17 @@ Return only the complete test code with proper syntax for the detected language,
             console.error('❌ Error message:', error.message);
             console.error('❌ Error stack:', error.stack);
 
+            // Cleanup active request tracking
+            if (options.requestId && this.activeRequests) {
+                this.activeRequests.delete(options.requestId);
+            }
+
+            // Check if it's an abort error (timeout or cancellation)
+            if (error.name === 'AbortError') {
+                console.error('⏱️ Request was aborted (timeout or cancellation)');
+                throw new Error('Request timeout. The operation took too long. Try with a smaller code file or simpler request.');
+            }
+
             // Check if it's a network error
             if (error instanceof TypeError && error.message === 'Failed to fetch') {
                 console.error('🚫 Network error - possible causes:');
@@ -1366,6 +1986,44 @@ Return only the complete test code with proper syntax for the detected language,
             }
 
             throw error;
+        }
+    }
+
+    /**
+     * Cancel an active request
+     * @param {string} requestId - Request ID to cancel
+     */
+    cancelRequest(requestId) {
+        if (!this.activeRequests || !requestId) return;
+
+        const controller = this.activeRequests.get(requestId);
+        if (controller) {
+            console.log('🛑 Cancelling request:', requestId);
+            controller.abort();
+            this.activeRequests.delete(requestId);
+        }
+    }
+
+    /**
+     * Safely extract error message from error object
+     * @param {*} error - Error object, string, or any value
+     * @returns {string} - Safe error message string
+     */
+    getErrorMessage(error) {
+        if (!error) return 'Unknown error';
+
+        // If it's already a string, return it
+        if (typeof error === 'string') return error;
+
+        // If it has a message property
+        if (error.message) return error.message;
+
+        // Try toString()
+        try {
+            return error.toString();
+        } catch (e) {
+            // Last resort
+            return String(error);
         }
     }
 
@@ -1382,6 +2040,7 @@ Return only the complete test code with proper syntax for the detected language,
         const requestId = options.requestId;
 
         console.log('🌊 Starting to process streaming response...');
+        console.log('📍 handleStreamingResponse | isFromPopup:', options.isFromPopup, '| tabId:', tabId, '| requestId:', requestId);
 
         try {
             while (true) {
@@ -1392,7 +2051,7 @@ Return only the complete test code with proper syntax for the detected language,
 
                     // Send final chunk with isLastChunk flag to signal completion
                     if (tabId) {
-                        chrome.runtime.sendMessage({
+                        const finalMessage = {
                             action: 'TEST_CHUNK',
                             requestId: requestId || `stream_${tabId}_${Date.now()}`,
                             tabId: tabId,
@@ -1402,11 +2061,22 @@ Return only the complete test code with proper syntax for the detected language,
                                 progress: chunkCount,
                                 isLastChunk: true  // Flag to signal stream completion
                             }
-                        }, (response) => {
-                            if (chrome.runtime.lastError) {
-                                console.debug('Could not send final chunk to popup:', chrome.runtime.lastError.message);
-                            }
-                        });
+                        };
+
+                        // Send ONLY to the origin that requested it
+                        if (options.isFromPopup) {
+                            // Request came from popup - send to popup only
+                            finalMessage.targetInstance = 'popup';
+                            chrome.runtime.sendMessage(finalMessage).catch((error) => {
+                                console.debug('Could not send final chunk to popup:', error);
+                            });
+                        } else {
+                            // Request came from content script - send to tab only
+                            finalMessage.targetInstance = 'content';
+                            chrome.tabs.sendMessage(tabId, finalMessage).catch((error) => {
+                                console.debug('Could not send final chunk to tab:', error);
+                            });
+                        }
                     }
 
                     break;
@@ -1448,8 +2118,7 @@ Return only the complete test code with proper syntax for the detected language,
 
                                 // Also send to tab if tabId is provided
                                 if (tabId) {
-                                    // Properly handle chrome.runtime.sendMessage with callback
-                                    chrome.runtime.sendMessage({
+                                    const chunkMessage = {
                                         action: 'TEST_CHUNK',
                                         requestId: requestId || `stream_${tabId}_${Date.now()}`,
                                         tabId: tabId,
@@ -1458,13 +2127,24 @@ Return only the complete test code with proper syntax for the detected language,
                                             fullContent: fullContent,
                                             progress: chunkCount
                                         }
-                                    }, (response) => {
-                                        // Check for errors in callback
-                                        if (chrome.runtime.lastError) {
-                                            // Popup might be closed, log but continue
-                                            console.debug('Could not send chunk to popup:', chrome.runtime.lastError.message);
-                                        }
-                                    });
+                                    };
+
+                                    // Send ONLY to the origin that requested it
+                                    if (options.isFromPopup) {
+                                        // Request came from popup - send to popup only
+                                        // Add targetInstance to ensure popup picks it up
+                                        chunkMessage.targetInstance = 'popup';
+                                        chrome.runtime.sendMessage(chunkMessage).catch((error) => {
+                                            console.debug('Could not send chunk to popup:', error);
+                                        });
+                                    } else {
+                                        // Request came from content script - send to tab only
+                                        // Add targetInstance to ensure content script picks it up
+                                        chunkMessage.targetInstance = 'content';
+                                        chrome.tabs.sendMessage(tabId, chunkMessage).catch((error) => {
+                                            console.debug('Could not send chunk to tab:', error);
+                                        });
+                                    }
                                 }
 
                                 // Log progress every 10 chunks
@@ -1504,7 +2184,7 @@ Return only the complete test code with proper syntax for the detected language,
             sendResponse({
                 success: false,
                 valid: false,
-                error: error.message
+                error: this.getErrorMessage(error)
             });
         }
     }
@@ -1524,13 +2204,28 @@ Return only the complete test code with proper syntax for the detected language,
 
             await chrome.storage.local.set({ aiRepoSpectorSettings: settings });
 
+            // Update RAG service API key if apiKey was provided
+            if (settings.apiKey) {
+                try {
+                    const decryptedKey = await this.encryptionService.decrypt(settings.apiKey);
+                    this.ragService.apiKey = decryptedKey;
+                    this.githubService.token = settings.githubToken ?
+                        await this.encryptionService.decrypt(settings.githubToken) : null;
+                    this.gitlabService.token = settings.gitlabToken ?
+                        await this.encryptionService.decrypt(settings.gitlabToken) : null;
+                    console.log('RAG service API keys updated');
+                } catch (error) {
+                    console.warn('Failed to decrypt API key for RAG service:', error);
+                }
+            }
+
             console.log('Settings saved successfully with encryption');
             sendResponse({ success: true });
         } catch (error) {
             this.errorHandler.logError('Save settings', error);
             sendResponse({
                 success: false,
-                error: error.message
+                error: this.getErrorMessage(error)
             });
         }
     }
@@ -1562,7 +2257,7 @@ Return only the complete test code with proper syntax for the detected language,
             this.errorHandler.logError('Get settings', error);
             sendResponse({
                 success: false,
-                error: error.message
+                error: this.getErrorMessage(error)
             });
         }
     }
@@ -1617,7 +2312,7 @@ Return only the complete test code with proper syntax for the detected language,
             this.errorHandler.logError('Context analysis', error);
             sendResponse({
                 success: false,
-                error: error.message
+                error: this.getErrorMessage(error)
             });
         }
     }
@@ -1641,7 +2336,7 @@ Return only the complete test code with proper syntax for the detected language,
             this.errorHandler.logError('Diff processing', error);
             sendResponse({
                 success: false,
-                error: error.message
+                error: this.getErrorMessage(error)
             });
         }
     }
@@ -1664,6 +2359,235 @@ Return only the complete test code with proper syntax for the detected language,
             success: true,
             tabId: tabId
         });
+    }
+
+    /**
+     * Handle repository indexing request
+     */
+    async handleIndexRepository(message, sender, sendResponse) {
+        try {
+            const { url } = message.data || message.payload || {};
+            const tabId = sender?.tab?.id;
+
+            if (!url) {
+                sendResponse({ success: false, error: 'URL is required' });
+                return;
+            }
+
+            console.log('🔄 Starting repository indexing for:', url);
+
+            // Determine platform (GitHub or GitLab)
+            let service;
+            let repoId;
+
+            if (url.includes('github.com')) {
+                console.log('🔵 Detected GitHub repository');
+                service = this.githubService;
+                repoId = service.getRepoId(url);
+                console.log('📌 Extracted repoId:', repoId);
+            } else if (url.includes('gitlab.com')) {
+                console.log('🟠 Detected GitLab repository');
+                service = this.gitlabService;
+                repoId = service.getRepoId(url);
+                console.log('📌 Extracted repoId:', repoId);
+            } else {
+                sendResponse({ success: false, error: 'Unsupported platform. Only GitHub and GitLab are supported.' });
+                return;
+            }
+
+            if (!repoId) {
+                console.error('❌ Failed to extract repoId from URL:', url);
+                sendResponse({ success: false, error: 'Failed to parse repository ID from URL. Check console for details.' });
+                return;
+            }
+
+            console.log('✅ Repository identified:', { platform: url.includes('github.com') ? 'GitHub' : 'GitLab', repoId });
+
+            // Initialize RAG service
+            await this.ragService.init();
+
+            // Send initial progress
+            if (tabId) {
+                chrome.tabs.sendMessage(tabId, {
+                    type: 'INDEX_PROGRESS',
+                    data: { status: 'starting', message: 'Initializing indexing...' }
+                }).catch(() => {});
+            }
+
+            // Fetch repository files
+            const files = await service.fetchRepositoryFiles(url, (progress) => {
+                console.log('📥 Fetch progress:', progress);
+                if (tabId) {
+                    chrome.tabs.sendMessage(tabId, {
+                        type: 'INDEX_PROGRESS',
+                        data: progress
+                    }).catch(() => {});
+                }
+            });
+
+            console.log(`📚 Fetched ${files.length} files from repository`);
+
+            // Index the repository
+            const result = await this.ragService.indexRepository(
+                repoId,
+                files,
+                (progress) => {
+                    console.log('🔍 Index progress:', progress);
+                    if (tabId) {
+                        chrome.tabs.sendMessage(tabId, {
+                            type: 'INDEX_PROGRESS',
+                            data: progress
+                        }).catch(() => {});
+                    }
+                }
+            );
+
+            console.log('✅ Repository indexed successfully:', result);
+
+            sendResponse({
+                success: true,
+                repoId,
+                filesIndexed: files.length,
+                chunksIndexed: result.chunksIndexed
+            });
+        } catch (error) {
+            console.error('❌ Repository indexing failed:', error);
+            this.errorHandler.logError('Index repository', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
+    }
+
+    /**
+     * Check if a repository is indexed
+     */
+    async handleCheckIndexStatus(message, sendResponse) {
+        try {
+            const { url } = message.data || message.payload || {};
+
+            if (!url) {
+                sendResponse({ success: false, error: 'URL is required' });
+                return;
+            }
+
+            // Determine repoId
+            let repoId;
+            if (url.includes('github.com')) {
+                repoId = this.githubService.getRepoId(url);
+            } else if (url.includes('gitlab.com')) {
+                repoId = this.gitlabService.getRepoId(url);
+            } else {
+                sendResponse({ success: false, error: 'Unsupported platform' });
+                return;
+            }
+
+            // Check if indexed
+            await this.ragService.init();
+            const isIndexed = await this.ragService.vectorStore.isIndexed(repoId);
+
+            sendResponse({
+                success: true,
+                isIndexed,
+                repoId
+            });
+        } catch (error) {
+            this.errorHandler.logError('Check index status', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
+    }
+
+    /**
+     * Clear index for a repository
+     */
+    async handleClearIndex(message, sendResponse) {
+        try {
+            const { url, repoId: providedRepoId } = message.data || message.payload || {};
+
+            let repoId = providedRepoId;
+
+            if (!repoId && url) {
+                // Determine repoId from URL
+                if (url.includes('github.com')) {
+                    repoId = this.githubService.getRepoId(url);
+                } else if (url.includes('gitlab.com')) {
+                    repoId = this.gitlabService.getRepoId(url);
+                }
+            }
+
+            if (!repoId) {
+                sendResponse({ success: false, error: 'Repository ID or URL is required' });
+                return;
+            }
+
+            await this.ragService.init();
+            await this.ragService.vectorStore.clearRepo(repoId);
+
+            console.log('🗑️ Cleared index for repository:', repoId);
+
+            sendResponse({
+                success: true,
+                repoId
+            });
+        } catch (error) {
+            this.errorHandler.logError('Clear index', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
+    }
+
+    /**
+     * Get indexing statistics
+     */
+    async handleGetIndexStats(message, sendResponse) {
+        try {
+            await this.ragService.init();
+            const stats = await this.ragService.vectorStore.getStats();
+
+            sendResponse({
+                success: true,
+                stats
+            });
+        } catch (error) {
+            this.errorHandler.logError('Get index stats', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
+    }
+
+    /**
+     * Cancel an active request
+     */
+    handleCancelRequest(message, sendResponse) {
+        try {
+            const { requestId } = message.data || message.payload || {};
+
+            if (!requestId) {
+                sendResponse({ success: false, error: 'Request ID is required' });
+                return;
+            }
+
+            this.cancelRequest(requestId);
+
+            sendResponse({
+                success: true,
+                message: 'Request cancelled'
+            });
+        } catch (error) {
+            this.errorHandler.logError('Cancel request', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
     }
 
     async processQueue() {
@@ -1806,7 +2730,7 @@ async function handleMessage(request, sender, sendResponse, serviceInstance) {
                     console.error('RAG initialization failed:', error);
                     sendResponse({
                         success: false,
-                        error: error.message || 'Failed to initialize RAG service'
+                        error: this.getErrorMessage(error) || 'Failed to initialize RAG service'
                     });
                 }
                 break;
@@ -1881,7 +2805,7 @@ async function handleMessage(request, sender, sendResponse, serviceInstance) {
                     sendResponse({ success: true, repoId, filesIndexed: files.length });
                 } catch (error) {
                     console.error('Auto-index error:', error);
-                    sendResponse({ success: false, error: error.message });
+                    sendResponse({ success: false, error: this.getErrorMessage(error) });
                 }
                 break;
 
@@ -1898,7 +2822,7 @@ async function handleMessage(request, sender, sendResponse, serviceInstance) {
         }
     } catch (error) {
         console.error('Background error:', error);
-        sendResponse({ success: false, error: error.message });
+        sendResponse({ success: false, error: this.getErrorMessage(error) });
     }
 }
 

@@ -1,12 +1,13 @@
 {
     "manifest_version": 3,
     "name": "RepoSpector",
-    "version": "3.0.0",
+    "version": "3.1.0",
     "description": "AI-powered code analysis and test generation for GitHub, GitLab, and more",
     "permissions": [
         "activeTab",
         "storage",
-        "scripting"
+        "scripting",
+        "offscreen"
     ],
     "host_permissions": [
         "https://*/*",

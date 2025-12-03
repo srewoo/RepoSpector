@@ -162,7 +162,7 @@ expect.extend({
                 : `expected ${received} to be a valid API key (format: sk-[48 alphanumeric chars])`
         };
     },
-    
+
     toBeEncrypted(received) {
         // Check if string looks encrypted (base64 with non-ASCII chars)
         const pass = /^[A-Za-z0-9+/]+=*$/.test(received) && received.length > 20;
@@ -173,7 +173,7 @@ expect.extend({
                 : `expected ${received} to be encrypted (base64 format)`
         };
     },
-    
+
     toContainTestCase(received, testCasePattern) {
         const pass = received.includes(testCasePattern);
         return {
@@ -189,4 +189,9 @@ expect.extend({
 global.resetAllMocks = () => {
     jest.clearAllMocks();
     document.body.innerHTML = '';
-}; 
+};
+
+// Polyfill TextEncoder/TextDecoder for js-tiktoken
+const { TextEncoder, TextDecoder } = require('util');
+global.TextEncoder = TextEncoder;
+global.TextDecoder = TextDecoder; 

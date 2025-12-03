@@ -92,15 +92,18 @@ export class TransformersEmbeddingService {
             this.initializationError = error;
             console.error('Failed to load embedding model:', error);
 
+            // Safely extract error message
+            const errMsg = error?.message || error?.toString?.() || String(error) || 'Unknown error';
+
             // Provide helpful error messages based on the error type
-            if (error.message.includes('fetch') || error.message.includes('network')) {
+            if (errMsg.includes('fetch') || errMsg.includes('network')) {
                 throw new Error('Cannot download model. Check internet connection and CSP settings.');
-            } else if (error.message.includes('WebAssembly') || error.message.includes('WASM')) {
+            } else if (errMsg.includes('WebAssembly') || errMsg.includes('WASM')) {
                 throw new Error('WebAssembly not supported in this context. Use OpenAI embedding provider instead.');
-            } else if (error.message.includes('import')) {
+            } else if (errMsg.includes('import')) {
                 throw new Error('Failed to load Transformers.js library. Extension may need to be reinstalled.');
             } else {
-                throw new Error(`Transformers.js initialization failed: ${error.message}`);
+                throw new Error(`Transformers.js initialization failed: ${errMsg}`);
             }
         } finally {
             this.isLoading = false;
@@ -139,7 +142,8 @@ export class TransformersEmbeddingService {
             return embeddings;
         } catch (error) {
             console.error('Error generating embeddings:', error);
-            throw new Error(`Failed to generate embeddings: ${error.message}`);
+            const errMsg = error?.message || error?.toString?.() || String(error) || 'Unknown error';
+            throw new Error(`Failed to generate embeddings: ${errMsg}`);
         }
     }
 

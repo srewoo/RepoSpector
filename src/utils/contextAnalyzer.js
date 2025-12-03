@@ -1,27 +1,54 @@
 // Context analyzer for smart test generation
 
-// Forward declaration - RateLimiter is defined at the end of this file
-let RateLimiter;
+// RateLimiter class for API rate limiting
+class RateLimiter {
+    constructor() {
+        this.requests = [];
+        this.maxRequests = 60; // GitHub's rate limit
+        this.windowMs = 3600000; // 1 hour
+    }
+
+    async canMakeRequest() {
+        const now = Date.now();
+
+        // Remove old requests
+        this.requests = this.requests.filter(time => now - time < this.windowMs);
+
+        if (this.requests.length < this.maxRequests) {
+            this.requests.push(now);
+            return true;
+        }
+
+        return false;
+    }
+}
 
 export class ContextAnalyzer {
     constructor() {
         this.cache = new Map();
-        // Initialize RateLimiter only if it's been defined
-        this.rateLimiter = null; // Will be initialized after class definitions
+        // Initialize RateLimiter immediately (defined at end of file)
+        this.rateLimiter = null;
         this.MAX_CONTEXT_TOKENS = 4000; // Reserve tokens for context
         this.MAX_FILES_TO_ANALYZE = 10; // Limit for performance
         this.ragService = null;
+
+        // Defer rate limiter initialization to avoid circular dependency
+        // Will be initialized on first use
+        this._rateLimiterReady = false;
     }
 
     setRagService(service) {
         this.ragService = service;
     }
 
-    // Initialize rate limiter - call this after the class is loaded
-    initRateLimiter() {
-        if (!this.rateLimiter && RateLimiter) {
+    // Lazy initialization of rate limiter
+    _ensureRateLimiter() {
+        if (!this._rateLimiterReady) {
+            // RateLimiter is now defined at the top of this file
             this.rateLimiter = new RateLimiter();
+            this._rateLimiterReady = true;
         }
+        return this.rateLimiter;
     }
 
     /**
@@ -64,15 +91,33 @@ export class ContextAnalyzer {
         if (level === 'deep' && this.ragService) {
             console.log('Using Deep Context (RAG)...');
             try {
-                // Use the code itself as the query to find semantically similar chunks
-                // In a real scenario, we might want to extract keywords or use a specific query
-                const relevantChunks = await this.ragService.retrieveContext(
-                    options.repoId || 'current', // We need repoId passed in options
-                    code.substring(0, 500) // Use first 500 chars as query
-                );
+                // Extract repoId from URL automatically
+                const repoId = this.extractRepoIdFromUrl(url, platform);
 
-                context.ragContext = relevantChunks.map(c => c.content).join('\n\n');
-                context.ragSources = relevantChunks.map(c => c.filePath);
+                if (repoId) {
+                    console.log('🔍 Searching RAG index for repo:', repoId);
+
+                    // Build intelligent query from code
+                    const smartQuery = this.buildSmartRAGQuery(code, context);
+                    console.log('🧠 Smart RAG query:', smartQuery.substring(0, 200) + '...');
+
+                    // Use intelligent query to find semantically similar chunks
+                    const relevantChunks = await this.ragService.retrieveContext(
+                        repoId,
+                        smartQuery,
+                        7 // Retrieve more chunks for better context
+                    );
+
+                    if (relevantChunks && relevantChunks.length > 0) {
+                        context.ragContext = relevantChunks.map(c => c.content).join('\n\n');
+                        context.ragSources = relevantChunks.map(c => c.filePath);
+                        console.log(`✅ Retrieved ${relevantChunks.length} relevant chunks from RAG`);
+                    } else {
+                        console.log('ℹ️ No RAG context found for this repository. Index it first in Settings.');
+                    }
+                } else {
+                    console.warn('Could not extract repoId from URL:', url);
+                }
             } catch (error) {
                 console.warn('RAG retrieval failed:', error);
             }
@@ -123,6 +168,64 @@ export class ContextAnalyzer {
         if (url.includes('git.sr.ht')) return 'sourcehut';
         if (url.includes('pagure.io')) return 'pagure';
         return 'unknown';
+    }
+
+    /**
+     * Extract repository ID from URL (for multi-repo support)
+     * @param {string} url - Repository URL
+     * @param {string} platform - Platform name (github, gitlab, etc.)
+     * @returns {string|null} Repository ID (e.g., "facebook/react")
+     */
+    extractRepoIdFromUrl(url, platform) {
+        if (!url || typeof url !== 'string') {
+            return null;
+        }
+
+        try {
+            // GitHub: github.com/owner/repo
+            if (platform === 'github' || url.includes('github.com')) {
+                const match = url.match(/github\.com\/([^\/]+)\/([^\/]+)/);
+                if (match) {
+                    const owner = match[1];
+                    const repo = match[2].split(/[?#]/)[0].replace(/\.git$/, '');
+                    return `${owner}/${repo}`;
+                }
+            }
+
+            // GitLab: gitlab.com/owner/repo or gitlab.com/group/subgroup/repo (nested groups supported)
+            if (platform === 'gitlab' || url.includes('gitlab.com')) {
+                // Match everything before /-/ (which separates repo path from file paths)
+                const match = url.match(/gitlab\.com\/(.+?)(?:\/-\/|\.git|$|\?|#)/);
+                if (match) {
+                    let path = match[1].replace(/\.git$/, '').trim();
+                    // Remove trailing slashes
+                    path = path.replace(/\/$/, '');
+                    return path;
+                }
+            }
+
+            // Bitbucket: bitbucket.org/owner/repo
+            if (platform === 'bitbucket' || url.includes('bitbucket.org')) {
+                const match = url.match(/bitbucket\.org\/([^\/]+)\/([^\/]+)/);
+                if (match) {
+                    const owner = match[1];
+                    const repo = match[2].split(/[?#]/)[0].replace(/\.git$/, '');
+                    return `${owner}/${repo}`;
+                }
+            }
+
+            // Azure DevOps: dev.azure.com/org/project/_git/repo
+            if (platform === 'azure' || url.includes('dev.azure.com')) {
+                const match = url.match(/dev\.azure\.com\/([^\/]+)\/([^\/]+)\/_git\/([^\/]+)/);
+                if (match) {
+                    return `${match[1]}/${match[2]}/${match[3]}`;
+                }
+            }
+        } catch (error) {
+            console.warn('Failed to extract repoId from URL:', url, error);
+        }
+
+        return null;
     }
 
     /**
@@ -250,9 +353,9 @@ export class ContextAnalyzer {
             }
 
             // Rate limit check
-            // Initialize rate limiter if needed
-            this.initRateLimiter();
-            if (this.rateLimiter && !await this.rateLimiter.canMakeRequest()) {
+            // Ensure rate limiter is initialized
+            const rateLimiter = this._ensureRateLimiter();
+            if (rateLimiter && !await rateLimiter.canMakeRequest()) {
                 console.log('GitHub API rate limit reached, using basic context');
                 return;
             }
@@ -423,9 +526,9 @@ export class ContextAnalyzer {
 
         // Fetch files in parallel with token limit
         const fetchPromises = filesToFetch.map(async (path) => {
-            // Initialize rate limiter if needed
-            this.initRateLimiter();
-            if (this.rateLimiter && !await this.rateLimiter.canMakeRequest()) return null;
+            // Ensure rate limiter is initialized
+            const rateLimiter = this._ensureRateLimiter();
+            if (rateLimiter && !await rateLimiter.canMakeRequest()) return null;
 
             try {
                 const fileUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`;
@@ -681,9 +784,9 @@ export class ContextAnalyzer {
             }
 
             // Rate limit check
-            // Initialize rate limiter if needed
-            this.initRateLimiter();
-            if (this.rateLimiter && !await this.rateLimiter.canMakeRequest()) {
+            // Ensure rate limiter is initialized
+            const rateLimiter = this._ensureRateLimiter();
+            if (rateLimiter && !await rateLimiter.canMakeRequest()) {
                 // Rate limit reached, using basic context
                 return;
             }
@@ -997,9 +1100,9 @@ export class ContextAnalyzer {
         const fetchedFiles = [];
 
         for (const filePath of filePaths.slice(0, 5)) { // Limit to 5 files
-            // Initialize rate limiter if needed
-            this.initRateLimiter();
-            if (this.rateLimiter && !await this.rateLimiter.canMakeRequest()) break;
+            // Ensure rate limiter is initialized
+            const rateLimiter = this._ensureRateLimiter();
+            if (rateLimiter && !await rateLimiter.canMakeRequest()) break;
 
             try {
                 const fileUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${filePath}?ref=${branch}`;
@@ -1516,27 +1619,152 @@ export class ContextAnalyzer {
 
         return patterns;
     }
-}
 
-// Assign RateLimiter class to the variable
-RateLimiter = class RateLimiter {
-    constructor() {
-        this.requests = [];
-        this.maxRequests = 60; // GitHub's rate limit
-        this.windowMs = 3600000; // 1 hour
-    }
+    /**
+     * Build intelligent RAG query from code
+     * Extracts key entities and creates focused query for better retrieval
+     */
+    buildSmartRAGQuery(code, context) {
+        const queryParts = [];
 
-    async canMakeRequest() {
-        const now = Date.now();
+        // 1. Extract function/class names (most important for finding related code)
+        const functions = this.extractFunctionNames(code);
+        const classes = this.extractClassNames(code);
 
-        // Remove old requests
-        this.requests = this.requests.filter(time => now - time < this.windowMs);
-
-        if (this.requests.length < this.maxRequests) {
-            this.requests.push(now);
-            return true;
+        if (functions.length > 0) {
+            queryParts.push(`Functions: ${functions.slice(0, 5).join(', ')}`);
+        }
+        if (classes.length > 0) {
+            queryParts.push(`Classes: ${classes.slice(0, 3).join(', ')}`);
         }
 
-        return false;
+        // 2. Extract imports (find files that import similar modules)
+        const imports = context.imports || this.extractImports(code);
+        if (imports && imports.length > 0) {
+            // Take first 10 imports
+            const importList = imports.slice(0, 10).map(imp => {
+                if (typeof imp === 'string') return imp;
+                return imp.module || imp.name || '';
+            }).filter(Boolean);
+
+            if (importList.length > 0) {
+                queryParts.push(`Imports: ${importList.join(', ')}`);
+            }
+        }
+
+        // 3. Extract key variables and constants (for finding usage patterns)
+        const variables = this.extractKeyVariables(code);
+        if (variables.length > 0) {
+            queryParts.push(`Key variables: ${variables.slice(0, 8).join(', ')}`);
+        }
+
+        // 4. Include language and file type for better context
+        if (context.language) {
+            queryParts.push(`Language: ${context.language}`);
+        }
+
+        // 5. Add code snippet for semantic similarity
+        // Use first 300 chars focusing on meaningful code (skip comments)
+        const codeSnippet = code
+            .split('\n')
+            .filter(line => {
+                const trimmed = line.trim();
+                return trimmed &&
+                       !trimmed.startsWith('//') &&
+                       !trimmed.startsWith('/*') &&
+                       !trimmed.startsWith('*') &&
+                       !trimmed.startsWith('#');
+            })
+            .join('\n')
+            .substring(0, 300);
+
+        queryParts.push(`Code: ${codeSnippet}`);
+
+        return queryParts.join('\n\n');
     }
-};
+
+    /**
+     * Extract function names from code
+     */
+    extractFunctionNames(code) {
+        const functions = [];
+
+        // JavaScript/TypeScript function patterns
+        const patterns = [
+            /function\s+(\w+)\s*\(/g,                    // function name()
+            /const\s+(\w+)\s*=\s*(?:async\s+)?\([^)]*\)\s*=>/g,  // const name = () =>
+            /(\w+)\s*:\s*(?:async\s+)?function/g,        // name: function
+            /async\s+function\s+(\w+)/g,                 // async function name
+            /export\s+(?:async\s+)?function\s+(\w+)/g,   // export function name
+            // Python
+            /def\s+(\w+)\s*\(/g,                         // def name(
+            // Java/C#
+            /(?:public|private|protected)\s+\w+\s+(\w+)\s*\(/g,  // public type name(
+            // Go
+            /func\s+(\w+)\s*\(/g,                        // func name(
+        ];
+
+        patterns.forEach(pattern => {
+            let match;
+            while ((match = pattern.exec(code)) !== null) {
+                if (match[1] && match[1].length > 1) {
+                    functions.push(match[1]);
+                }
+            }
+        });
+
+        return [...new Set(functions)]; // Remove duplicates
+    }
+
+    /**
+     * Extract class names from code
+     */
+    extractClassNames(code) {
+        const classes = [];
+
+        const patterns = [
+            /class\s+(\w+)/g,                           // class Name
+            /interface\s+(\w+)/g,                       // interface Name
+            /type\s+(\w+)\s*=/g,                        // type Name =
+            /enum\s+(\w+)/g,                            // enum Name
+        ];
+
+        patterns.forEach(pattern => {
+            let match;
+            while ((match = pattern.exec(code)) !== null) {
+                if (match[1] && match[1].length > 1) {
+                    classes.push(match[1]);
+                }
+            }
+        });
+
+        return [...new Set(classes)];
+    }
+
+    /**
+     * Extract key variables and constants
+     */
+    extractKeyVariables(code) {
+        const variables = [];
+
+        const patterns = [
+            /const\s+([A-Z_][A-Z0-9_]+)\s*=/g,          // CONST_NAME
+            /const\s+(\w+)\s*=\s*(?:require|import)/g,  // const name = require/import
+            /let\s+(\w+)\s*=/g,                         // let name =
+            /var\s+(\w+)\s*=/g,                         // var name =
+        ];
+
+        patterns.forEach(pattern => {
+            let match;
+            while ((match = pattern.exec(code)) !== null) {
+                if (match[1] && match[1].length > 2) {
+                    variables.push(match[1]);
+                }
+            }
+        });
+
+        return [...new Set(variables)];
+    }
+}
+
+// RateLimiter class moved to top of file for proper scoping

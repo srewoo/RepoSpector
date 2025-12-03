@@ -1,3 +1,5 @@
+import { encodingForModel } from 'js-tiktoken';
+
 /**
  * Conversation History Manager
  * Manages conversation context and history for continuous conversations
@@ -14,6 +16,7 @@ export class ConversationHistoryManager {
         this.sessionId = null;
         this.codeContext = null;
         this.initialized = false;
+        this.tokenizer = encodingForModel('gpt-4o-mini');
     }
 
     /**
@@ -23,6 +26,9 @@ export class ConversationHistoryManager {
         if (this.initialized) return;
 
         try {
+            // Clean up old sessions first
+            await this.cleanupOldSessions();
+
             // Get or create session ID
             const stored = await this.getFromStorage(SESSION_KEY);
             if (stored && stored.sessionId && this.isSessionValid(stored)) {
@@ -43,6 +49,34 @@ export class ConversationHistoryManager {
             console.error('Failed to initialize conversation history:', error);
             this.sessionId = this.generateSessionId();
             this.initialized = true;
+        }
+    }
+
+    /**
+     * Clean up old sessions and expired history
+     */
+    async cleanupOldSessions() {
+        try {
+            const MAX_STORAGE_AGE = 7 * 24 * 60 * 60 * 1000; // 7 days
+            const stored = await this.getFromStorage(STORAGE_KEY);
+
+            if (stored && stored.timestamp) {
+                const age = Date.now() - stored.timestamp;
+
+                if (age > MAX_STORAGE_AGE) {
+                    console.log(`🗑️ Cleaning up old conversation history (age: ${Math.round(age / (24 * 60 * 60 * 1000))} days)`);
+                    await this.saveToStorage(STORAGE_KEY, null);
+                }
+            }
+
+            // Also check and clean session info
+            const sessionStored = await this.getFromStorage(SESSION_KEY);
+            if (sessionStored && !this.isSessionValid(sessionStored)) {
+                console.log('🗑️ Cleaning up expired session');
+                await this.saveToStorage(SESSION_KEY, null);
+            }
+        } catch (error) {
+            console.warn('Failed to cleanup old sessions:', error);
         }
     }
 
@@ -155,16 +189,13 @@ export class ConversationHistoryManager {
      * Prune history to fit within token limits
      */
     pruneHistoryByTokens(history) {
-        // Simple token estimation (4 chars ≈ 1 token)
-        const estimateTokens = (text) => Math.ceil((text || '').length / 4);
-
         let totalTokens = 0;
         const pruned = [];
 
         // Process from most recent to oldest
         for (let i = history.length - 1; i >= 0; i--) {
             const msg = history[i];
-            const msgTokens = estimateTokens(msg.content);
+            const msgTokens = this.countTokens(msg.content);
 
             if (totalTokens + msgTokens <= MAX_CONTEXT_TOKENS) {
                 pruned.unshift(msg);
@@ -176,6 +207,19 @@ export class ConversationHistoryManager {
         }
 
         return pruned;
+    }
+
+    /**
+     * Count tokens using tiktoken
+     */
+    countTokens(text) {
+        if (!text) return 0;
+        try {
+            return this.tokenizer.encode(text).length;
+        } catch (e) {
+            console.warn('Token counting failed, falling back to estimation', e);
+            return Math.ceil(text.length / 4);
+        }
     }
 
     /**

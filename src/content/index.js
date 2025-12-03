@@ -176,9 +176,11 @@ class ContentExtractor {
             }
         } catch (error) {
             this.errorHandler.logError('Content script message handler', error);
-            sendResponse({ 
-                success: false, 
-                error: error.message 
+            // Safely extract error message
+            const errMsg = error?.message || error?.toString?.() || String(error) || 'Unknown error';
+            sendResponse({
+                success: false,
+                error: errMsg
             });
         }
     }
@@ -276,9 +278,11 @@ class ContentExtractor {
 
         } catch (error) {
             this.errorHandler.logError('Code extraction', error);
+            // Safely extract error message
+            const errMsg = error?.message || error?.toString?.() || String(error) || 'Unknown error';
             sendResponse({
                 success: false,
-                error: error.message
+                error: errMsg
             });
         } finally {
             this.isExtracting = false;
@@ -315,7 +319,9 @@ class ContentExtractor {
             }
         } catch (error) {
             console.error("Error extracting code:", error);
-            sendResponse({ success: false, error: error.message });
+            // Safely extract error message
+            const errMsg = error?.message || error?.toString?.() || String(error) || 'Unknown error';
+            sendResponse({ success: false, error: errMsg });
         }
     }
 
@@ -338,9 +344,11 @@ class ContentExtractor {
             });
         } catch (error) {
             this.errorHandler.logError('Diff extraction', error);
-            sendResponse({ 
-                success: false, 
-                error: error.message 
+            // Safely extract error message
+            const errMsg = error?.message || error?.toString?.() || String(error) || 'Unknown error';
+            sendResponse({
+                success: false,
+                error: errMsg
             });
         }
     }
@@ -354,9 +362,11 @@ class ContentExtractor {
             });
         } catch (error) {
             this.errorHandler.logError('Page context extraction', error);
-            sendResponse({ 
-                success: false, 
-                error: error.message 
+            // Safely extract error message
+            const errMsg = error?.message || error?.toString?.() || String(error) || 'Unknown error';
+            sendResponse({
+                success: false,
+                error: errMsg
             });
         }
     }
@@ -1825,9 +1835,11 @@ class ContentExtractor {
             };
 
         } catch (error) {
+            // Safely extract error message
+            const errMsg = error?.message || error?.toString?.() || String(error) || 'Unknown error';
             return {
                 success: false,
-                error: error.message
+                error: errMsg
             };
         }
     }

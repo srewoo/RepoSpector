@@ -285,7 +285,9 @@ export class TestGenerator {
                         } catch (error) {
                             attempts++;
                             lastError = error;
-                            console.warn(`⚠️  Test generation attempt ${attempts} failed:`, error.message);
+                            // Safely extract error message
+                            const errMsg = error?.message || error?.toString?.() || String(error) || 'Unknown error';
+                            console.warn(`⚠️  Test generation attempt ${attempts} failed:`, errMsg);
 
                             if (attempts < maxRetries) {
                                 console.log('🔄 Retrying with fallback approach...');
@@ -530,6 +532,8 @@ export class TestGenerator {
 
         } catch (error) {
             console.error(`Failed to prepare metadata for ${func.name}:`, error);
+            // Safely extract error message
+            const errMsg = error?.message || error?.toString?.() || String(error) || 'Unknown error';
 
             return {
                 functionName: func.name,
@@ -539,7 +543,7 @@ export class TestGenerator {
                 metadata: {
                     generatedViaLLM: true,
                     hasTemplateGenerated: false,
-                    error: error.message
+                    error: errMsg
                 }
             };
         }

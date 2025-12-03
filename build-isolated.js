@@ -13,6 +13,7 @@ import { babel } from '@rollup/plugin-babel';
 import replace from '@rollup/plugin-replace';
 import terser from '@rollup/plugin-terser';
 import { build as viteBuild } from 'vite';
+import { build as esbuild } from 'esbuild';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -263,6 +264,47 @@ async function copyAssets() {
     if (fs.existsSync('src/assets/styles')) {
         fs.cpSync('src/assets/styles', 'dist/assets/styles', { recursive: true });
         log('Styles copied', 'success');
+    }
+
+    // Copy offscreen document for local embeddings
+    if (fs.existsSync('src/offscreen.html')) {
+        fs.copyFileSync('src/offscreen.html', 'dist/offscreen.html');
+        log('Offscreen HTML copied', 'success');
+    }
+
+    // Copy mock-chrome.js for popup (used in development mode)
+    if (fs.existsSync('src/popup/mock-chrome.js')) {
+        fs.copyFileSync('src/popup/mock-chrome.js', 'dist/src/popup/mock-chrome.js');
+        log('Mock Chrome API copied', 'success');
+    }
+
+    // Build offscreen script
+    if (fs.existsSync('src/offscreen')) {
+        await buildOffscreenScript();
+    }
+}
+
+async function buildOffscreenScript() {
+    log('Building offscreen script...');
+
+    try {
+        await esbuild({
+            entryPoints: ['src/offscreen/offscreen.js'],
+            bundle: true,
+            outfile: 'dist/offscreen/offscreen.js',
+            format: 'esm',
+            platform: 'browser',
+            target: 'es2020',
+            external: [],
+            define: {
+                'process.env.NODE_ENV': '"production"'
+            }
+        });
+
+        log('Offscreen script built successfully!', 'success');
+    } catch (error) {
+        log(`Failed to build offscreen script: ${error.message}`, 'error');
+        throw error;
     }
 }
 

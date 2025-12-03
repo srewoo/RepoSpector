@@ -7,20 +7,87 @@ export class GitLabService {
         this.token = token;
         this.baseUrl = 'https://gitlab.com/api/v4';
 
-        // Common code file extensions to index (same as GitHub)
+        // Code file extensions to index (including documentation) - matches GitHubService
         this.codeExtensions = [
+            // JavaScript/TypeScript
             'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs',
-            'py', 'pyw',
-            'java', 'kt', 'scala',
-            'go', 'rs',
-            'rb', 'php',
-            'c', 'cpp', 'cc', 'h', 'hpp',
-            'cs', 'vb',
-            'swift', 'dart',
+            // Python
+            'py', 'pyw', 'pyx', 'pyi',
+            // Java/JVM
+            'java', 'kt', 'scala', 'groovy',
+            // Go
+            'go',
+            // Rust
+            'rs',
+            // Ruby
+            'rb', 'rake',
+            // PHP
+            'php', 'phtml',
+            // C/C++
+            'c', 'cpp', 'cc', 'cxx', 'h', 'hpp', 'hxx',
+            // C#/.NET
+            'cs', 'vb', 'fs',
+            // Swift
+            'swift',
+            // Dart
+            'dart',
+            // Shell scripts
             'sh', 'bash', 'zsh',
-            'yaml', 'yml', 'json', 'xml',
+            // Config files (useful for context)
+            'yaml', 'yml', 'json', 'toml', 'ini',
+            // Query languages
             'sql', 'graphql',
-            'vue', 'svelte'
+            // Web frameworks
+            'vue', 'svelte',
+            // Documentation (IMPORTANT for context!)
+            'md', 'markdown', 'mdx', 'txt', 'rst',
+            // Other useful files
+            'proto', 'thrift', 'gradle', 'cmake'
+        ];
+
+        // File extensions to EXCLUDE (ignore these completely)
+        this.excludeExtensions = [
+            // Styles
+            'css', 'scss', 'sass', 'less', 'styl',
+            // Images
+            'png', 'jpg', 'jpeg', 'gif', 'svg', 'ico', 'webp', 'bmp', 'tiff',
+            // Media
+            'mp4', 'avi', 'mov', 'wmv', 'flv', 'mp3', 'wav', 'ogg',
+            // Archives
+            'zip', 'tar', 'gz', 'rar', '7z', 'bz2',
+            // Databases
+            'db', 'sqlite', 'sqlite3', 'mdb', 'accdb',
+            // Binary/Compiled
+            'exe', 'dll', 'so', 'dylib', 'o', 'obj', 'class', 'jar', 'war',
+            // Lock files
+            'lock', 'lockb',
+            // Map files
+            'map',
+            // Fonts
+            'woff', 'woff2', 'ttf', 'eot', 'otf',
+            // Other binary/non-code
+            'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx'
+        ];
+
+        // Directories to exclude
+        this.excludeDirs = [
+            'node_modules',
+            'vendor',
+            'dist',
+            'build',
+            '.git',
+            '.gitlab',
+            'coverage',
+            '__pycache__',
+            '.pytest_cache',
+            '.venv',
+            'venv',
+            'env',
+            '.idea',
+            '.vscode',
+            'target',  // Maven/Rust
+            'out',
+            'bin'
         ];
 
         this.maxFiles = 500;
@@ -32,22 +99,43 @@ export class GitLabService {
      * @returns {{projectPath: string, branch: string} | null}
      */
     parseGitLabUrl(url) {
+        // GitLab supports nested groups: gitlab.com/group/subgroup/project
+        // We need to match everything before /-/ or end of URL
+        console.log('🔍 Parsing GitLab URL:', url);
+
         const patterns = [
-            /gitlab\.com\/([^\/]+\/[^\/]+)/,
-            /gitlab\.com\/([^\/]+\/[^\/]+)\/-\/tree\/([^\/]+)/,
-            /gitlab\.com\/([^\/]+\/[^\/]+)\/-\/blob\/([^\/]+)/
+            // With branch (tree or blob): gitlab.com/path/to/project/-/tree/branch or /-/blob/branch
+            /gitlab\.com\/(.+?)\/-\/(?:tree|blob)\/([^\/]+)/,
+            // Without branch but with /-/: gitlab.com/path/to/project/-/
+            /gitlab\.com\/(.+?)\/-\//,
+            // Simple format: gitlab.com/path/to/project (no /-/)
+            /gitlab\.com\/([^?#]+)/
         ];
 
         for (const pattern of patterns) {
             const match = url.match(pattern);
             if (match) {
+                let projectPath = match[1].replace(/\.git$/, '').trim();
+
+                // Remove trailing slashes
+                projectPath = projectPath.replace(/\/$/, '');
+
+                const branch = match[2] || 'main';
+
+                console.log('✅ Parsed GitLab URL:', {
+                    projectPath,
+                    branch,
+                    pattern: pattern.toString()
+                });
+
                 return {
-                    projectPath: match[1].replace(/\.git$/, ''),
-                    branch: match[2] || 'main'
+                    projectPath: projectPath,
+                    branch: branch
                 };
             }
         }
 
+        console.warn('❌ Failed to parse GitLab URL');
         return null;
     }
 
@@ -83,11 +171,35 @@ export class GitLabService {
             );
 
             if (!response.ok) {
-                // Try master branch if main fails
-                if (branch === 'main') {
+                // Try to get detailed error message
+                let errorMessage = `GitLab API error (${response.status}): ${response.statusText}`;
+                try {
+                    const errorData = await response.json();
+                    if (errorData.message) {
+                        errorMessage = `GitLab API error: ${errorData.message}`;
+                    } else if (errorData.error) {
+                        errorMessage = `GitLab API error: ${errorData.error}`;
+                    }
+                } catch (e) {
+                    // If JSON parsing fails, use status text
+                }
+
+                // Try master branch if main fails (404 or branch not found)
+                if (branch === 'main' && (response.status === 404 || errorMessage.includes('branch'))) {
+                    console.log('Branch "main" not found, trying "master"...');
                     return await this.fetchRepoTree(projectPath, 'master');
                 }
-                throw new Error(`GitLab API error: ${response.statusText}`);
+
+                // Add helpful context to error
+                if (response.status === 401) {
+                    errorMessage += '\n\n💡 Tip: This might be a private repository. Add your GitLab token in Settings.';
+                } else if (response.status === 404) {
+                    errorMessage += '\n\n💡 Tip: Repository not found. Check the URL or add GitLab token for private repos.';
+                } else if (response.status === 403) {
+                    errorMessage += '\n\n💡 Tip: Access forbidden. Your GitLab token might not have the required permissions (read_api, read_repository).';
+                }
+
+                throw new Error(errorMessage);
             }
 
             return await response.json();
@@ -98,18 +210,35 @@ export class GitLabService {
     }
 
     /**
-     * Filter files by extension
+     * Filter files by extension and directory (matches GitHubService)
      * @param {Array} tree
      * @returns {Array}
      */
     filterCodeFiles(tree) {
         return tree
-            .filter(item => item.type === 'blob') // Only files
+            .filter(item => item.type === 'blob') // Only files, not directories
             .filter(item => {
+                // Check if file is in excluded directory
+                const pathParts = item.path.split('/');
+                const isInExcludedDir = pathParts.some(part =>
+                    this.excludeDirs.includes(part)
+                );
+                if (isInExcludedDir) {
+                    return false;
+                }
+
+                // Get file extension
                 const ext = item.path.split('.').pop().toLowerCase();
+
+                // First check exclusion list (explicit deny)
+                if (this.excludeExtensions.includes(ext)) {
+                    return false;
+                }
+
+                // Then check inclusion list (explicit allow)
                 return this.codeExtensions.includes(ext);
             })
-            .slice(0, this.maxFiles);
+            .slice(0, this.maxFiles); // Limit number of files
     }
 
     /**
