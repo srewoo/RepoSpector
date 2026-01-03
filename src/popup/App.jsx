@@ -6,6 +6,7 @@ import { ReposView } from './components/ReposView';
 import { TabNavigation } from './components/TabNavigation';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ThemeProvider } from './contexts/ThemeContext';
+import { ToastProvider } from './components/ui/Toast';
 import { Button } from './components/ui/Button';
 import { Card, CardContent } from './components/ui/Card';
 import { Sparkles, Code2, FileCode } from 'lucide-react';
@@ -169,7 +170,9 @@ function App() {
     return (
         <ErrorBoundary fallbackMessage="RepoSpector encountered an error. Please reload the extension and try again.">
             <ThemeProvider>
-                <AppContent />
+                <ToastProvider>
+                    <AppContent />
+                </ToastProvider>
             </ThemeProvider>
         </ErrorBoundary>
     );

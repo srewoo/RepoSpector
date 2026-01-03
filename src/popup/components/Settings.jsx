@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Save, Eye, EyeOff, Key, AlertCircle, CheckCircle, Cpu, Sun, Moon, Palette } from 'lucide-react';
+import { Save, Eye, EyeOff, Key, AlertCircle, CheckCircle, Cpu, Sun, Moon, Palette, Github, GitBranch } from 'lucide-react';
 import { Button } from './ui/Button';
 import { Card, CardHeader, CardTitle, CardContent } from './ui/Card';
+import { Collapsible } from './ui/Collapsible';
 import { useTheme } from '../contexts/ThemeContext';
 
 const LLM_PROVIDERS = {
@@ -191,7 +192,7 @@ export function Settings({ onClose }) {
     };
 
     return (
-        <div className="space-y-6 animate-fade-in">
+        <div className="space-y-4 animate-fade-in">
             <div className="flex items-center justify-between">
                 <h2 className="text-xl font-bold text-text">Settings</h2>
                 <Button variant="ghost" size="sm" onClick={onClose}>Close</Button>
@@ -213,268 +214,227 @@ export function Settings({ onClose }) {
                 </div>
             )}
 
-            {/* Appearance / Theme Toggle */}
-            <Card>
-                <CardHeader>
-                    <CardTitle className="flex items-center gap-2 text-base">
-                        <Palette className="w-4 h-4 text-accent" />
-                        Appearance
-                    </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                    <div className="flex items-center justify-between">
-                        <div className="space-y-0.5">
-                            <p className="text-sm font-medium text-text">Theme</p>
+            {/* Appearance Section */}
+            <Collapsible title="Appearance" icon={Palette} defaultOpen={true}>
+                <div className="flex items-center justify-between">
+                    <div className="space-y-0.5">
+                        <p className="text-sm font-medium text-text">Theme</p>
+                        <p className="text-xs text-textMuted">
+                            Switch between dark and light mode
+                        </p>
+                    </div>
+                    <button
+                        onClick={toggleTheme}
+                        className="relative flex items-center gap-2 h-10 px-4 bg-surfaceHighlight border border-border rounded-lg hover:bg-surfaceHighlight/80 transition-colors"
+                    >
+                        {theme === 'dark' ? (
+                            <>
+                                <Moon className="w-4 h-4 text-primary" />
+                                <span className="text-sm">Dark</span>
+                            </>
+                        ) : (
+                            <>
+                                <Sun className="w-4 h-4 text-warning" />
+                                <span className="text-sm">Light</span>
+                            </>
+                        )}
+                    </button>
+                </div>
+            </Collapsible>
+
+            {/* AI Configuration Section */}
+            <Collapsible
+                title="AI Configuration"
+                icon={Cpu}
+                defaultOpen={true}
+                badge={getProviderLabel(provider)}
+            >
+                <div className="space-y-4">
+                    {/* LLM Provider */}
+                    <div className="space-y-2">
+                        <label className="text-sm font-medium text-text">Provider</label>
+                        <select
+                            value={provider}
+                            onChange={(e) => setProvider(e.target.value)}
+                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+                        >
+                            {Object.values(LLM_PROVIDERS).map(prov => (
+                                <option key={prov} value={prov}>
+                                    {getProviderLabel(prov)}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+
+                    {/* Model Selection */}
+                    <div className="space-y-2">
+                        <label className="text-sm font-medium text-text">Model</label>
+                        <select
+                            value={model}
+                            onChange={(e) => setModel(e.target.value)}
+                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+                        >
+                            {(AVAILABLE_MODELS[provider] || []).map(m => (
+                                <option key={m.id} value={m.id}>
+                                    {m.name} {m.recommended ? '⭐' : ''}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+
+                    {/* API Key (not shown for Ollama) */}
+                    {!isLocalProvider ? (
+                        <div className="space-y-2">
+                            <label className="text-sm font-medium text-text">
+                                {getProviderLabel(provider)} API Key
+                            </label>
+                            <div className="relative">
+                                <input
+                                    type={showKey ? 'text' : 'password'}
+                                    value={apiKey}
+                                    onChange={(e) => setApiKey(e.target.value)}
+                                    placeholder={getKeyPlaceholder()}
+                                    className="w-full h-10 px-3 pr-10 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => setShowKey(!showKey)}
+                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-textMuted hover:text-text transition-colors"
+                                >
+                                    {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                                </button>
+                            </div>
                             <p className="text-xs text-textMuted">
-                                Switch between dark and light mode
+                                Get your key from:{' '}
+                                {provider === LLM_PROVIDERS.OPENAI && (
+                                    <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                                        OpenAI Platform
+                                    </a>
+                                )}
+                                {provider === LLM_PROVIDERS.ANTHROPIC && (
+                                    <a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                                        Anthropic Console
+                                    </a>
+                                )}
+                                {provider === LLM_PROVIDERS.GOOGLE && (
+                                    <a href="https://makersuite.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                                        Google AI Studio
+                                    </a>
+                                )}
+                                {provider === LLM_PROVIDERS.GROQ && (
+                                    <a href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                                        Groq Console
+                                    </a>
+                                )}
+                                {provider === LLM_PROVIDERS.MISTRAL && (
+                                    <a href="https://console.mistral.ai/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                                        Mistral Console
+                                    </a>
+                                )}
                             </p>
                         </div>
-                        <button
-                            onClick={toggleTheme}
-                            className="relative flex items-center gap-2 h-10 px-4 bg-surfaceHighlight border border-border rounded-lg hover:bg-surfaceHighlight/80 transition-colors"
-                        >
-                            {theme === 'dark' ? (
-                                <>
-                                    <Moon className="w-4 h-4 text-primary" />
-                                    <span className="text-sm">Dark</span>
-                                </>
-                            ) : (
-                                <>
-                                    <Sun className="w-4 h-4 text-warning" />
-                                    <span className="text-sm">Light</span>
-                                </>
-                            )}
-                        </button>
-                    </div>
-                </CardContent>
-            </Card>
+                    ) : (
+                        <div className="space-y-3">
+                            <div className="flex items-start gap-2 p-3 bg-success/10 border border-success/20 rounded-lg">
+                                <CheckCircle className="w-4 h-4 text-success mt-0.5" />
+                                <div className="text-sm text-success">
+                                    <p className="font-medium">No API key required!</p>
+                                    <p className="text-xs text-success/80 mt-1">
+                                        Ollama runs locally for 100% privacy.
+                                    </p>
+                                </div>
+                            </div>
+                            <div className="text-xs text-textMuted space-y-2">
+                                <p className="font-medium">Quick setup:</p>
+                                <ol className="list-decimal list-inside space-y-1 ml-2">
+                                    <li>Install from <a href="https://ollama.ai" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">ollama.ai</a></li>
+                                    <li>Run: <code className="bg-surfaceHighlight px-1 py-0.5 rounded">ollama pull llama3.3</code></li>
+                                    <li>Start: <code className="bg-surfaceHighlight px-1 py-0.5 rounded">ollama serve</code></li>
+                                </ol>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </Collapsible>
 
-            {/* LLM Provider Selection */}
-            <Card>
-                <CardHeader>
-                    <CardTitle className="flex items-center gap-2 text-base">
-                        <Cpu className="w-4 h-4 text-primary" />
-                        LLM Provider
-                    </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                    <p className="text-sm text-textMuted">
-                        Choose your AI model provider
-                    </p>
-                    <select
-                        value={provider}
-                        onChange={(e) => setProvider(e.target.value)}
-                        className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
-                    >
-                        {Object.values(LLM_PROVIDERS).map(prov => (
-                            <option key={prov} value={prov}>
-                                {getProviderLabel(prov)}
-                            </option>
-                        ))}
-                    </select>
-                </CardContent>
-            </Card>
-
-            {/* Model Selection */}
-            <Card>
-                <CardHeader>
-                    <CardTitle className="flex items-center gap-2 text-base">
-                        <Cpu className="w-4 h-4 text-secondary" />
-                        Model
-                    </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                    <p className="text-sm text-textMuted">
-                        Select the model to use for code analysis and test generation
-                    </p>
-                    <select
-                        value={model}
-                        onChange={(e) => setModel(e.target.value)}
-                        className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
-                    >
-                        {(AVAILABLE_MODELS[provider] || []).map(m => (
-                            <option key={m.id} value={m.id}>
-                                {m.name} {m.recommended ? '⭐' : ''}
-                            </option>
-                        ))}
-                    </select>
-                </CardContent>
-            </Card>
-
-            {/* API Key (not shown for Ollama) */}
-            {!isLocalProvider ? (
-                <Card>
-                    <CardHeader>
-                        <CardTitle className="flex items-center gap-2 text-base">
-                            <Key className="w-4 h-4 text-primary" />
-                            {getProviderLabel(provider)} API Key
-                        </CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-4">
-                        <p className="text-sm text-textMuted">
-                            Required for {getProviderLabel(provider)} model access
-                        </p>
+            {/* Git Platform Tokens Section */}
+            <Collapsible
+                title="Git Platform Tokens"
+                icon={GitBranch}
+                defaultOpen={false}
+                badge="Optional"
+            >
+                <div className="space-y-4">
+                    {/* GitHub Token */}
+                    <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                            <label className="text-sm font-medium text-text">GitHub Token</label>
+                            <span className="text-[10px] text-textMuted bg-surfaceHighlight px-1.5 py-0.5 rounded">
+                                Private repos + higher rate limits
+                            </span>
+                        </div>
                         <div className="relative">
                             <input
-                                type={showKey ? 'text' : 'password'}
-                                value={apiKey}
-                                onChange={(e) => setApiKey(e.target.value)}
-                                placeholder={getKeyPlaceholder()}
+                                type={showGithubToken ? 'text' : 'password'}
+                                value={githubToken}
+                                onChange={(e) => setGithubToken(e.target.value)}
+                                placeholder="ghp_..."
                                 className="w-full h-10 px-3 pr-10 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
                             />
                             <button
                                 type="button"
-                                onClick={() => setShowKey(!showKey)}
+                                onClick={() => setShowGithubToken(!showGithubToken)}
                                 className="absolute right-3 top-1/2 -translate-y-1/2 text-textMuted hover:text-text transition-colors"
                             >
-                                {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                                {showGithubToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                             </button>
                         </div>
                         <p className="text-xs text-textMuted">
-                            Get your API key from:{' '}
-                            {provider === LLM_PROVIDERS.OPENAI && (
-                                <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                                    OpenAI Platform
-                                </a>
-                            )}
-                            {provider === LLM_PROVIDERS.ANTHROPIC && (
-                                <a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                                    Anthropic Console
-                                </a>
-                            )}
-                            {provider === LLM_PROVIDERS.GOOGLE && (
-                                <a href="https://makersuite.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                                    Google AI Studio
-                                </a>
-                            )}
-                            {provider === LLM_PROVIDERS.GROQ && (
-                                <a href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                                    Groq Console
-                                </a>
-                            )}
-                            {provider === LLM_PROVIDERS.MISTRAL && (
-                                <a href="https://console.mistral.ai/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                                    Mistral Console
-                                </a>
-                            )}
-                        </p>
-                    </CardContent>
-                </Card>
-            ) : (
-                <Card className="border-primary/30 bg-primary/5">
-                    <CardHeader>
-                        <CardTitle className="flex items-center gap-2 text-base">
-                            <Cpu className="w-4 h-4 text-primary" />
-                            Ollama Setup
-                        </CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-4">
-                        <div className="flex items-start gap-2 p-3 bg-success/10 border border-success/20 rounded-lg">
-                            <CheckCircle className="w-4 h-4 text-success mt-0.5" />
-                            <div className="text-sm text-success">
-                                <p className="font-medium">No API key required!</p>
-                                <p className="text-xs text-success/80 mt-1">
-                                    Ollama runs locally on your machine for 100% privacy.
-                                </p>
-                            </div>
-                        </div>
-                        <div className="text-xs text-textMuted space-y-2">
-                            <p className="font-medium">Quick setup:</p>
-                            <ol className="list-decimal list-inside space-y-1 ml-2">
-                                <li>Install Ollama from <a href="https://ollama.ai" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">ollama.ai</a></li>
-                                <li>Run: <code className="bg-surfaceHighlight px-1 py-0.5 rounded">ollama pull llama3.3</code></li>
-                                <li>Start server: <code className="bg-surfaceHighlight px-1 py-0.5 rounded">ollama serve</code></li>
-                            </ol>
-                        </div>
-                    </CardContent>
-                </Card>
-            )}
-
-            {/* GitHub Token (Optional - for private repos and rate limits) */}
-            <Card>
-                <CardHeader>
-                    <CardTitle className="flex items-center gap-2 text-base">
-                        <Key className="w-4 h-4 text-purple-400" />
-                        GitHub Token (Optional)
-                    </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                    <p className="text-sm text-textMuted">
-                        Required for private repos and avoids GitHub rate limits (60 req/hour → 5000 req/hour)
-                    </p>
-                    <div className="relative">
-                        <input
-                            type={showGithubToken ? 'text' : 'password'}
-                            value={githubToken}
-                            onChange={(e) => setGithubToken(e.target.value)}
-                            placeholder="ghp_..."
-                            className="w-full h-10 px-3 pr-10 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
-                        />
-                        <button
-                            type="button"
-                            onClick={() => setShowGithubToken(!showGithubToken)}
-                            className="absolute right-3 top-1/2 -translate-y-1/2 text-textMuted hover:text-text transition-colors"
-                        >
-                            {showGithubToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                        </button>
-                    </div>
-                    <div className="text-xs text-textMuted space-y-1">
-                        <p>
-                            Get your token from:{' '}
+                            Get from:{' '}
                             <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
                                 GitHub Settings
                             </a>
-                        </p>
-                        <p className="text-yellow-500/80">
-                            💡 Tip: Create a "Personal Access Token (Classic)" with "repo" scope
+                            {' '}- Use "repo" scope
                         </p>
                     </div>
-                </CardContent>
-            </Card>
 
-            {/* GitLab Token (Optional - for private repos) */}
-            <Card>
-                <CardHeader>
-                    <CardTitle className="flex items-center gap-2 text-base">
-                        <Key className="w-4 h-4 text-orange-400" />
-                        GitLab Token (Optional)
-                    </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                    <p className="text-sm text-textMuted">
-                        Required for private GitLab repositories
-                    </p>
-                    <div className="relative">
-                        <input
-                            type={showGitlabToken ? 'text' : 'password'}
-                            value={gitlabToken}
-                            onChange={(e) => setGitlabToken(e.target.value)}
-                            placeholder="glpat-..."
-                            className="w-full h-10 px-3 pr-10 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
-                        />
-                        <button
-                            type="button"
-                            onClick={() => setShowGitlabToken(!showGitlabToken)}
-                            className="absolute right-3 top-1/2 -translate-y-1/2 text-textMuted hover:text-text transition-colors"
-                        >
-                            {showGitlabToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                        </button>
-                    </div>
-                    <div className="text-xs text-textMuted space-y-1">
-                        <p>
-                            Get your token from:{' '}
+                    {/* GitLab Token */}
+                    <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                            <label className="text-sm font-medium text-text">GitLab Token</label>
+                            <span className="text-[10px] text-textMuted bg-surfaceHighlight px-1.5 py-0.5 rounded">
+                                Private repos
+                            </span>
+                        </div>
+                        <div className="relative">
+                            <input
+                                type={showGitlabToken ? 'text' : 'password'}
+                                value={gitlabToken}
+                                onChange={(e) => setGitlabToken(e.target.value)}
+                                placeholder="glpat-..."
+                                className="w-full h-10 px-3 pr-10 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
+                            />
+                            <button
+                                type="button"
+                                onClick={() => setShowGitlabToken(!showGitlabToken)}
+                                className="absolute right-3 top-1/2 -translate-y-1/2 text-textMuted hover:text-text transition-colors"
+                            >
+                                {showGitlabToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                            </button>
+                        </div>
+                        <p className="text-xs text-textMuted">
+                            Get from:{' '}
                             <a href="https://gitlab.com/-/profile/personal_access_tokens" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
                                 GitLab Settings
                             </a>
-                        </p>
-                        <p className="text-yellow-500/80">
-                            💡 Tip: Create a token with "read_api" and "read_repository" scopes
+                            {' '}- Use "read_api" scope
                         </p>
                     </div>
-                </CardContent>
-            </Card>
+                </div>
+            </Collapsible>
 
-            <div className="flex justify-end pt-4">
+            {/* Save Button */}
+            <div className="flex justify-end pt-2">
                 <Button onClick={handleSave} isLoading={isLoading} className="w-full sm:w-auto">
                     <Save className="w-4 h-4 mr-2" />
                     {isSaved ? 'Saved!' : 'Save Settings'}

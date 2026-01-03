@@ -16,12 +16,20 @@ import {
     buildEnhancedTestPrompt,
     buildEnhancedChatPrompt,
     CODE_REVIEW_PROMPT,
-    TEST_TYPE_PROMPTS
+    TEST_TYPE_PROMPTS,
+    PR_ANALYSIS_SYSTEM_PROMPT,
+    buildPRAnalysisPrompt,
+    buildPRSummaryPrompt,
+    buildSecurityReviewPrompt,
+    buildTestAutomationReviewPrompt,
+    buildTestAutomationPRReviewPrompt,
+    TEST_AUTOMATION_ANALYSIS_PROMPT
 } from '../utils/prompts.js';
 import { RAGService } from '../services/RAGService.js';
 import { GitHubService } from '../services/GitHubService.js';
 import { GitLabService } from '../services/GitLabService.js';
 import { LLMService } from '../services/LLMService.js';
+import { PullRequestService } from '../services/PullRequestService.js';
 
 class BackgroundService {
     constructor() {
@@ -50,6 +58,7 @@ class BackgroundService {
             this.githubService = new GitHubService();
             this.gitlabService = new GitLabService();
             this.llmService = new LLMService();
+            this.pullRequestService = new PullRequestService();
 
             // Wire up RAG service to context analyzer
             this.contextAnalyzer.setRagService(this.ragService);
@@ -376,6 +385,22 @@ class BackgroundService {
 
                 case 'CANCEL_REQUEST':
                     this.handleCancelRequest(message, sendResponse);
+                    break;
+
+                case 'ANALYZE_PULL_REQUEST':
+                    await this.handleAnalyzePullRequest(message, sendResponse);
+                    break;
+
+                case 'GET_PR_SUMMARY':
+                    await this.handleGetPRSummary(message, sendResponse);
+                    break;
+
+                case 'SECURITY_REVIEW_PR':
+                    await this.handleSecurityReviewPR(message, sendResponse);
+                    break;
+
+                case 'REVIEW_TEST_AUTOMATION':
+                    await this.handleReviewTestAutomation(message, sendResponse);
                     break;
 
                 default:
@@ -2624,6 +2649,329 @@ Return only the complete test code with proper syntax for the detected language,
                 error: this.getErrorMessage(error)
             });
         }
+    }
+
+    /**
+     * Analyze a Pull Request with comprehensive code review
+     */
+    async handleAnalyzePullRequest(message, sendResponse) {
+        try {
+            const { prUrl, options = {} } = message.data || message.payload || {};
+
+            if (!prUrl) {
+                sendResponse({ success: false, error: 'PR URL is required' });
+                return;
+            }
+
+            console.log('📋 Analyzing PR:', prUrl);
+
+            // Update tokens for PR service
+            await this.updatePRServiceTokens();
+
+            // Fetch PR data
+            const prData = await this.pullRequestService.fetchPullRequest(prUrl);
+            console.log(`📊 PR fetched: ${prData.files.length} files, +${prData.stats.additions} -${prData.stats.deletions}`);
+
+            // Get RAG context if repo is indexed
+            let ragContext = null;
+            const repoId = `${prData.branches?.targetRepo || prData.author?.login}`;
+            if (options.useRepoContext !== false) {
+                try {
+                    const prDescription = `${prData.title} ${prData.description || ''}`;
+                    ragContext = await this.ragService.retrieveContext(
+                        repoId,
+                        prDescription,
+                        5,
+                        { formatOutput: true }
+                    );
+                } catch (e) {
+                    console.warn('RAG context not available:', e.message);
+                }
+            }
+
+            // Detect if this is a test automation repo/PR
+            const isTestAutomationPR = this.isTestAutomationPR(prData);
+
+            // Build appropriate prompt
+            let systemPrompt, userPrompt;
+
+            if (isTestAutomationPR && options.mode !== 'general') {
+                // Use test automation specific review
+                systemPrompt = TEST_AUTOMATION_ANALYSIS_PROMPT;
+                userPrompt = buildTestAutomationPRReviewPrompt(prData, { ragContext });
+            } else if (options.mode === 'security') {
+                // Security-focused review
+                const highRiskFiles = this.pullRequestService.getHighRiskFiles(prData);
+                systemPrompt = PR_ANALYSIS_SYSTEM_PROMPT;
+                userPrompt = buildSecurityReviewPrompt(prData, highRiskFiles);
+            } else {
+                // General comprehensive review
+                systemPrompt = PR_ANALYSIS_SYSTEM_PROMPT;
+                userPrompt = buildPRAnalysisPrompt(prData, {
+                    focusAreas: options.focusAreas || ['security', 'bugs', 'performance', 'style'],
+                    maxFilesToReview: options.maxFiles || 20,
+                    includeTestAnalysis: options.includeTestAnalysis !== false,
+                    ragContext
+                });
+            }
+
+            // Get LLM settings
+            const settings = await this.getSettings();
+
+            // Stream the analysis
+            const response = await this.llmService.streamChat(
+                [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: userPrompt }
+                ],
+                {
+                    provider: settings.provider,
+                    model: settings.model,
+                    apiKey: settings.apiKey,
+                    stream: false // For now, return full response
+                }
+            );
+
+            sendResponse({
+                success: true,
+                data: {
+                    analysis: response.content || response,
+                    prSummary: this.pullRequestService.generatePRSummary(prData),
+                    prData: {
+                        title: prData.title,
+                        state: prData.state,
+                        author: prData.author,
+                        stats: prData.stats,
+                        files: prData.files.map(f => ({
+                            filename: f.filename,
+                            status: f.status,
+                            additions: f.additions,
+                            deletions: f.deletions,
+                            language: f.language
+                        })),
+                        url: prData.url
+                    },
+                    isTestAutomationPR
+                }
+            });
+        } catch (error) {
+            this.errorHandler.logError('PR Analysis', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
+    }
+
+    /**
+     * Get quick PR summary
+     */
+    async handleGetPRSummary(message, sendResponse) {
+        try {
+            const { prUrl } = message.data || message.payload || {};
+
+            if (!prUrl) {
+                sendResponse({ success: false, error: 'PR URL is required' });
+                return;
+            }
+
+            // Update tokens
+            await this.updatePRServiceTokens();
+
+            // Fetch PR data
+            const prData = await this.pullRequestService.fetchPullRequest(prUrl);
+
+            // Build summary prompt
+            const prompt = buildPRSummaryPrompt(prData);
+
+            // Get settings
+            const settings = await this.getSettings();
+
+            // Get quick summary from LLM
+            const response = await this.llmService.streamChat(
+                [
+                    { role: 'system', content: 'You are a helpful code reviewer. Provide concise, actionable summaries.' },
+                    { role: 'user', content: prompt }
+                ],
+                {
+                    provider: settings.provider,
+                    model: settings.model,
+                    apiKey: settings.apiKey,
+                    stream: false
+                }
+            );
+
+            sendResponse({
+                success: true,
+                data: {
+                    summary: response.content || response,
+                    prData: this.pullRequestService.generatePRSummary(prData),
+                    highRiskFiles: this.pullRequestService.getHighRiskFiles(prData)
+                }
+            });
+        } catch (error) {
+            this.errorHandler.logError('PR Summary', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
+    }
+
+    /**
+     * Security-focused PR review
+     */
+    async handleSecurityReviewPR(message, sendResponse) {
+        try {
+            const { prUrl } = message.data || message.payload || {};
+
+            if (!prUrl) {
+                sendResponse({ success: false, error: 'PR URL is required' });
+                return;
+            }
+
+            console.log('🔒 Security review for PR:', prUrl);
+
+            // Update tokens
+            await this.updatePRServiceTokens();
+
+            // Fetch PR data
+            const prData = await this.pullRequestService.fetchPullRequest(prUrl);
+            const highRiskFiles = this.pullRequestService.getHighRiskFiles(prData);
+
+            console.log(`🔍 Found ${highRiskFiles.length} high-risk files`);
+
+            // Build security review prompt
+            const prompt = buildSecurityReviewPrompt(prData, highRiskFiles);
+
+            // Get settings
+            const settings = await this.getSettings();
+
+            // Get security analysis
+            const response = await this.llmService.streamChat(
+                [
+                    { role: 'system', content: PR_ANALYSIS_SYSTEM_PROMPT },
+                    { role: 'user', content: prompt }
+                ],
+                {
+                    provider: settings.provider,
+                    model: settings.model,
+                    apiKey: settings.apiKey,
+                    stream: false
+                }
+            );
+
+            sendResponse({
+                success: true,
+                data: {
+                    securityAnalysis: response.content || response,
+                    highRiskFiles: highRiskFiles.map(f => ({
+                        filename: f.filename,
+                        riskReasons: f.riskReasons,
+                        additions: f.additions,
+                        deletions: f.deletions
+                    })),
+                    prData: {
+                        title: prData.title,
+                        url: prData.url,
+                        stats: prData.stats
+                    }
+                }
+            });
+        } catch (error) {
+            this.errorHandler.logError('Security Review', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
+    }
+
+    /**
+     * Review test automation code
+     */
+    async handleReviewTestAutomation(message, sendResponse) {
+        try {
+            const { code, context = {} } = message.data || message.payload || {};
+
+            if (!code) {
+                sendResponse({ success: false, error: 'Code is required' });
+                return;
+            }
+
+            console.log('🧪 Reviewing test automation code');
+
+            // Build test automation review prompt
+            const prompt = buildTestAutomationReviewPrompt(code, context);
+
+            // Get settings
+            const settings = await this.getSettings();
+
+            // Get analysis
+            const response = await this.llmService.streamChat(
+                [
+                    { role: 'system', content: TEST_AUTOMATION_ANALYSIS_PROMPT },
+                    { role: 'user', content: prompt }
+                ],
+                {
+                    provider: settings.provider,
+                    model: settings.model,
+                    apiKey: settings.apiKey,
+                    stream: false
+                }
+            );
+
+            sendResponse({
+                success: true,
+                data: {
+                    review: response.content || response,
+                    framework: context.framework || 'auto-detected'
+                }
+            });
+        } catch (error) {
+            this.errorHandler.logError('Test Automation Review', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
+    }
+
+    /**
+     * Update PR service with current tokens
+     */
+    async updatePRServiceTokens() {
+        try {
+            const settings = await this.getSettings();
+            this.pullRequestService.githubToken = settings.githubToken || null;
+            this.pullRequestService.gitlabToken = settings.gitlabToken || null;
+        } catch (e) {
+            console.warn('Failed to update PR service tokens:', e);
+        }
+    }
+
+    /**
+     * Detect if PR is for a test automation project
+     */
+    isTestAutomationPR(prData) {
+        // Check file patterns
+        const testPatterns = [
+            /\.(test|spec|e2e|integration)\.(js|ts|jsx|tsx|py|java|rb)$/,
+            /tests?\//,
+            /__tests__\//,
+            /cypress\//,
+            /playwright\//,
+            /selenium\//,
+            /conftest\.py$/,
+            /(jest|playwright|cypress|vitest|pytest|karma|mocha)\.(config|setup)/
+        ];
+
+        const testFileCount = prData.files.filter(f =>
+            testPatterns.some(p => p.test(f.filename))
+        ).length;
+
+        // If more than 50% of files are test files, it's likely a test automation repo
+        return testFileCount > prData.files.length * 0.5;
     }
 
     async processQueue() {
