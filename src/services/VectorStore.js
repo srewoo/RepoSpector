@@ -186,4 +186,64 @@ export class VectorStore {
             countReq.onerror = (e) => reject(e);
         });
     }
+
+    /**
+     * Get all unique repository IDs in the store
+     * @returns {Promise<Array<{repoId: string, count: number}>>}
+     */
+    async getAllRepoIds() {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction([this.storeName], 'readonly');
+            const store = transaction.objectStore(this.storeName);
+            const index = store.index('repoId');
+            const request = index.openCursor();
+
+            const repoMap = new Map();
+
+            request.onsuccess = (event) => {
+                const cursor = event.target.result;
+                if (cursor) {
+                    const repoId = cursor.value.repoId;
+                    repoMap.set(repoId, (repoMap.get(repoId) || 0) + 1);
+                    cursor.continue();
+                } else {
+                    // Cursor exhausted, convert map to array
+                    const repos = Array.from(repoMap.entries()).map(([repoId, count]) => ({
+                        repoId,
+                        chunksCount: count
+                    }));
+                    resolve(repos);
+                }
+            };
+
+            request.onerror = (event) => reject(event.target.error);
+        });
+    }
+
+    /**
+     * Get count and file info for a specific repository
+     * @param {string} repoId
+     * @returns {Promise<{chunksCount: number, filesCount: number}>}
+     */
+    async getRepoStats(repoId) {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction([this.storeName], 'readonly');
+            const store = transaction.objectStore(this.storeName);
+            const index = store.index('repoId');
+            const request = index.getAll(repoId);
+
+            request.onsuccess = () => {
+                const chunks = request.result;
+                const uniqueFiles = new Set(chunks.map(c => c.filePath));
+                resolve({
+                    chunksCount: chunks.length,
+                    filesCount: uniqueFiles.size
+                });
+            };
+
+            request.onerror = (event) => reject(event.target.error);
+        });
+    }
 }

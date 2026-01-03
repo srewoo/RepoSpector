@@ -1,43 +1,53 @@
 import React, { useState, useEffect } from 'react';
-import { Save, Eye, EyeOff, Key, AlertCircle, Cpu, Database, CheckCircle } from 'lucide-react';
+import { Save, Eye, EyeOff, Key, AlertCircle, CheckCircle, Cpu, Sun, Moon, Palette } from 'lucide-react';
 import { Button } from './ui/Button';
 import { Card, CardHeader, CardTitle, CardContent } from './ui/Card';
-import { IndexingProgress } from './IndexingProgress';
+import { useTheme } from '../contexts/ThemeContext';
 
 const LLM_PROVIDERS = {
     OPENAI: 'openai',
     ANTHROPIC: 'anthropic',
     GOOGLE: 'google',
     GROQ: 'groq',
-    MISTRAL: 'mistral'
+    MISTRAL: 'mistral',
+    LOCAL: 'local'  // Ollama
 };
 
 const AVAILABLE_MODELS = {
     [LLM_PROVIDERS.OPENAI]: [
-        { id: 'openai:gpt-4o-mini', name: 'GPT-4o Mini (Fast & Cheap)', recommended: true },
-        { id: 'openai:gpt-4o', name: 'GPT-4o (Best Performance)' },
-        { id: 'openai:gpt-4-turbo', name: 'GPT-4 Turbo' }
+        { id: 'openai:gpt-4o', name: 'GPT-4o (Latest Flagship)', recommended: true },
+        { id: 'openai:gpt-4o-mini', name: 'GPT-4o Mini (Fast & Cheap)' },
+        { id: 'openai:o1-mini', name: 'o1-mini (Reasoning)' }
     ],
     [LLM_PROVIDERS.ANTHROPIC]: [
-        { id: 'anthropic:claude-3.5-sonnet', name: 'Claude 3.5 Sonnet (Latest)', recommended: true },
-        { id: 'anthropic:claude-3-haiku', name: 'Claude 3 Haiku (Fast)' }
+        { id: 'anthropic:claude-sonnet-4', name: 'Claude Sonnet 4 (Latest)', recommended: true },
+        { id: 'anthropic:claude-3.5-haiku', name: 'Claude 3.5 Haiku (Fast)' },
+        { id: 'anthropic:claude-opus-4', name: 'Claude Opus 4 (Most Capable)' }
     ],
     [LLM_PROVIDERS.GOOGLE]: [
-        { id: 'google:gemini-2.0-flash', name: 'Gemini 2.0 Flash (Latest & Fast)', recommended: true },
-        { id: 'google:gemini-1.5-pro', name: 'Gemini 1.5 Pro (Premium)' },
-        { id: 'google:gemini-1.5-flash', name: 'Gemini 1.5 Flash' }
+        { id: 'google:gemini-2.0-flash', name: 'Gemini 2.0 Flash (Latest)', recommended: true },
+        { id: 'google:gemini-2.0-pro', name: 'Gemini 2.0 Pro (Premium)' },
+        { id: 'google:gemini-2.0-flash-lite', name: 'Gemini 2.0 Flash Lite (Fastest)' }
     ],
     [LLM_PROVIDERS.GROQ]: [
-        { id: 'groq:llama-3.3-70b', name: 'Llama 3.3 70B (Latest & Ultra Fast)', recommended: true },
-        { id: 'groq:llama3-70b', name: 'Llama 3.1 70B' }
+        { id: 'groq:llama-3.3-70b', name: 'Llama 3.3 70B (Ultra Fast)', recommended: true },
+        { id: 'groq:deepseek-r1-distill-llama-70b', name: 'DeepSeek R1 70B (Reasoning)' },
+        { id: 'groq:mixtral-8x7b', name: 'Mixtral 8x7B (Balanced)' }
     ],
     [LLM_PROVIDERS.MISTRAL]: [
-        { id: 'mistral:mistral-large-latest', name: 'Mistral Large (Latest)', recommended: true },
-        { id: 'mistral:mixtral-8x7b', name: 'Mixtral 8x7B' }
+        { id: 'mistral:mistral-large', name: 'Mistral Large 2 (Latest)', recommended: true },
+        { id: 'mistral:codestral', name: 'Codestral (Code-focused)' },
+        { id: 'mistral:mistral-small', name: 'Mistral Small (Fast)' }
+    ],
+    [LLM_PROVIDERS.LOCAL]: [
+        { id: 'local:llama3.3', name: 'Llama 3.3 (Latest)', recommended: true },
+        { id: 'local:deepseek-coder-v2', name: 'DeepSeek Coder V2' },
+        { id: 'local:qwen2.5-coder', name: 'Qwen 2.5 Coder (32B)' }
     ]
 };
 
 export function Settings({ onClose }) {
+    const { theme, toggleTheme } = useTheme();
     const [apiKey, setApiKey] = useState('');
     const [provider, setProvider] = useState(LLM_PROVIDERS.OPENAI);
     const [model, setModel] = useState('openai:gpt-4o-mini');
@@ -45,18 +55,13 @@ export function Settings({ onClose }) {
     const [isLoading, setIsLoading] = useState(false);
     const [isSaved, setIsSaved] = useState(false);
     const [error, setError] = useState(null);
+    const [hasExistingKey, setHasExistingKey] = useState(false);
 
     // Git platform tokens (for RAG indexing)
     const [githubToken, setGithubToken] = useState('');
     const [gitlabToken, setGitlabToken] = useState('');
     const [showGithubToken, setShowGithubToken] = useState(false);
     const [showGitlabToken, setShowGitlabToken] = useState(false);
-
-    // RAG indexing state
-    const [isIndexing, setIsIndexing] = useState(false);
-    const [indexProgress, setIndexProgress] = useState(null);
-    const [isIndexed, setIsIndexed] = useState(false);
-    const [currentRepoUrl, setCurrentRepoUrl] = useState(null);
 
     // Load settings from background service (with decryption)
     useEffect(() => {
@@ -69,16 +74,27 @@ export function Settings({ onClose }) {
                 if (response.success && response.data) {
                     const settings = response.data;
                     setApiKey(settings.apiKey || '');
+                    setHasExistingKey(!!settings.apiKey);
                     setGithubToken(settings.githubToken || '');
                     setGitlabToken(settings.gitlabToken || '');
 
                     // Load model selection
-                    if (settings.model) {
-                        setModel(settings.model);
-                        // Extract provider from model string (e.g., "openai:gpt-4o-mini" -> "openai")
-                        const providerFromModel = settings.model.split(':')[0];
-                        if (Object.values(LLM_PROVIDERS).includes(providerFromModel)) {
-                            setProvider(providerFromModel);
+                    if (settings.model && typeof settings.model === 'string') {
+                        // Check if model has provider prefix (e.g., "openai:gpt-4o")
+                        if (settings.model.includes(':')) {
+                            const providerFromModel = settings.model.split(':')[0];
+                            if (Object.values(LLM_PROVIDERS).includes(providerFromModel)) {
+                                setProvider(providerFromModel);
+                                setModel(settings.model);
+                            } else {
+                                // Unknown provider, use default
+                                setProvider(LLM_PROVIDERS.OPENAI);
+                                setModel('openai:gpt-4o');
+                            }
+                        } else {
+                            // Legacy model without provider prefix, default to OpenAI
+                            setProvider(LLM_PROVIDERS.OPENAI);
+                            setModel('openai:gpt-4o');
                         }
                     }
                 } else {
@@ -91,48 +107,6 @@ export function Settings({ onClose }) {
         };
 
         loadSettings();
-    }, []);
-
-    // Get current tab URL and check indexing status
-    useEffect(() => {
-        const getCurrentTab = async () => {
-            try {
-                const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-                if (tab && tab.url && (tab.url.includes('github.com') || tab.url.includes('gitlab.com'))) {
-                    setCurrentRepoUrl(tab.url);
-
-                    // Check if this repo is already indexed
-                    const response = await chrome.runtime.sendMessage({
-                        type: 'CHECK_INDEX_STATUS',
-                        data: { url: tab.url }
-                    });
-
-                    if (response.success) {
-                        setIsIndexed(response.isIndexed);
-                    }
-                }
-            } catch (error) {
-                console.error('Failed to get current tab:', error);
-            }
-        };
-
-        getCurrentTab();
-
-        // Listen for indexing progress updates
-        const messageListener = (message) => {
-            if (message.type === 'INDEX_PROGRESS') {
-                setIndexProgress(message.data);
-                if (message.data.status === 'complete') {
-                    setIsIndexing(false);
-                    setIsIndexed(true);
-                } else if (message.data.status === 'error') {
-                    setIsIndexing(false);
-                }
-            }
-        };
-
-        chrome.runtime.onMessage.addListener(messageListener);
-        return () => chrome.runtime.onMessage.removeListener(messageListener);
     }, []);
 
     // Update model when provider changes
@@ -151,8 +125,9 @@ export function Settings({ onClose }) {
         setError(null);
 
         try {
-            // Validate API key
-            if (!apiKey || apiKey.trim() === '') {
+            // Validate API key (not required for local/Ollama)
+            const isLocal = provider === LLM_PROVIDERS.LOCAL;
+            if (!isLocal && (!apiKey || apiKey.trim() === '')) {
                 throw new Error('API key is required');
             }
 
@@ -196,10 +171,13 @@ export function Settings({ onClose }) {
             [LLM_PROVIDERS.ANTHROPIC]: 'Anthropic',
             [LLM_PROVIDERS.GOOGLE]: 'Google AI',
             [LLM_PROVIDERS.GROQ]: 'Groq (Ultra Fast)',
-            [LLM_PROVIDERS.MISTRAL]: 'Mistral AI'
+            [LLM_PROVIDERS.MISTRAL]: 'Mistral AI',
+            [LLM_PROVIDERS.LOCAL]: 'Ollama (Local)'
         };
         return labels[provider] || provider;
     };
+
+    const isLocalProvider = provider === LLM_PROVIDERS.LOCAL;
 
     const getKeyPlaceholder = () => {
         const placeholders = {
@@ -210,61 +188,6 @@ export function Settings({ onClose }) {
             [LLM_PROVIDERS.MISTRAL]: 'xxx...'
         };
         return placeholders[provider] || 'Enter API key';
-    };
-
-    const handleIndexRepository = async () => {
-        if (!currentRepoUrl) {
-            setError('No repository detected. Please navigate to a GitHub or GitLab repository.');
-            return;
-        }
-
-        if (!apiKey || apiKey.trim() === '') {
-            setError('Please save your API key first. API key is required for generating embeddings.');
-            return;
-        }
-
-        setIsIndexing(true);
-        setIndexProgress({ status: 'starting', message: 'Initializing...' });
-        setError(null);
-
-        try {
-            const response = await chrome.runtime.sendMessage({
-                type: 'INDEX_REPOSITORY',
-                data: { url: currentRepoUrl }
-            });
-
-            if (!response.success) {
-                throw new Error(response.error || 'Failed to index repository');
-            }
-
-            // Success handled by message listener
-        } catch (error) {
-            console.error('Indexing error:', error);
-            // Safely extract error message
-            const errMsg = error?.message || error?.toString?.() || String(error) || 'Failed to index repository';
-            setError(errMsg);
-            setIsIndexing(false);
-            setIndexProgress({ status: 'error', message: errMsg });
-        }
-    };
-
-    const handleClearIndex = async () => {
-        if (!currentRepoUrl) return;
-
-        try {
-            const response = await chrome.runtime.sendMessage({
-                type: 'CLEAR_INDEX',
-                data: { url: currentRepoUrl }
-            });
-
-            if (response.success) {
-                setIsIndexed(false);
-                setIndexProgress(null);
-            }
-        } catch (error) {
-            console.error('Failed to clear index:', error);
-            setError('Failed to clear index');
-        }
     };
 
     return (
@@ -281,6 +204,50 @@ export function Settings({ onClose }) {
                     <p className="text-sm text-red-400">{error}</p>
                 </div>
             )}
+
+            {/* API Key Status Indicator */}
+            {hasExistingKey && (
+                <div className="flex items-center gap-2 px-3 py-2 bg-success/10 border border-success/20 rounded-lg">
+                    <CheckCircle className="w-4 h-4 text-success" />
+                    <span className="text-sm text-success">API key configured</span>
+                </div>
+            )}
+
+            {/* Appearance / Theme Toggle */}
+            <Card>
+                <CardHeader>
+                    <CardTitle className="flex items-center gap-2 text-base">
+                        <Palette className="w-4 h-4 text-accent" />
+                        Appearance
+                    </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                    <div className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                            <p className="text-sm font-medium text-text">Theme</p>
+                            <p className="text-xs text-textMuted">
+                                Switch between dark and light mode
+                            </p>
+                        </div>
+                        <button
+                            onClick={toggleTheme}
+                            className="relative flex items-center gap-2 h-10 px-4 bg-surfaceHighlight border border-border rounded-lg hover:bg-surfaceHighlight/80 transition-colors"
+                        >
+                            {theme === 'dark' ? (
+                                <>
+                                    <Moon className="w-4 h-4 text-primary" />
+                                    <span className="text-sm">Dark</span>
+                                </>
+                            ) : (
+                                <>
+                                    <Sun className="w-4 h-4 text-warning" />
+                                    <span className="text-sm">Light</span>
+                                </>
+                            )}
+                        </button>
+                    </div>
+                </CardContent>
+            </Card>
 
             {/* LLM Provider Selection */}
             <Card>
@@ -325,7 +292,7 @@ export function Settings({ onClose }) {
                         onChange={(e) => setModel(e.target.value)}
                         className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
                     >
-                        {AVAILABLE_MODELS[provider].map(m => (
+                        {(AVAILABLE_MODELS[provider] || []).map(m => (
                             <option key={m.id} value={m.id}>
                                 {m.name} {m.recommended ? '⭐' : ''}
                             </option>
@@ -334,64 +301,94 @@ export function Settings({ onClose }) {
                 </CardContent>
             </Card>
 
-            {/* API Key */}
-            <Card>
-                <CardHeader>
-                    <CardTitle className="flex items-center gap-2 text-base">
-                        <Key className="w-4 h-4 text-primary" />
-                        {getProviderLabel(provider)} API Key
-                    </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                    <p className="text-sm text-textMuted">
-                        Required for {getProviderLabel(provider)} model access
-                    </p>
-                    <div className="relative">
-                        <input
-                            type={showKey ? 'text' : 'password'}
-                            value={apiKey}
-                            onChange={(e) => setApiKey(e.target.value)}
-                            placeholder={getKeyPlaceholder()}
-                            className="w-full h-10 px-3 pr-10 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
-                        />
-                        <button
-                            type="button"
-                            onClick={() => setShowKey(!showKey)}
-                            className="absolute right-3 top-1/2 -translate-y-1/2 text-textMuted hover:text-text transition-colors"
-                        >
-                            {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                        </button>
-                    </div>
-                    <p className="text-xs text-textMuted">
-                        Get your API key from:{' '}
-                        {provider === LLM_PROVIDERS.OPENAI && (
-                            <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                                OpenAI Platform
-                            </a>
-                        )}
-                        {provider === LLM_PROVIDERS.ANTHROPIC && (
-                            <a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                                Anthropic Console
-                            </a>
-                        )}
-                        {provider === LLM_PROVIDERS.GOOGLE && (
-                            <a href="https://makersuite.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                                Google AI Studio
-                            </a>
-                        )}
-                        {provider === LLM_PROVIDERS.GROQ && (
-                            <a href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                                Groq Console
-                            </a>
-                        )}
-                        {provider === LLM_PROVIDERS.MISTRAL && (
-                            <a href="https://console.mistral.ai/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                                Mistral Console
-                            </a>
-                        )}
-                    </p>
-                </CardContent>
-            </Card>
+            {/* API Key (not shown for Ollama) */}
+            {!isLocalProvider ? (
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2 text-base">
+                            <Key className="w-4 h-4 text-primary" />
+                            {getProviderLabel(provider)} API Key
+                        </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                        <p className="text-sm text-textMuted">
+                            Required for {getProviderLabel(provider)} model access
+                        </p>
+                        <div className="relative">
+                            <input
+                                type={showKey ? 'text' : 'password'}
+                                value={apiKey}
+                                onChange={(e) => setApiKey(e.target.value)}
+                                placeholder={getKeyPlaceholder()}
+                                className="w-full h-10 px-3 pr-10 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
+                            />
+                            <button
+                                type="button"
+                                onClick={() => setShowKey(!showKey)}
+                                className="absolute right-3 top-1/2 -translate-y-1/2 text-textMuted hover:text-text transition-colors"
+                            >
+                                {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                            </button>
+                        </div>
+                        <p className="text-xs text-textMuted">
+                            Get your API key from:{' '}
+                            {provider === LLM_PROVIDERS.OPENAI && (
+                                <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                                    OpenAI Platform
+                                </a>
+                            )}
+                            {provider === LLM_PROVIDERS.ANTHROPIC && (
+                                <a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                                    Anthropic Console
+                                </a>
+                            )}
+                            {provider === LLM_PROVIDERS.GOOGLE && (
+                                <a href="https://makersuite.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                                    Google AI Studio
+                                </a>
+                            )}
+                            {provider === LLM_PROVIDERS.GROQ && (
+                                <a href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                                    Groq Console
+                                </a>
+                            )}
+                            {provider === LLM_PROVIDERS.MISTRAL && (
+                                <a href="https://console.mistral.ai/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                                    Mistral Console
+                                </a>
+                            )}
+                        </p>
+                    </CardContent>
+                </Card>
+            ) : (
+                <Card className="border-primary/30 bg-primary/5">
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2 text-base">
+                            <Cpu className="w-4 h-4 text-primary" />
+                            Ollama Setup
+                        </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                        <div className="flex items-start gap-2 p-3 bg-success/10 border border-success/20 rounded-lg">
+                            <CheckCircle className="w-4 h-4 text-success mt-0.5" />
+                            <div className="text-sm text-success">
+                                <p className="font-medium">No API key required!</p>
+                                <p className="text-xs text-success/80 mt-1">
+                                    Ollama runs locally on your machine for 100% privacy.
+                                </p>
+                            </div>
+                        </div>
+                        <div className="text-xs text-textMuted space-y-2">
+                            <p className="font-medium">Quick setup:</p>
+                            <ol className="list-decimal list-inside space-y-1 ml-2">
+                                <li>Install Ollama from <a href="https://ollama.ai" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">ollama.ai</a></li>
+                                <li>Run: <code className="bg-surfaceHighlight px-1 py-0.5 rounded">ollama pull llama3.3</code></li>
+                                <li>Start server: <code className="bg-surfaceHighlight px-1 py-0.5 rounded">ollama serve</code></li>
+                            </ol>
+                        </div>
+                    </CardContent>
+                </Card>
+            )}
 
             {/* GitHub Token (Optional - for private repos and rate limits) */}
             <Card>
@@ -476,96 +473,6 @@ export function Settings({ onClose }) {
                     </div>
                 </CardContent>
             </Card>
-
-            {/* Repository Indexing (RAG) */}
-            {currentRepoUrl && (
-                <Card>
-                    <CardHeader>
-                        <CardTitle className="flex items-center gap-2 text-base">
-                            <Database className="w-4 h-4 text-primary" />
-                            Repository Context (RAG)
-                        </CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-4">
-                        <p className="text-sm text-textMuted">
-                            Index this repository to enable Deep Context (RAG). When enabled in chat, AI can search your entire codebase for relevant context, providing more accurate responses about dependencies, patterns, and architecture.
-                        </p>
-
-                        <div className="flex items-start gap-2 px-3 py-2 bg-blue-500/10 border border-blue-500/20 rounded-lg">
-                            <AlertCircle className="w-4 h-4 text-blue-400 mt-0.5 flex-shrink-0" />
-                            <div className="text-xs text-blue-300">
-                                <p className="font-medium">What's Deep Context (RAG)?</p>
-                                <p className="text-blue-300/80 mt-1">
-                                    Deep Context uses Retrieval-Augmented Generation (RAG) to search your indexed repository and find semantically similar code. This is separate from context levels (minimal/smart/full) which only analyze visible code.
-                                </p>
-                            </div>
-                        </div>
-
-                        {/* Token requirement notice */}
-                        {!githubToken && currentRepoUrl?.includes('github.com') && (
-                            <div className="flex items-start gap-2 px-3 py-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
-                                <AlertCircle className="w-4 h-4 text-yellow-500 mt-0.5 flex-shrink-0" />
-                                <div className="text-xs text-yellow-500">
-                                    <p className="font-medium">GitHub token recommended</p>
-                                    <p className="text-yellow-500/80 mt-1">
-                                        Without a token, you're limited to 60 API requests/hour. Add a GitHub token above to increase to 5000/hour.
-                                    </p>
-                                </div>
-                            </div>
-                        )}
-                        {!gitlabToken && currentRepoUrl?.includes('gitlab.com') && (
-                            <div className="flex items-start gap-2 px-3 py-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
-                                <AlertCircle className="w-4 h-4 text-yellow-500 mt-0.5 flex-shrink-0" />
-                                <div className="text-xs text-yellow-500">
-                                    <p className="font-medium">GitLab token may be required</p>
-                                    <p className="text-yellow-500/80 mt-1">
-                                        If this is a private repository, you need to add a GitLab token above.
-                                    </p>
-                                </div>
-                            </div>
-                        )}
-
-                        {/* Index Status */}
-                        {isIndexed && !isIndexing && (
-                            <div className="flex items-center gap-2 px-3 py-2 bg-green-500/10 border border-green-500/20 rounded-lg">
-                                <CheckCircle className="w-4 h-4 text-green-500" />
-                                <span className="text-sm text-green-500">Repository indexed</span>
-                            </div>
-                        )}
-
-                        {/* Progress */}
-                        {isIndexing && indexProgress && (
-                            <IndexingProgress progress={indexProgress} />
-                        )}
-
-                        {/* Actions */}
-                        <div className="flex gap-2">
-                            <Button
-                                onClick={handleIndexRepository}
-                                disabled={isIndexing || !apiKey}
-                                isLoading={isIndexing}
-                                className="flex-1"
-                            >
-                                <Database className="w-4 h-4 mr-2" />
-                                {isIndexed ? 'Re-index Repository' : 'Index Repository'}
-                            </Button>
-                            {isIndexed && !isIndexing && (
-                                <Button
-                                    onClick={handleClearIndex}
-                                    variant="outline"
-                                    className="px-3"
-                                >
-                                    Clear
-                                </Button>
-                            )}
-                        </div>
-
-                        <p className="text-xs text-textMuted">
-                            💡 Tip: Indexing takes 2-5 minutes for medium repos. Deep context will be available after indexing completes.
-                        </p>
-                    </CardContent>
-                </Card>
-            )}
 
             <div className="flex justify-end pt-4">
                 <Button onClick={handleSave} isLoading={isLoading} className="w-full sm:w-auto">

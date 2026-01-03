@@ -1,31 +1,42 @@
 import { ErrorHandler } from './errorHandler.js';
 
 // Batch processor for parallel OpenAI API requests
+// Enhanced with streaming, adaptive concurrency, and result deduplication
 export class BatchProcessor {
     constructor(options = {}) {
         this.errorHandler = new ErrorHandler();
-        
+
         // Configuration
         this.maxConcurrent = options.maxConcurrent || 3;
         this.retryAttempts = options.retryAttempts || 2;
         this.retryDelay = options.retryDelay || 1000;
         this.timeout = options.timeout || 30000; // 30 seconds per request
-        
+
+        // Adaptive concurrency settings
+        this.minConcurrent = options.minConcurrent || 1;
+        this.maxConcurrentLimit = options.maxConcurrentLimit || 5;
+        this.currentConcurrent = options.initialConcurrent || 3;
+        this.successRateThreshold = 0.8; // Reduce concurrency if below 80%
+        this.avgTimeThreshold = 10000;   // Reduce if avg time > 10s
+
         // Processing state
         this.activeRequests = 0;
         this.completedRequests = 0;
         this.failedRequests = 0;
         this.totalRequests = 0;
-        
+
         // Queue management
         this.queue = [];
         this.results = [];
         this.errors = [];
-        
+
         // Performance tracking
         this.startTime = null;
         this.endTime = null;
         this.processingTimes = [];
+
+        // Deduplication tracking
+        this.seenTestSignatures = new Set();
     }
     
     /**
@@ -627,6 +638,286 @@ export class BatchProcessor {
             successRate: this.totalRequests > 0 ? (this.completedRequests / this.totalRequests) * 100 : 0,
             averageProcessingTime: this.getAverageProcessingTime(),
             totalProcessingTime: this.endTime ? this.endTime - this.startTime : Date.now() - (this.startTime || Date.now())
+        };
+    }
+
+    // ========================================
+    // NEW: Streaming Result Aggregation
+    // ========================================
+
+    /**
+     * Process batches with streaming results - yields results as they complete
+     * @param {Array} batches - Array of batch arrays to process
+     * @param {Function} processingFunction - Function to process each item
+     * @param {Function} progressCallback - Optional progress callback
+     * @yields {Object} Results as they complete
+     */
+    async *processBatchesStreaming(batches, processingFunction, progressCallback = null) {
+        this.resetStats();
+        this.startTime = Date.now();
+        this.totalRequests = batches.reduce((total, batch) => total + batch.length, 0);
+
+        const semaphore = this.createSemaphore(this.currentConcurrent);
+        const pendingPromises = new Map();
+        let nextId = 0;
+
+        // Function to process a single item and track it
+        const processItem = async (item, batchIndex, itemIndex) => {
+            const id = nextId++;
+            const promise = this.processWithSemaphore(
+                semaphore,
+                item,
+                processingFunction,
+                batchIndex,
+                itemIndex,
+                progressCallback
+            );
+
+            pendingPromises.set(id, { promise, id });
+            return { id, promise };
+        };
+
+        // Start processing all items
+        const allItems = [];
+        for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+            const batch = batches[batchIndex];
+            for (let itemIndex = 0; itemIndex < batch.length; itemIndex++) {
+                allItems.push({ item: batch[itemIndex], batchIndex, itemIndex });
+            }
+        }
+
+        // Process items and yield as they complete
+        let processedCount = 0;
+        const inFlight = new Set();
+
+        for (const { item, batchIndex, itemIndex } of allItems) {
+            const { id, promise } = await processItem(item, batchIndex, itemIndex);
+            inFlight.add(id);
+
+            // If at concurrency limit, wait for one to complete and yield it
+            if (inFlight.size >= this.currentConcurrent) {
+                const completedId = await this.waitForAny(pendingPromises);
+                const result = await pendingPromises.get(completedId).promise;
+                pendingPromises.delete(completedId);
+                inFlight.delete(completedId);
+                processedCount++;
+
+                // Adjust concurrency based on performance
+                this.adjustConcurrency();
+
+                yield result;
+            }
+        }
+
+        // Yield remaining results
+        while (pendingPromises.size > 0) {
+            const completedId = await this.waitForAny(pendingPromises);
+            const result = await pendingPromises.get(completedId).promise;
+            pendingPromises.delete(completedId);
+            processedCount++;
+            yield result;
+        }
+
+        this.endTime = Date.now();
+    }
+
+    /**
+     * Wait for any promise in the map to complete and return its id
+     */
+    async waitForAny(promiseMap) {
+        const entries = Array.from(promiseMap.entries());
+        const promises = entries.map(([id, { promise }]) =>
+            promise.then(() => id).catch(() => id)
+        );
+        return Promise.race(promises);
+    }
+
+    // ========================================
+    // NEW: Adaptive Concurrency
+    // ========================================
+
+    /**
+     * Adjust concurrency based on performance metrics
+     */
+    adjustConcurrency() {
+        const stats = this.getStats();
+        const successRate = stats.successRate / 100;
+        const avgTime = stats.averageProcessingTime;
+
+        // Reduce concurrency if success rate is low or processing is slow
+        if (successRate < this.successRateThreshold || avgTime > this.avgTimeThreshold) {
+            const newConcurrent = Math.max(this.minConcurrent, this.currentConcurrent - 1);
+            if (newConcurrent !== this.currentConcurrent) {
+                console.log(`⚡ Reducing concurrency: ${this.currentConcurrent} → ${newConcurrent} (success: ${(successRate * 100).toFixed(1)}%, avgTime: ${avgTime.toFixed(0)}ms)`);
+                this.currentConcurrent = newConcurrent;
+            }
+        }
+        // Increase concurrency if performance is good
+        else if (successRate > 0.95 && avgTime < this.avgTimeThreshold / 2 && this.completedRequests > 2) {
+            const newConcurrent = Math.min(this.maxConcurrentLimit, this.currentConcurrent + 1);
+            if (newConcurrent !== this.currentConcurrent) {
+                console.log(`⚡ Increasing concurrency: ${this.currentConcurrent} → ${newConcurrent} (success: ${(successRate * 100).toFixed(1)}%, avgTime: ${avgTime.toFixed(0)}ms)`);
+                this.currentConcurrent = newConcurrent;
+            }
+        }
+    }
+
+    // ========================================
+    // NEW: Result Deduplication
+    // ========================================
+
+    /**
+     * Deduplicate test results from overlapping chunks
+     * @param {Array} results - Array of result objects
+     * @returns {Array} Deduplicated test strings
+     */
+    deduplicateTestResults(results) {
+        this.seenTestSignatures.clear();
+        const dedupedTests = [];
+
+        for (const result of results) {
+            if (!result.success || !result.data) continue;
+
+            const tests = this.extractTests(result.data);
+            for (const test of tests) {
+                const signature = this.createTestSignature(test);
+                if (!this.seenTestSignatures.has(signature)) {
+                    this.seenTestSignatures.add(signature);
+                    dedupedTests.push(test);
+                }
+            }
+        }
+
+        return dedupedTests;
+    }
+
+    /**
+     * Extract individual tests from test content
+     * @param {string} content - Test file content
+     * @returns {Array} Array of individual test strings
+     */
+    extractTests(content) {
+        const tests = [];
+        if (!content || typeof content !== 'string') return tests;
+
+        // Match describe/it/test blocks
+        const testPatterns = [
+            // Jest/Mocha style
+            /(?:describe|it|test)\s*\([^)]*\)\s*(?:=>)?\s*\{[\s\S]*?\n\s*\}\s*\)/g,
+            // Simpler pattern for basic tests
+            /(?:it|test)\s*\(['"`][^'"`]+['"`]\s*,\s*(?:async\s*)?\([^)]*\)\s*(?:=>)?\s*\{[\s\S]*?\}\s*\)/g
+        ];
+
+        for (const pattern of testPatterns) {
+            const matches = content.match(pattern);
+            if (matches) {
+                tests.push(...matches);
+            }
+        }
+
+        // If no patterns matched, return the whole content as one test
+        if (tests.length === 0 && content.trim().length > 0) {
+            tests.push(content);
+        }
+
+        return tests;
+    }
+
+    /**
+     * Create a unique signature for a test to detect duplicates
+     * @param {string} test - Test code string
+     * @returns {string} Unique signature
+     */
+    createTestSignature(test) {
+        // Normalize whitespace and extract key elements
+        const normalized = test
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+
+        // Extract test name
+        const nameMatch = normalized.match(/(?:test|it|describe)\s*\(\s*['"`]([^'"`]+)/);
+        const testName = nameMatch ? nameMatch[1] : '';
+
+        // Create a hash-like signature based on name and length
+        const signature = `${testName}-${normalized.length}-${this.simpleHash(normalized.substring(0, 200))}`;
+        return signature;
+    }
+
+    /**
+     * Simple hash function for deduplication
+     */
+    simpleHash(str) {
+        let hash = 0;
+        for (let i = 0; i < str.length; i++) {
+            const char = str.charCodeAt(i);
+            hash = ((hash << 5) - hash) + char;
+            hash = hash & hash; // Convert to 32-bit integer
+        }
+        return Math.abs(hash).toString(16);
+    }
+
+    // ========================================
+    // NEW: Partial Results Handling
+    // ========================================
+
+    /**
+     * Process with partial results on failure - returns what succeeded even if some fail
+     * @param {Array} batches - Batches to process
+     * @param {Function} processingFunction - Processing function
+     * @param {Function} progressCallback - Progress callback
+     * @returns {Object} Results with partial flag if some failed
+     */
+    async processBatchesWithPartialResults(batches, processingFunction, progressCallback = null) {
+        const results = await this.processBatches(batches, processingFunction, progressCallback);
+
+        // Even if some chunks failed, return what we have
+        if (results.successful.length > 0) {
+            return {
+                ...results,
+                partial: results.failed.length > 0,
+                partialReason: results.failed.length > 0
+                    ? `${results.failed.length} of ${results.totalProcessed} chunks failed, ${results.successful.length} succeeded`
+                    : null,
+                mergedResult: this.mergeResults(results, 'intelligent'),
+                deduplicatedTests: this.deduplicateTestResults(results.successful)
+            };
+        }
+
+        // All chunks failed - throw error with details
+        const errorMessages = results.failed.map(f => f.error).join('; ');
+        throw new Error(`All ${results.failed.length} processing chunks failed: ${errorMessages}`);
+    }
+
+    /**
+     * Collect streaming results into a single result object
+     * @param {AsyncGenerator} streamingGenerator - The streaming generator
+     * @param {Function} onResult - Optional callback for each result
+     * @returns {Object} Collected results
+     */
+    async collectStreamingResults(streamingGenerator, onResult = null) {
+        const successful = [];
+        const failed = [];
+
+        for await (const result of streamingGenerator) {
+            if (result.success) {
+                successful.push(result);
+            } else {
+                failed.push(result);
+            }
+
+            if (onResult) {
+                onResult(result, { successful: successful.length, failed: failed.length });
+            }
+        }
+
+        return {
+            successful,
+            failed,
+            totalProcessed: successful.length + failed.length,
+            successRate: successful.length / (successful.length + failed.length) * 100,
+            processingTime: this.endTime - this.startTime,
+            partial: failed.length > 0
         };
     }
 } 

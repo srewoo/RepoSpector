@@ -1,14 +1,17 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Bot, User, Sparkles, AlertCircle } from 'lucide-react';
+import { Send, Bot, User, Sparkles, AlertCircle, Database, GitBranch } from 'lucide-react';
 import { Button } from './ui/Button';
 import { Modal } from './ui/Modal';
 import { CodePreview } from './CodePreview';
 import { TokenUsageIndicator } from './TokenUsageIndicator';
+import { TypingIndicator } from './TypingIndicator';
 import { cn } from '@/lib/utils';
 import { useExtension } from '@/hooks/useExtension';
 import { conversationHistory } from '@/services/conversationHistory';
 
 export function ChatInterface({ autoGenerateType = null, onBack = null, instanceId = 'popup' }) {
+    const [currentRepo, setCurrentRepo] = useState(null);
+    const [isRepoIndexed, setIsRepoIndexed] = useState(false);
     // Format message content with custom styling for headers
     const formatMessageContent = (content) => {
         if (!content) return null;
@@ -16,8 +19,9 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
         const lines = content.split('\n');
         return lines.map((line, index) => {
             // Check if line is a header (contains ** markers)
-            if (line.includes('**') && line.includes(':')) {
-                const headerText = line.replace(/\*\*/g, '').trim();
+            const lineStr = line || '';
+            if (lineStr.includes('**') && lineStr.includes(':')) {
+                const headerText = lineStr.replace(/\*\*/g, '').trim();
                 return (
                     <div key={index} className="text-base font-bold text-primary mt-2 mb-1">
                         {headerText}
@@ -87,7 +91,7 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
 
             // Handle streaming chunks (for both test generation and chat)
             if (message.action === 'TEST_CHUNK' && message.data) {
-                const { chunk, fullContent, progress, isLastChunk } = message.data;
+                const { chunk, fullContent = '', progress, isLastChunk } = message.data;
                 const messageRequestId = message.requestId;
 
                 // Only process chunks for current request
@@ -121,11 +125,12 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                 }
 
                 // Update streaming phase based on progress
+                const contentLength = (fullContent || '').length;
                 if (!streamingMessageIdRef.current) {
                     setStreamingPhase('🤖 AI analyzing code structure...');
-                } else if (fullContent.length < 100) {
+                } else if (contentLength < 100) {
                     setStreamingPhase('🧠 AI understanding context...');
-                } else if (fullContent.length < 500) {
+                } else if (contentLength < 500) {
                     setStreamingPhase('✨ AI generating response...');
                 } else {
                     setStreamingPhase('📝 AI writing...');
@@ -161,12 +166,13 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                     } else {
                         // Create new streaming message
                         // Detect if content looks like code (has backticks, function keywords, etc.)
-                        const looksLikeCode = fullContent.includes('```') ||
-                            fullContent.includes('function ') ||
-                            fullContent.includes('describe(') ||
-                            fullContent.includes('it(') ||
-                            fullContent.includes('test(') ||
-                            fullContent.includes('expect(');
+                        const content = fullContent || '';
+                        const looksLikeCode = content.includes('```') ||
+                            content.includes('function ') ||
+                            content.includes('describe(') ||
+                            content.includes('it(') ||
+                            content.includes('test(') ||
+                            content.includes('expect(');
 
                         const newId = Date.now();
                         setStreamingMessageId(newId);
@@ -205,7 +211,7 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
         return () => chrome.runtime.onMessage.removeListener(handleMessage);
     }, []); // Empty dependency array - register listener only once
 
-    // Initialize conversation history
+    // Initialize conversation history and detect current repo
     useEffect(() => {
         const initHistory = async () => {
             await conversationHistory.initialize();
@@ -216,12 +222,35 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                 if (tab && tab.url) {
                     const url = new URL(tab.url);
                     if (url.hostname.includes('github.com') || url.hostname.includes('gitlab.com')) {
-                        const pathParts = url.pathname.split('/');
-                        await conversationHistory.setCodeContext({
-                            filePath: pathParts.slice(3).join('/'),
-                            language: 'auto',
-                            repository: `${pathParts[1]}/${pathParts[2]}`
-                        });
+                        const pathParts = url.pathname.split('/').filter(Boolean);
+                        if (pathParts.length >= 2) {
+                            const repoId = `${pathParts[0]}/${pathParts[1]}`;
+                            const platform = url.hostname.includes('gitlab') ? 'gitlab' : 'github';
+
+                            setCurrentRepo({ repoId, platform });
+
+                            await conversationHistory.setCodeContext({
+                                filePath: pathParts.slice(2).join('/'),
+                                language: 'auto',
+                                repository: repoId
+                            });
+
+                            // Check if this repo is indexed
+                            try {
+                                const response = await chrome.runtime.sendMessage({
+                                    type: 'CHECK_INDEX_STATUS',
+                                    data: { url: tab.url }
+                                });
+                                if (response.success) {
+                                    setIsRepoIndexed(response.isIndexed);
+                                    if (response.isIndexed) {
+                                        setUseDeepContext(true); // Auto-enable if repo is indexed
+                                    }
+                                }
+                            } catch (err) {
+                                console.error('Failed to check index status:', err);
+                            }
+                        }
                     }
                 }
             } catch (error) {
@@ -846,58 +875,55 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
             </Modal>
 
             {/* Input Area */}
-            <div className="p-4 bg-surface border-t border-white/5 shrink-0">
-                <div className="flex items-center justify-between mb-2 px-1">
-                    <div className="flex items-center gap-2">
-                        <span className="text-xs text-textMuted">
-                            {embeddingProvider === 'openai' ? 'OpenAI Embeddings' : 'Local Embeddings'}
-                        </span>
-                        <div className="h-3 w-[1px] bg-white/10" />
-                        <label className="flex items-center gap-2 cursor-pointer group">
-                            <div className="relative">
-                                <input
-                                    type="checkbox"
-                                    checked={useDeepContext}
-                                    onChange={(e) => setUseDeepContext(e.target.checked)}
-                                    className="sr-only peer"
-                                />
-                                <div className="w-7 h-4 bg-surfaceHighlight rounded-full peer-checked:bg-primary transition-colors" />
-                                <div className="absolute left-0.5 top-0.5 w-3 h-3 bg-white rounded-full transition-transform peer-checked:translate-x-3" />
-                            </div>
-                            <span className={cn(
-                                "text-xs transition-colors",
-                                useDeepContext ? "text-primary font-medium" : "text-textMuted group-hover:text-text"
-                            )}>
-                                Deep Context
+            <div className="p-4 bg-surface border-t border-border shrink-0">
+                {/* Repo Context Toggle - Only show if repo is detected */}
+                {currentRepo && (
+                    <div className="flex items-center justify-between mb-3 px-1">
+                        <div className="flex items-center gap-2">
+                            <GitBranch className="w-3.5 h-3.5 text-textMuted" />
+                            <span className="text-xs text-textMuted truncate max-w-[120px]">
+                                {currentRepo.repoId}
                             </span>
-                        </label>
-                    </div>
-                    <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={handleIndexRepoClick}
-                        disabled={isLoading || isIndexing}
-                        className="text-xs h-6 px-2 text-textMuted hover:text-primary"
-                        title="Index repository for better context"
-                    >
-                        {isIndexing ? (
-                            <span className="animate-pulse">Indexing...</span>
-                        ) : (
-                            <span className="flex items-center gap-1">
-                                <Sparkles className="w-3 h-3" />
-                                Index Repo
-                            </span>
+                            {isRepoIndexed && (
+                                <span className="text-[10px] bg-success/20 text-success px-1.5 py-0.5 rounded-full flex items-center gap-1">
+                                    <Database className="w-2.5 h-2.5" />
+                                    Indexed
+                                </span>
+                            )}
+                        </div>
+                        {isRepoIndexed && (
+                            <label className="flex items-center gap-2 cursor-pointer group">
+                                <div className="relative">
+                                    <input
+                                        type="checkbox"
+                                        checked={useDeepContext}
+                                        onChange={(e) => setUseDeepContext(e.target.checked)}
+                                        className="sr-only peer"
+                                    />
+                                    <div className="w-8 h-4 bg-surfaceHighlight rounded-full peer-checked:bg-primary transition-colors" />
+                                    <div className="absolute left-0.5 top-0.5 w-3 h-3 bg-white rounded-full transition-transform peer-checked:translate-x-4" />
+                                </div>
+                                <span className={cn(
+                                    "text-xs transition-colors",
+                                    useDeepContext ? "text-primary font-medium" : "text-textMuted group-hover:text-text"
+                                )}>
+                                    Use Repo Context
+                                </span>
+                            </label>
                         )}
-                    </Button>
-                </div>
+                    </div>
+                )}
 
                 <form onSubmit={handleSubmit} className="relative">
                     <input
                         type="text"
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
-                        placeholder="Ask about your code or generate tests..."
-                        className="w-full bg-surfaceHighlight border border-white/10 rounded-xl pl-4 pr-12 py-3 text-sm text-text focus:outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/50 transition-all placeholder:text-textMuted/50"
+                        placeholder={useDeepContext && isRepoIndexed
+                            ? `Ask about ${currentRepo?.repoId || 'your code'}...`
+                            : "Ask about your code or generate tests..."
+                        }
+                        className="w-full bg-surfaceHighlight border border-border rounded-xl pl-4 pr-12 py-3 text-sm text-text focus:outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/50 transition-all placeholder:text-textMuted/50"
                         disabled={isLoading || isIndexing}
                     />
                     <Button

@@ -66,155 +66,120 @@ const API_ENDPOINTS = {
 };
 
 const MODELS = {
-    // OpenAI Models
-    'openai:gpt-4o-mini': {
-        name: 'GPT-4o Mini',
-        provider: LLM_PROVIDERS.OPENAI,
-        modelId: 'gpt-4o-mini',
-        maxTokens: 16000,
-        contextWindow: 128000,
-        costPer1kTokens: { input: 0.00015, output: 0.0006 },
-        supportsImages: false,
-        supportsCode: true,
-        quality: 'high'
-    },
+    // OpenAI Models (Latest 2024-2025)
     'openai:gpt-4o': {
         name: 'GPT-4o',
         provider: LLM_PROVIDERS.OPENAI,
         modelId: 'gpt-4o',
-        maxTokens: 16000,
+        maxTokens: 16384,
         contextWindow: 128000,
-        costPer1kTokens: { input: 0.005, output: 0.015 },
+        costPer1kTokens: { input: 0.0025, output: 0.01 },
         supportsImages: true,
         supportsCode: true,
         quality: 'premium'
     },
-    'openai:gpt-4-turbo': {
-        name: 'GPT-4 Turbo',
+    'openai:gpt-4o-mini': {
+        name: 'GPT-4o Mini',
         provider: LLM_PROVIDERS.OPENAI,
-        modelId: 'gpt-4-turbo-preview',
-        maxTokens: 16000,
+        modelId: 'gpt-4o-mini',
+        maxTokens: 16384,
         contextWindow: 128000,
-        costPer1kTokens: { input: 0.01, output: 0.03 },
+        costPer1kTokens: { input: 0.00015, output: 0.0006 },
         supportsImages: true,
         supportsCode: true,
-        quality: 'premium'
+        quality: 'high'
     },
-    'openai:gpt-3.5-turbo': {
-        name: 'GPT-3.5 Turbo',
+    'openai:o1-mini': {
+        name: 'o1-mini (Reasoning)',
         provider: LLM_PROVIDERS.OPENAI,
-        modelId: 'gpt-3.5-turbo',
-        maxTokens: 16385,
-        contextWindow: 16385,
-        costPer1kTokens: { input: 0.0015, output: 0.002 },
+        modelId: 'o1-mini',
+        maxTokens: 65536,
+        contextWindow: 128000,
+        costPer1kTokens: { input: 0.003, output: 0.012 },
         supportsImages: false,
         supportsCode: true,
-        quality: 'good'
+        quality: 'premium',
+        reasoning: true
     },
 
-    // Anthropic Models
-    'anthropic:claude-3.5-sonnet': {
-        name: 'Claude 3.5 Sonnet',
+    // Anthropic Models (Latest 2024-2025)
+    'anthropic:claude-sonnet-4': {
+        name: 'Claude Sonnet 4',
         provider: LLM_PROVIDERS.ANTHROPIC,
-        modelId: 'claude-3-5-sonnet-20241022',
-        maxTokens: 8192,
+        modelId: 'claude-sonnet-4-20250514',
+        maxTokens: 16000,
         contextWindow: 200000,
         costPer1kTokens: { input: 0.003, output: 0.015 },
         supportsImages: true,
         supportsCode: true,
         quality: 'premium'
     },
-    'anthropic:claude-3-haiku': {
-        name: 'Claude 3 Haiku',
+    'anthropic:claude-3.5-haiku': {
+        name: 'Claude 3.5 Haiku',
         provider: LLM_PROVIDERS.ANTHROPIC,
-        modelId: 'claude-3-haiku-20240307',
-        maxTokens: 4096,
+        modelId: 'claude-3-5-haiku-20241022',
+        maxTokens: 8192,
         contextWindow: 200000,
-        costPer1kTokens: { input: 0.00025, output: 0.00125 },
+        costPer1kTokens: { input: 0.0008, output: 0.004 },
         supportsImages: true,
         supportsCode: true,
         quality: 'high'
     },
+    'anthropic:claude-opus-4': {
+        name: 'Claude Opus 4',
+        provider: LLM_PROVIDERS.ANTHROPIC,
+        modelId: 'claude-opus-4-20250514',
+        maxTokens: 16000,
+        contextWindow: 200000,
+        costPer1kTokens: { input: 0.015, output: 0.075 },
+        supportsImages: true,
+        supportsCode: true,
+        quality: 'ultra'
+    },
 
-    // Google Models
+    // Google Gemini Models (Latest 2024-2025)
     'google:gemini-2.0-flash': {
         name: 'Gemini 2.0 Flash',
         provider: LLM_PROVIDERS.GOOGLE,
-        modelId: 'gemini-2.0-flash-exp',
-        maxTokens: 16000,
+        modelId: 'gemini-2.0-flash',
+        maxTokens: 8192,
         contextWindow: 1000000,
-        costPer1kTokens: { input: 0, output: 0 },
+        costPer1kTokens: { input: 0.0001, output: 0.0004 },
         supportsImages: true,
         supportsCode: true,
         quality: 'premium',
         speed: 'fast'
     },
-    'google:gemini-1.5-pro': {
-        name: 'Gemini 1.5 Pro',
+    'google:gemini-2.0-pro': {
+        name: 'Gemini 2.0 Pro',
         provider: LLM_PROVIDERS.GOOGLE,
-        modelId: 'gemini-1.5-pro-latest',
-        maxTokens: 16000,
+        modelId: 'gemini-2.0-pro-exp',
+        maxTokens: 8192,
         contextWindow: 2000000,
         costPer1kTokens: { input: 0.00125, output: 0.005 },
         supportsImages: true,
         supportsCode: true,
-        quality: 'premium'
+        quality: 'ultra'
     },
-    'google:gemini-1.5-flash': {
-        name: 'Gemini 1.5 Flash',
+    'google:gemini-2.0-flash-lite': {
+        name: 'Gemini 2.0 Flash Lite',
         provider: LLM_PROVIDERS.GOOGLE,
-        modelId: 'gemini-1.5-flash-latest',
-        maxTokens: 16000,
+        modelId: 'gemini-2.0-flash-lite',
+        maxTokens: 8192,
         contextWindow: 1000000,
         costPer1kTokens: { input: 0.000075, output: 0.0003 },
         supportsImages: true,
         supportsCode: true,
-        quality: 'high'
+        quality: 'high',
+        speed: 'ultrafast'
     },
 
-    // Cohere Models
-    'cohere:command-r-plus': {
-        name: 'Command R+',
-        provider: LLM_PROVIDERS.COHERE,
-        modelId: 'command-r-plus',
-        maxTokens: 4096,
-        contextWindow: 128000,
-        costPer1kTokens: { input: 0.003, output: 0.015 },
-        supportsImages: false,
-        supportsCode: true,
-        quality: 'high'
-    },
-
-    // Mistral Models
-    'mistral:mistral-large-latest': {
-        name: 'Mistral Large',
-        provider: LLM_PROVIDERS.MISTRAL,
-        modelId: 'mistral-large-latest',
-        maxTokens: 16000,
-        contextWindow: 128000,
-        costPer1kTokens: { input: 0.002, output: 0.006 },
-        supportsImages: false,
-        supportsCode: true,
-        quality: 'premium'
-    },
-    'mistral:mixtral-8x7b': {
-        name: 'Mixtral 8x7B',
-        provider: LLM_PROVIDERS.MISTRAL,
-        modelId: 'open-mixtral-8x7b',
-        maxTokens: 16000,
-        contextWindow: 32768,
-        costPer1kTokens: { input: 0.0007, output: 0.0007 },
-        supportsImages: false,
-        supportsCode: true,
-        quality: 'high'
-    },
-
-    // Groq Models (Fast)
+    // Groq Models (Ultra Fast - Latest 2024-2025)
     'groq:llama-3.3-70b': {
-        name: 'Llama 3.3 70B (Groq)',
+        name: 'Llama 3.3 70B',
         provider: LLM_PROVIDERS.GROQ,
         modelId: 'llama-3.3-70b-versatile',
-        maxTokens: 8192,
+        maxTokens: 32768,
         contextWindow: 128000,
         costPer1kTokens: { input: 0.00059, output: 0.00079 },
         supportsImages: false,
@@ -222,31 +187,107 @@ const MODELS = {
         quality: 'premium',
         speed: 'ultrafast'
     },
-    'groq:llama3-70b': {
-        name: 'Llama 3.1 70B (Groq)',
+    'groq:deepseek-r1-distill-llama-70b': {
+        name: 'DeepSeek R1 70B',
         provider: LLM_PROVIDERS.GROQ,
-        modelId: 'llama3-70b-8192',
-        maxTokens: 8192,
-        contextWindow: 8192,
-        costPer1kTokens: { input: 0.00059, output: 0.00079 },
+        modelId: 'deepseek-r1-distill-llama-70b',
+        maxTokens: 16384,
+        contextWindow: 128000,
+        costPer1kTokens: { input: 0.00075, output: 0.00099 },
+        supportsImages: false,
+        supportsCode: true,
+        quality: 'premium',
+        speed: 'ultrafast',
+        reasoning: true
+    },
+    'groq:mixtral-8x7b': {
+        name: 'Mixtral 8x7B',
+        provider: LLM_PROVIDERS.GROQ,
+        modelId: 'mixtral-8x7b-32768',
+        maxTokens: 32768,
+        contextWindow: 32768,
+        costPer1kTokens: { input: 0.00024, output: 0.00024 },
+        supportsImages: false,
+        supportsCode: true,
+        quality: 'high',
+        speed: 'ultrafast'
+    },
+
+    // Mistral Models (Latest 2024-2025)
+    'mistral:mistral-large': {
+        name: 'Mistral Large 2',
+        provider: LLM_PROVIDERS.MISTRAL,
+        modelId: 'mistral-large-latest',
+        maxTokens: 32000,
+        contextWindow: 128000,
+        costPer1kTokens: { input: 0.002, output: 0.006 },
+        supportsImages: false,
+        supportsCode: true,
+        quality: 'premium'
+    },
+    'mistral:codestral': {
+        name: 'Codestral',
+        provider: LLM_PROVIDERS.MISTRAL,
+        modelId: 'codestral-latest',
+        maxTokens: 32000,
+        contextWindow: 32000,
+        costPer1kTokens: { input: 0.001, output: 0.003 },
+        supportsImages: false,
+        supportsCode: true,
+        quality: 'premium',
+        specialization: 'code'
+    },
+    'mistral:mistral-small': {
+        name: 'Mistral Small',
+        provider: LLM_PROVIDERS.MISTRAL,
+        modelId: 'mistral-small-latest',
+        maxTokens: 32000,
+        contextWindow: 32000,
+        costPer1kTokens: { input: 0.0002, output: 0.0006 },
         supportsImages: false,
         supportsCode: true,
         quality: 'high',
         speed: 'fast'
     },
 
-    // Local Models
-    'local:codellama': {
-        name: 'Code Llama (Local)',
+    // Local Models (Ollama - Latest 2024-2025)
+    'local:llama3.3': {
+        name: 'Llama 3.3 (Local)',
         provider: LLM_PROVIDERS.LOCAL,
-        modelId: 'codellama:7b-code',
-        maxTokens: 4096,
-        contextWindow: 4096,
+        modelId: 'llama3.3',
+        maxTokens: 8192,
+        contextWindow: 128000,
         costPer1kTokens: { input: 0, output: 0 },
         supportsImages: false,
         supportsCode: true,
-        quality: 'good',
+        quality: 'premium',
         requiresLocal: true
+    },
+    'local:deepseek-coder-v2': {
+        name: 'DeepSeek Coder V2 (Local)',
+        provider: LLM_PROVIDERS.LOCAL,
+        modelId: 'deepseek-coder-v2',
+        maxTokens: 8192,
+        contextWindow: 128000,
+        costPer1kTokens: { input: 0, output: 0 },
+        supportsImages: false,
+        supportsCode: true,
+        quality: 'premium',
+        requiresLocal: true,
+        specialization: 'code'
+    },
+    'local:qwen2.5-coder': {
+        name: 'Qwen 2.5 Coder 32B (Local)',
+        provider: LLM_PROVIDERS.LOCAL,
+        modelId: 'qwen2.5-coder:32b',
+        maxTokens: 8192,
+        contextWindow: 32000,
+        costPer1kTokens: { input: 0, output: 0 },
+        supportsImages: false,
+        supportsCode: true,
+        quality: 'premium',
+        requiresLocal: true,
+        specialization: 'code'
     }
 };
 
@@ -473,9 +514,12 @@ const PLATFORM_PATTERNS = {
         repoUrl: /gitlab\.com\/[^/]+\/[^/]+(?:\/-\/tree\/[^/]+)?$/,
         apiBase: 'https://gitlab.com/api/v4',
         selectors: {
-            code: '.code.highlight, .diff-content',
-            diff: '.diff-content, .diffs',
-            fileName: '.file-title'
+            // Modern GitLab MR diff selectors (2024+)
+            code: '[data-diff-file] .line_content, .diff-content .code, .code.highlight, .diff-tr .line_content',
+            diff: '[data-diff-file], .diff-file, .diff-files-holder, .diff-content, .diffs, .diffs-batch',
+            fileName: '.diff-file-header .file-title-name, [data-path], .file-header-content .file-path, .file-title',
+            addedLines: '.diff-tr.line_holder.new .line_content, td.line_content.new, .line_content.new',
+            removedLines: '.diff-tr.line_holder.old .line_content, td.line_content.old, .line_content.old'
         }
     },
     bitbucket: {

@@ -653,102 +653,312 @@ class ContentExtractor {
     }
 
     /**
+     * Detect if current page is a diff/MR page
+     */
+    isDiffPageByDOM() {
+        const url = window.location.href;
+        const isDiffUrl = url.includes('/merge_requests/') ||
+                         url.includes('/pull/') ||
+                         url.includes('/compare/') ||
+                         url.includes('/commit/') ||
+                         url.includes('/diffs');
+
+        const hasDiffElements = document.querySelector('.diff-file, [data-diff-file], .js-diff-load-container') !== null;
+
+        return isDiffUrl || hasDiffElements;
+    }
+
+    /**
+     * Extract code from GitLab/GitHub diff pages
+     */
+    extractFromDiffPage() {
+        console.log('📄 Attempting diff page extraction...');
+        const files = [];
+
+        // Find all diff file containers - try multiple selectors
+        const diffContainerSelectors = [
+            '.diff-file',
+            '[data-diff-file]',
+            '.file-holder',
+            '.js-diff-load-container',
+            '.diff-view'
+        ];
+
+        let diffContainers = [];
+        for (const selector of diffContainerSelectors) {
+            diffContainers = document.querySelectorAll(selector);
+            if (diffContainers.length > 0) {
+                console.log(`✅ Found ${diffContainers.length} diff containers using: ${selector}`);
+                break;
+            }
+        }
+
+        if (diffContainers.length === 0) {
+            console.log('❌ No diff containers found');
+            return { success: false, code: '', source: 'diff-page' };
+        }
+
+        for (const container of diffContainers) {
+            // Get file name
+            const fileNameEl = container.querySelector(
+                '.file-title-name, [data-path], .diff-file-header .file-path, .file-header .file-title, [data-tagsearch-path]'
+            );
+            const fileName = fileNameEl?.innerText?.trim() || fileNameEl?.getAttribute('data-path') || 'unknown';
+
+            const lines = [];
+
+            // Method 1: GitLab line_content elements
+            const lineContents = container.querySelectorAll('.line_content');
+            if (lineContents.length > 0) {
+                lineContents.forEach(line => {
+                    const text = line.innerText || '';
+                    if (text.trim()) {
+                        const isAdded = line.classList.contains('new');
+                        const isRemoved = line.classList.contains('old');
+
+                        if (isAdded) {
+                            lines.push(`+ ${text}`);
+                        } else if (isRemoved) {
+                            lines.push(`- ${text}`);
+                        } else {
+                            lines.push(`  ${text}`);
+                        }
+                    }
+                });
+            }
+
+            // Method 2: GitHub blob-code elements
+            if (lines.length === 0) {
+                const blobCodes = container.querySelectorAll('.blob-code');
+                blobCodes.forEach(line => {
+                    const text = line.innerText || '';
+                    if (text.trim()) {
+                        const isAdded = line.classList.contains('blob-code-addition');
+                        const isRemoved = line.classList.contains('blob-code-deletion');
+
+                        if (isAdded) {
+                            lines.push(`+ ${text}`);
+                        } else if (isRemoved) {
+                            lines.push(`- ${text}`);
+                        } else {
+                            lines.push(`  ${text}`);
+                        }
+                    }
+                });
+            }
+
+            // Method 3: Table rows fallback
+            if (lines.length === 0) {
+                const tableRows = container.querySelectorAll('tr.line_holder, tr.diff-tr, tr[data-hunk]');
+                tableRows.forEach(row => {
+                    const content = row.querySelector('.line_content, td:last-child, .blob-code');
+                    if (content) {
+                        const text = content.innerText || '';
+                        if (text.trim()) {
+                            lines.push(text);
+                        }
+                    }
+                });
+            }
+
+            // Method 4: Any code/pre elements in the container
+            if (lines.length === 0) {
+                const codeEls = container.querySelectorAll('code, pre');
+                codeEls.forEach(el => {
+                    const text = el.innerText || '';
+                    if (text.trim()) {
+                        lines.push(text);
+                    }
+                });
+            }
+
+            if (lines.length > 0) {
+                files.push({
+                    fileName,
+                    code: lines.join('\n'),
+                    linesCount: lines.length
+                });
+            }
+        }
+
+        if (files.length > 0) {
+            // Combine all files into a single code block with file markers
+            const combinedCode = files.map(f =>
+                `// ===== File: ${f.fileName} =====\n${f.code}`
+            ).join('\n\n');
+
+            console.log(`✅ Extracted ${files.length} files from diff, total lines: ${combinedCode.split('\n').length}`);
+
+            return {
+                success: true,
+                code: this.sanitizer.sanitizeCode(combinedCode),
+                source: 'diff-page',
+                files: files
+            };
+        }
+
+        return { success: false, code: '', source: 'diff-page' };
+    }
+
+    /**
+     * Extract code from GitLab/GitHub file pages (single file view)
+     */
+    extractFromFilePage() {
+        console.log('📄 Attempting file page extraction...');
+
+        // Priority order for file page selectors
+        const fileSelectors = [
+            // GitLab modern (2024-2025)
+            '[data-testid="blob-content-holder"]',
+            '.blob-viewer .file-content',
+            '.file-holder .blob-content',
+            '.blob-viewer pre',
+
+            // GitLab legacy
+            '#blob-content-holder',
+            '.blob-content',
+            '.file-content',
+
+            // GitHub
+            '#read-only-cursor-text-area',
+            '[data-testid="blob-viewer-file-content"]',
+            '.blob-wrapper pre',
+
+            // Generic
+            'pre code',
+            '.highlight pre',
+            '.source-view pre'
+        ];
+
+        for (const selector of fileSelectors) {
+            try {
+                const element = document.querySelector(selector);
+                if (element) {
+                    let code = '';
+
+                    // For textareas, use .value
+                    if (element.tagName === 'TEXTAREA') {
+                        code = element.value || '';
+                    } else {
+                        // Try to get code from nested elements first
+                        const codeEl = element.querySelector('code, pre');
+                        if (codeEl) {
+                            code = codeEl.innerText || '';
+                        } else {
+                            // Use innerText for cleaner output (respects visibility)
+                            code = element.innerText || '';
+                        }
+                    }
+
+                    // Clean up line numbers if present
+                    code = this.cleanLineNumbers(code);
+
+                    if (code.trim().length > 10) {
+                        console.log(`✅ File code extracted using: ${selector} (${code.length} chars)`);
+                        return {
+                            success: true,
+                            code: this.sanitizer.sanitizeCode(code),
+                            source: selector
+                        };
+                    }
+                }
+            } catch (error) {
+                console.warn(`Error with selector ${selector}:`, error);
+            }
+        }
+
+        return { success: false, code: '', source: 'file-page' };
+    }
+
+    /**
+     * Clean line numbers from extracted code
+     */
+    cleanLineNumbers(code) {
+        // Remove common line number patterns
+        const lines = code.split('\n');
+        const cleanedLines = lines.map(line => {
+            // Remove leading line numbers like "123 " or "123\t"
+            return line.replace(/^\s*\d+[\s\t]+/, '');
+        });
+        return cleanedLines.join('\n');
+    }
+
+    /**
      * Extract using simple known selectors (from original codeExtractor.js)
      * This is more reliable than platform-specific methods
      * Uses broad, proven selectors that work across multiple platforms
      */
     extractFromKnownSelectors() {
-        const selectors = [
-            // IDs - highest priority
+        // First, check if we're on a diff page
+        if (this.isDiffPageByDOM()) {
+            console.log('🔍 Detected diff page, using diff extraction...');
+            const diffResult = this.extractFromDiffPage();
+            if (diffResult.success) {
+                return diffResult;
+            }
+            console.log('⚠️ Diff extraction failed, trying file extraction fallback...');
+        }
+
+        // Try file page extraction
+        const fileResult = this.extractFromFilePage();
+        if (fileResult.success) {
+            return fileResult;
+        }
+
+        // Fallback to legacy selectors
+        console.log('⚠️ Modern extraction failed, trying legacy selectors...');
+
+        const legacySelectors = [
             '#fileHolder',
-            '#read-only-cursor-text-area',
-
-            // GitLab modern (2024-2025) - blob viewer
-            '[data-testid="blob-content-holder"]',
-            '[data-testid="blob-viewer-file-content"]',
-            '.blob-viewer .file-content',
             '.gl-tab-content',
-
-            // GitLab/GitHub specific
-            '.file-content',
-            '.blob-content',
-            '[data-testid="blob-content"]',
-
-            // Generic code blocks
-            'pre code',
-            '.highlight pre',
             '.code-viewer',
-            '.source-view',
-
-            // Common syntax highlighters
             '.hljs',
             '.codehilite',
             '.syntaxhighlighter',
         ];
 
-        for (const selector of selectors) {
+        for (const selector of legacySelectors) {
             try {
                 const elements = document.querySelectorAll(selector);
                 if (elements.length > 0) {
                     let code = '';
 
                     // Special handling for container elements
-                    if (selector === '#fileHolder' ||
-                        selector === '.file-content' ||
-                        selector === '[data-testid="blob-content-holder"]' ||
-                        selector === '.gl-tab-content') {
-                        // GitLab puts code inside containers
+                    if (selector === '#fileHolder' || selector === '.gl-tab-content') {
                         const container = elements[0];
-
-                        // Try to find code blocks inside the container
                         const codeBlocks = container.querySelectorAll('pre code, code, pre, .line');
 
                         if (codeBlocks.length > 0) {
                             code = Array.from(codeBlocks)
                                 .map(el => {
-                                    // Skip line numbers
                                     if (el.classList.contains('line-numbers') ||
                                         el.classList.contains('diff-line-num')) {
                                         return '';
                                     }
-                                    return el.textContent || el.innerText || '';
+                                    return el.innerText || '';
                                 })
                                 .filter(text => text.trim().length > 0)
                                 .join('\n');
                         } else {
-                            // Fallback: get all text from container
-                            code = container.textContent || container.innerText || '';
+                            code = container.innerText || '';
                         }
                     } else {
-                        // For other selectors, use direct text extraction
                         code = Array.from(elements)
-                            .map(el => {
-                                // For textarea elements, use .value
-                                if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
-                                    return el.value || '';
-                                }
-                                // For other elements, use textContent or innerText
-                                return el.textContent || el.innerText || '';
-                            })
+                            .map(el => el.innerText || '')
                             .join('\n\n');
                     }
 
                     if (code.trim().length > 10) {
-                        console.log(`✅ Code extracted using simple selector: ${selector}`);
-                        console.log(`   Raw code length: ${code.length}`);
+                        console.log(`✅ Code extracted using legacy selector: ${selector}`);
                         const sanitizedCode = this.sanitizer.sanitizeCode(code);
-                        console.log(`   Sanitized code length: ${sanitizedCode.length}`);
                         return {
                             success: true,
                             code: sanitizedCode,
                             source: selector
                         };
-                    } else {
-                        console.log(`⚠️  Selector ${selector} found but code too short (${code.trim().length} chars)`);
                     }
                 }
             } catch (error) {
-                // Skip invalid selectors
                 console.warn(`Error with selector ${selector}:`, error);
                 continue;
             }
@@ -1074,6 +1284,72 @@ class ContentExtractor {
         console.log('🔍 Attempting to extract GitLab file content...');
         console.log('📍 Page URL:', window.location.href);
         console.log('📄 Page title:', document.title);
+
+        // PRIORITY 1: Check if this is a MR diff page (modern GitLab 2024+)
+        const isMRDiffPage = window.location.href.includes('/merge_requests/') ||
+            window.location.href.includes('/-/merge_requests/');
+
+        if (isMRDiffPage) {
+            console.log('📋 Detected GitLab MR diff page, using specialized extraction...');
+
+            // Modern GitLab MR diff selectors (2024+)
+            const mrDiffSelectors = [
+                // Data attribute based (most reliable)
+                '[data-diff-file] .line_content',
+                '[data-diff-file] .diff-content',
+                // Diff file containers
+                '.diff-file .diff-content table',
+                '.diff-file .diff-content .line_content',
+                '.diff-files-holder .diff-content',
+                // Line-based extraction
+                '.diff-tr .line_content:not(.empty-cell)',
+                '.diff-td.line_content:not(.empty-cell)',
+                '.line_holder .line_content',
+                // Diffs container
+                '.diffs .diff-file .diff-content',
+                '.js-diff-files .diff-content',
+                '.diffs-batch .diff-content',
+                // Code within diff
+                '.diff-content .code',
+                '.diff-content pre',
+                // Legacy but still used
+                '.diff-content',
+                '.diffs'
+            ];
+
+            for (const selector of mrDiffSelectors) {
+                try {
+                    const elements = document.querySelectorAll(selector);
+                    console.log(`🔍 MR diff selector "${selector}": found ${elements.length} elements`);
+
+                    if (elements.length > 0) {
+                        const content = Array.from(elements)
+                            .map(el => {
+                                // Skip empty cells and line numbers
+                                if (el.classList.contains('empty-cell') ||
+                                    el.classList.contains('diff-line-num') ||
+                                    el.classList.contains('old_line') ||
+                                    el.classList.contains('new_line')) {
+                                    return '';
+                                }
+                                // Try to get code content
+                                const codeEl = el.querySelector('.code, pre, span') || el;
+                                return codeEl.textContent || codeEl.innerText || '';
+                            })
+                            .filter(text => text.trim().length > 0)
+                            .join('\n');
+
+                        if (content.trim().length > 50) {
+                            console.log(`✅ GitLab MR diff content extracted: ${selector} (${content.length} chars)`);
+                            return this.cleanupExtractedCode(content);
+                        }
+                    }
+                } catch (error) {
+                    console.warn(`❌ Error with MR diff selector "${selector}":`, error);
+                }
+            }
+            console.log('⚠️ MR diff extraction did not yield results, falling back to standard extraction...');
+        }
 
         // First, try to find the main code container
         const mainContainers = [
@@ -1867,8 +2143,10 @@ class FloatingPanelManager {
     constructor() {
         this.panel = null;
         this.toggleButton = null;
+        this.minimizedPill = null;
         this.isVisible = false;
         this.isMaximized = false;
+        this.isMinimized = false;
         this.init();
     }
 
@@ -2009,6 +2287,11 @@ class FloatingPanelManager {
                 <span>RepoSpector</span>
             </div>
             <div style="display: flex; gap: 4px;">
+                <button id="repospector-minimize" style="padding: 6px; background: transparent; border: none; color: rgba(241, 245, 249, 0.7); cursor: pointer; border-radius: 6px; display: flex; align-items: center;" title="Minimize">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                    </svg>
+                </button>
                 <button id="repospector-maximize" style="padding: 6px; background: transparent; border: none; color: rgba(241, 245, 249, 0.7); cursor: pointer; border-radius: 6px; display: flex; align-items: center;" title="Maximize">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
@@ -2035,22 +2318,79 @@ class FloatingPanelManager {
         });
 
         // Setup message bridge between iframe and content script
+        // Store iframe reference for closure
+        const iframeRef = iframe;
+
         window.addEventListener('message', (event) => {
-            // Only accept messages from our iframe
-            if (event.source !== iframe.contentWindow) return;
+            // Log all incoming messages for debugging
+            console.log('📬 Window received message:', {
+                origin: event.origin,
+                hasSource: !!event.source,
+                iframeContentWindow: !!iframeRef?.contentWindow,
+                sourceMatchesIframe: event.source === iframeRef?.contentWindow,
+                dataType: event.data?.type
+            });
+
+            // Accept messages from our iframe OR from extension origin
+            // This makes the relay more robust
+            const isFromOurIframe = event.source === iframeRef?.contentWindow;
+            const isExtensionMessage = event.origin.startsWith('chrome-extension://');
+
+            if (!isFromOurIframe && !isExtensionMessage) {
+                console.log('📭 Ignoring message - not from our iframe or extension');
+                return;
+            }
 
             const message = event.data;
-            console.log('📨 Message from iframe:', message);
 
-            // Forward to background script and send response back to iframe
-            if (message.type) {
-                chrome.runtime.sendMessage(message, (response) => {
-                    iframe.contentWindow.postMessage({
-                        responseId: message.requestId,
-                        response: response
-                    }, '*');
-                });
+            // Only process messages with a type
+            if (!message || !message.type) {
+                console.log('📭 Ignoring message - no type property');
+                return;
             }
+
+            console.log('📨 Message from iframe:', message.type, message);
+
+            // Get this tab's ID to inject into the message
+            // The background will use sender.tab.id, but we also add it to the payload for safety
+            chrome.runtime.sendMessage({ type: 'GET_TAB_ID' }, (tabResponse) => {
+                const currentTabId = tabResponse?.tabId;
+                console.log('📌 Current tab ID:', currentTabId);
+
+                // Inject tabId into the message payload if not already set
+                const enrichedMessage = { ...message };
+                if (enrichedMessage.payload) {
+                    enrichedMessage.payload = {
+                        ...enrichedMessage.payload,
+                        tabId: enrichedMessage.payload.tabId || currentTabId
+                    };
+                } else if (enrichedMessage.data) {
+                    enrichedMessage.data = {
+                        ...enrichedMessage.data,
+                        tabId: enrichedMessage.data.tabId || currentTabId
+                    };
+                }
+
+                console.log('📤 Forwarding enriched message to background:', enrichedMessage.type, 'tabId:', currentTabId);
+
+                // Forward to background script and send response back to iframe
+                chrome.runtime.sendMessage(enrichedMessage, (response) => {
+                    console.log('📩 Received response from background for', message.type, ':', response ? 'success' : 'no response');
+
+                    if (chrome.runtime.lastError) {
+                        console.error('❌ Runtime error:', chrome.runtime.lastError);
+                    }
+
+                    if (iframeRef?.contentWindow) {
+                        iframeRef.contentWindow.postMessage({
+                            responseId: message.requestId,
+                            response: response || { success: false, error: 'No response from background' }
+                        }, '*');
+                    } else {
+                        console.error('❌ Cannot send response - iframe contentWindow not available');
+                    }
+                });
+            }); // End of GET_TAB_ID callback
         });
 
         // Assemble panel
@@ -2061,6 +2401,7 @@ class FloatingPanelManager {
         // Setup button handlers
         const closeBtn = header.querySelector('#repospector-close');
         const maximizeBtn = header.querySelector('#repospector-maximize');
+        const minimizeBtn = header.querySelector('#repospector-minimize');
 
         closeBtn.addEventListener('mouseenter', () => {
             closeBtn.style.background = 'rgba(239, 68, 68, 0.2)';
@@ -2082,7 +2423,99 @@ class FloatingPanelManager {
         });
         maximizeBtn.addEventListener('click', () => this.toggleMaximize());
 
+        minimizeBtn.addEventListener('mouseenter', () => {
+            minimizeBtn.style.background = 'rgba(255, 255, 255, 0.1)';
+            minimizeBtn.style.color = '#f1f5f9';
+        });
+        minimizeBtn.addEventListener('mouseleave', () => {
+            minimizeBtn.style.background = 'transparent';
+            minimizeBtn.style.color = 'rgba(241, 245, 249, 0.7)';
+        });
+        minimizeBtn.addEventListener('click', () => this.minimizePanel());
+
         this.isVisible = true;
+    }
+
+    minimizePanel() {
+        if (!this.panel || this.isMinimized) return;
+
+        console.log('🔽 RepoSpector: Minimizing panel');
+
+        // Store current dimensions for restore
+        this.preMinimizeWidth = this.panel.style.width;
+        this.preMinimizeHeight = this.panel.style.height;
+
+        // Hide the panel but keep it in DOM (preserves iframe state)
+        this.panel.style.display = 'none';
+
+        // Create minimized pill if not exists
+        if (!this.minimizedPill) {
+            this.minimizedPill = document.createElement('div');
+            this.minimizedPill.id = 'repospector-minimized';
+            Object.assign(this.minimizedPill.style, {
+                position: 'fixed',
+                bottom: '20px',
+                right: '20px',
+                zIndex: '2147483646',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '10px 16px',
+                background: 'linear-gradient(135deg, #1e1b4b 0%, #312e81 100%)',
+                borderRadius: '24px',
+                boxShadow: '0 4px 20px rgba(139, 92, 246, 0.3)',
+                cursor: 'pointer',
+                fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+                color: '#f1f5f9',
+                fontSize: '14px',
+                fontWeight: '500',
+                transition: 'all 0.2s ease',
+                border: '1px solid rgba(139, 92, 246, 0.3)'
+            });
+
+            this.minimizedPill.innerHTML = `
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" stroke-width="2">
+                    <path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z"/>
+                </svg>
+                <span>RepoSpector</span>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity: 0.7;">
+                    <polyline points="17 11 12 6 7 11"></polyline>
+                    <polyline points="17 18 12 13 7 18"></polyline>
+                </svg>
+            `;
+
+            this.minimizedPill.addEventListener('mouseenter', () => {
+                this.minimizedPill.style.transform = 'scale(1.05)';
+                this.minimizedPill.style.boxShadow = '0 6px 24px rgba(139, 92, 246, 0.4)';
+            });
+            this.minimizedPill.addEventListener('mouseleave', () => {
+                this.minimizedPill.style.transform = 'scale(1)';
+                this.minimizedPill.style.boxShadow = '0 4px 20px rgba(139, 92, 246, 0.3)';
+            });
+            this.minimizedPill.addEventListener('click', () => this.restorePanel());
+
+            document.body.appendChild(this.minimizedPill);
+        } else {
+            this.minimizedPill.style.display = 'flex';
+        }
+
+        this.isMinimized = true;
+    }
+
+    restorePanel() {
+        if (!this.panel || !this.isMinimized) return;
+
+        console.log('🔼 RepoSpector: Restoring panel');
+
+        // Hide minimized pill
+        if (this.minimizedPill) {
+            this.minimizedPill.style.display = 'none';
+        }
+
+        // Restore panel
+        this.panel.style.display = 'flex';
+
+        this.isMinimized = false;
     }
 
     toggleMaximize() {
@@ -2104,7 +2537,7 @@ class FloatingPanelManager {
     }
 
     hidePanel() {
-        if (!this.isVisible) return;
+        if (!this.isVisible && !this.isMinimized) return;
 
         console.log('🎨 RepoSpector: Hiding floating panel');
 
@@ -2113,11 +2546,18 @@ class FloatingPanelManager {
             this.panel = null;
         }
 
+        // Remove minimized pill if exists
+        if (this.minimizedPill) {
+            this.minimizedPill.remove();
+            this.minimizedPill = null;
+        }
+
         // Show toggle button
         this.toggleButton.style.display = 'flex';
 
         this.isVisible = false;
         this.isMaximized = false;
+        this.isMinimized = false;
     }
 }
 

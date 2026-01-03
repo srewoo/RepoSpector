@@ -1,6 +1,6 @@
 {
   "name": "RepoSpector",
-  "version": "3.1.2",
+  "version": "4.0.1",
   "description": "AI-powered Chrome extension for generating comprehensive test cases from code",
   "author": "AI RepoSpector Team",
   "license": "MIT",
@@ -13,9 +13,6 @@
     "dev": "vite",
     "build:css": "tailwindcss -i ./src/input.css -o ./src/popup/index.css",
     "build": "npm run build:css && node build-isolated.js",
-    "build:vite": "npm run build:css && node build-extension.js",
-    "build:old": "npm run build:css && vite build",
-    "preview": "vite preview",
     "package": "npm run build && mkdir -p build && cd dist && zip -r ../build/ai-RepoSpector.zip .",
     "validate": "npm run lint && npm test"
   },

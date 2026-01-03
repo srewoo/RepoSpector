@@ -65,12 +65,12 @@ export function IndexingProgress({ progress, onCancel }) {
                 {/* Header with icon */}
                 <div className="flex items-center gap-3">
                     {getStatusIcon()}
-                    <div className="flex-1">
+                    <div className="flex-1 min-w-0">
                         <h3 className="text-sm font-semibold text-text">
                             {getStatusText()}
                         </h3>
                         {message && (
-                            <p className="text-xs text-textMuted mt-0.5">
+                            <p className="text-xs text-textMuted mt-0.5 truncate" title={message}>
                                 {message}
                             </p>
                         )}

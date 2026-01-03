@@ -120,11 +120,12 @@ export class GitLabService {
                 // Remove trailing slashes
                 projectPath = projectPath.replace(/\/$/, '');
 
-                const branch = match[2] || 'main';
+                // If branch not in URL, leave as null to auto-detect default branch
+                const branch = match[2] || null;
 
                 console.log('✅ Parsed GitLab URL:', {
                     projectPath,
-                    branch,
+                    branch: branch || '(will auto-detect)',
                     pattern: pattern.toString()
                 });
 
@@ -149,12 +150,11 @@ export class GitLabService {
     }
 
     /**
-     * Fetch repository tree
+     * Get repository default branch
      * @param {string} projectPath
-     * @param {string} branch
-     * @returns {Promise<Array>}
+     * @returns {Promise<string>}
      */
-    async fetchRepoTree(projectPath, branch = 'main') {
+    async getDefaultBranch(projectPath) {
         const encoded = this.encodeProjectPath(projectPath);
         const headers = {
             'Content-Type': 'application/json'
@@ -163,6 +163,51 @@ export class GitLabService {
         if (this.token) {
             headers['PRIVATE-TOKEN'] = this.token;
         }
+
+        try {
+            const response = await fetch(
+                `${this.baseUrl}/projects/${encoded}`,
+                { headers }
+            );
+
+            if (response.ok) {
+                const project = await response.json();
+                const defaultBranch = project.default_branch;
+                console.log('📌 Repository default branch:', defaultBranch);
+                return defaultBranch || 'main';
+            }
+        } catch (error) {
+            console.warn('Failed to fetch default branch, using fallback:', error);
+        }
+
+        return 'main';
+    }
+
+    /**
+     * Fetch repository tree
+     * @param {string} projectPath
+     * @param {string} branch
+     * @returns {Promise<Array>}
+     */
+    async fetchRepoTree(projectPath, branch = null) {
+        // If no branch specified, get the default branch
+        if (!branch) {
+            branch = await this.getDefaultBranch(projectPath);
+        }
+
+        const encoded = this.encodeProjectPath(projectPath);
+        const headers = {
+            'Content-Type': 'application/json'
+        };
+
+        if (this.token) {
+            headers['PRIVATE-TOKEN'] = this.token;
+            console.log('🔑 Using GitLab token:', this.token.substring(0, 10) + '...');
+        } else {
+            console.warn('⚠️ No GitLab token configured!');
+        }
+
+        console.log('📡 Fetching tree for:', { projectPath, branch, encoded });
 
         try {
             const response = await fetch(
@@ -182,12 +227,6 @@ export class GitLabService {
                     }
                 } catch (e) {
                     // If JSON parsing fails, use status text
-                }
-
-                // Try master branch if main fails (404 or branch not found)
-                if (branch === 'main' && (response.status === 404 || errorMessage.includes('branch'))) {
-                    console.log('Branch "main" not found, trying "master"...');
-                    return await this.fetchRepoTree(projectPath, 'master');
                 }
 
                 // Add helpful context to error
@@ -259,19 +298,31 @@ export class GitLabService {
             headers['PRIVATE-TOKEN'] = this.token;
         }
 
+        const url = `${this.baseUrl}/projects/${encoded}/repository/files/${encodedPath}/raw?ref=${branch}`;
+
         try {
-            const response = await fetch(
-                `${this.baseUrl}/projects/${encoded}/repository/files/${encodedPath}/raw?ref=${branch}`,
-                { headers }
-            );
+            const response = await fetch(url, { headers });
 
             if (!response.ok) {
-                throw new Error(`Failed to fetch ${filePath}: ${response.statusText}`);
+                const errorText = await response.text().catch(() => response.statusText);
+                console.error(`❌ Failed to fetch ${filePath}:`, {
+                    status: response.status,
+                    statusText: response.statusText,
+                    error: errorText,
+                    url: url,
+                    hasToken: !!this.token,
+                    branch: branch
+                });
+                throw new Error(`HTTP ${response.status}: ${errorText || response.statusText}`);
             }
 
             return await response.text();
         } catch (error) {
-            console.error(`Error fetching file ${filePath}:`, error);
+            console.error(`❌ Error fetching file ${filePath}:`, error.message, {
+                url: url,
+                hasToken: !!this.token,
+                branch: branch
+            });
             return '';
         }
     }
@@ -288,7 +339,14 @@ export class GitLabService {
             throw new Error('Invalid GitLab URL');
         }
 
-        const { projectPath, branch } = parsed;
+        let { projectPath, branch } = parsed;
+        console.log('🌿 Detected branch from URL:', branch || '(will auto-detect)');
+
+        // Resolve the branch if not specified
+        if (!branch) {
+            branch = await this.getDefaultBranch(projectPath);
+            console.log('📌 Using resolved branch:', branch);
+        }
 
         // Fetch tree
         if (onProgress) onProgress({ status: 'fetching_tree', message: 'Fetching repository structure...' });

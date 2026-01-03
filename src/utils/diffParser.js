@@ -11,22 +11,24 @@ export class DiffParser {
         
         this.platformPatterns = {
             github: {
-                diffContainer: '.diff-table, .js-diff-table, [data-testid="diff-view"]',
-                fileHeader: '.file-header, .js-file-header',
-                addedLines: '.blob-code-addition, .gd',
-                removedLines: '.blob-code-deletion, .gi', 
-                contextLines: '.blob-code-context',
-                lineNumber: '.blob-num',
-                fileName: '.file-info a, .file-header .file-title'
+                // Modern GitHub PR diff selectors (2024+)
+                diffContainer: '.diff-table, .js-diff-table, .js-diff-load-container, [data-testid="diff-view"], [data-hpc="true"], .js-diff-progressive-container',
+                fileHeader: '.file-header, .js-file-header, [data-tagsearch-path]',
+                addedLines: '.blob-code-addition, [data-code-marker="+"], .blob-code.blob-code-addition, .gd',
+                removedLines: '.blob-code-deletion, [data-code-marker="-"], .blob-code.blob-code-deletion, .gi',
+                contextLines: '.blob-code-context, .blob-code:not(.blob-code-addition):not(.blob-code-deletion)',
+                lineNumber: '.blob-num, [data-line-number]',
+                fileName: '[data-tagsearch-path], .file-info a, .file-header [title], .file-header .file-title'
             },
             gitlab: {
-                diffContainer: '.diff-content, .diffs',
-                fileHeader: '.file-title',
-                addedLines: '.line_content.new, .gi',
-                removedLines: '.line_content.old, .gd',
-                contextLines: '.line_content:not(.new):not(.old)',
-                lineNumber: '.diff-line-num',
-                fileName: '.file-title'
+                // Modern GitLab MR diff selectors (2024+)
+                diffContainer: '.resize-observer, [data-diff-file], .diff-file, .diff-files-holder, .js-diff-content, .diffs-batch, .diff-content, .diffs',
+                fileHeader: '.diff-file-header, .file-header-content, [data-path], .file-title',
+                addedLines: '.diff-tr.line_holder.new .line_content, td.line_content.new, .line_content.right-side.new, .line_content.new, .gi',
+                removedLines: '.diff-tr.line_holder.old .line_content, td.line_content.old, .line_content.left-side.old, .line_content.old, .gd',
+                contextLines: '.diff-tr.line_holder .line_content:not(.new):not(.old), .line_content:not(.new):not(.old)',
+                lineNumber: '.diff-line-num, [data-line-number], .old_line, .new_line',
+                fileName: '.diff-file-header .file-title-name, [data-path], .file-header-content .file-path, .file-title'
             },
             bitbucket: {
                 diffContainer: '.refract-content-container, .bb-udiff',
@@ -355,22 +357,47 @@ export class DiffParser {
 
     /**
      * Extract GitLab diff from DOM
+     * Enhanced for modern GitLab MR pages (2024+)
      */
     async extractGitLabDiffFromDOM() {
         const diffFiles = [];
 
-        // GitLab diff files
-        const fileElements = document.querySelectorAll('.diff-file, .file-holder');
-        
+        // Modern GitLab MR diff selectors (2024+) - try multiple selectors
+        const fileContainerSelectors = [
+            '[data-diff-file]',                     // Modern data attribute
+            '.diff-file',                           // Standard class
+            '.diff-files-holder .diff-content',     // Files holder
+            '.js-diff-content .file',               // JS-hooked
+            '.file-holder',                         // Legacy
+            '.mr-tree-list + div .diff-file',       // After file tree
+            '.diffs .diff-content'                  // Diffs container
+        ];
+
+        let fileElements = [];
+        for (const selector of fileContainerSelectors) {
+            fileElements = document.querySelectorAll(selector);
+            if (fileElements.length > 0) {
+                console.log(`GitLab diff files found using: ${selector} (${fileElements.length} files)`);
+                break;
+            }
+        }
+
+        // Fallback: Try to find diff content in the entire page
+        if (fileElements.length === 0) {
+            console.warn('No standard diff containers found, trying expanded search...');
+            fileElements = document.querySelectorAll('.content-wrapper [class*="diff"], .mr-version-menus-container ~ div [class*="diff"]');
+        }
+
         for (const fileElement of fileElements) {
             try {
                 const filePath = this.extractGitLabFilePath(fileElement);
                 const fileChanges = this.extractGitLabFileChanges(fileElement);
-                
-                if (filePath && fileChanges.length > 0) {
+
+                // Accept file even if only changes found (path might be in parent)
+                if (filePath || fileChanges.length > 0) {
                     diffFiles.push({
-                        path: filePath,
-                        language: this.detectLanguage(filePath),
+                        path: filePath || 'unknown',
+                        language: this.detectLanguage(filePath || ''),
                         changes: fileChanges,
                         type: this.detectChangeType(fileElement)
                     });
@@ -514,47 +541,145 @@ export class DiffParser {
     }
 
     // Helper methods for GitLab DOM extraction
+    // Enhanced for modern GitLab MR pages (2024+)
     extractGitLabFilePath(fileElement) {
+        // Modern GitLab selectors for file path (2024+)
         const selectors = [
+            // Data attributes (most reliable)
+            '[data-path]',
+            '[data-file-path]',
+            '[data-testid="diff-file-title"]',
+            // Class-based selectors
+            '.diff-file-header .file-title-name',
+            '.file-header-content .file-path',
+            '.file-title a[href*="blob"]',
+            '.file-title a[href*="/-/blob/"]',
+            // Legacy selectors
             '.file-title-name',
             '.diff-file-path',
-            '.file-header-content strong'
+            '.file-header-content strong',
+            '.file-title',
+            // Breadcrumb-style path
+            '.diff-file-header .file-path a:last-child',
+            // View source link (extract from URL)
+            'a[href*="/-/blob/"]'
         ];
 
         for (const selector of selectors) {
             const element = fileElement.querySelector(selector);
             if (element) {
-                return element.textContent?.trim();
+                // Try data attribute first
+                const dataPath = element.getAttribute('data-path') ||
+                    element.getAttribute('data-file-path');
+                if (dataPath) return dataPath;
+
+                // Try href extraction for blob links
+                const href = element.getAttribute('href');
+                if (href && href.includes('/-/blob/')) {
+                    const pathMatch = href.match(/\/-\/blob\/[^/]+\/(.+)/);
+                    if (pathMatch) return pathMatch[1];
+                }
+
+                // Fallback to text content
+                const text = element.textContent?.trim();
+                if (text && text.length > 0 && !text.includes(' ') && text.includes('.')) {
+                    return text;
+                }
             }
         }
+
+        // Try to extract from parent element's data attributes
+        const parentPath = fileElement.getAttribute('data-path') ||
+            fileElement.getAttribute('data-file-path');
+        if (parentPath) return parentPath;
 
         return null;
     }
 
     extractGitLabFileChanges(fileElement) {
         const changes = [];
-        
-        // Extract added lines
-        const addedLines = fileElement.querySelectorAll('.line_content.new, .new');
-        addedLines.forEach(line => {
-            changes.push({
-                type: 'added',
-                content: line.textContent?.trim() || '',
-                lineNumber: this.extractLineNumber(line)
-            });
-        });
 
-        // Extract deleted lines
-        const deletedLines = fileElement.querySelectorAll('.line_content.old, .old');
-        deletedLines.forEach(line => {
-            changes.push({
-                type: 'deleted',
-                content: line.textContent?.trim() || '',
-                lineNumber: this.extractLineNumber(line)
-            });
-        });
+        // Modern GitLab line selectors (2024+) - try multiple selectors
+        const addedSelectors = [
+            '.diff-tr.line_holder.new .line_content .code',
+            '.diff-tr.line_holder.new td.line_content',
+            'td.line_content.new:not(.empty-cell)',
+            '.line_holder.new .line_content',
+            '.line_content.new:not(.empty-cell)',
+            '[data-type="new"] .line-code',
+            '.diff-line-content.new',
+            '.new:not(.empty-cell)'
+        ];
+
+        const removedSelectors = [
+            '.diff-tr.line_holder.old .line_content .code',
+            '.diff-tr.line_holder.old td.line_content',
+            'td.line_content.old:not(.empty-cell)',
+            '.line_holder.old .line_content',
+            '.line_content.old:not(.empty-cell)',
+            '[data-type="old"] .line-code',
+            '.diff-line-content.old',
+            '.old:not(.empty-cell)'
+        ];
+
+        // Extract added lines - try selectors until one works
+        for (const selector of addedSelectors) {
+            const addedLines = fileElement.querySelectorAll(selector);
+            if (addedLines.length > 0) {
+                addedLines.forEach(line => {
+                    const content = this.extractGitLabLineContent(line);
+                    if (content !== null) {
+                        changes.push({
+                            type: 'added',
+                            content: content,
+                            lineNumber: this.extractLineNumber(line)
+                        });
+                    }
+                });
+                break; // Found working selector
+            }
+        }
+
+        // Extract deleted lines - try selectors until one works
+        for (const selector of removedSelectors) {
+            const deletedLines = fileElement.querySelectorAll(selector);
+            if (deletedLines.length > 0) {
+                deletedLines.forEach(line => {
+                    const content = this.extractGitLabLineContent(line);
+                    if (content !== null) {
+                        changes.push({
+                            type: 'deleted',
+                            content: content,
+                            lineNumber: this.extractLineNumber(line)
+                        });
+                    }
+                });
+                break; // Found working selector
+            }
+        }
 
         return changes;
+    }
+
+    /**
+     * Helper to extract line content cleanly from GitLab diff
+     */
+    extractGitLabLineContent(lineElement) {
+        // Skip empty cells or placeholder lines
+        if (lineElement.classList.contains('empty-cell') ||
+            lineElement.classList.contains('match') ||
+            lineElement.classList.contains('diff-line-num')) {
+            return null;
+        }
+
+        // Try to get code element within line
+        const codeElement = lineElement.querySelector('.code, .line-code, pre, span');
+        const content = codeElement ?
+            (codeElement.textContent || codeElement.innerText) :
+            (lineElement.textContent || lineElement.innerText);
+
+        const trimmed = content?.trim();
+        return trimmed && trimmed.length > 0 ? trimmed : null;
     }
 
     // Helper methods for Bitbucket DOM extraction

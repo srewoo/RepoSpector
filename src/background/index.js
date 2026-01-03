@@ -11,9 +11,17 @@ import { CacheManager } from '../utils/cacheManager.js';
 import { LanguageDetector } from '../utils/languageDetector.js';
 import { TokenManager } from '../utils/tokenManager.js';
 import { PLATFORM_PATTERNS as _PLATFORM_PATTERNS, MODELS } from '../utils/constants.js';
+import {
+    TEST_GENERATION_SYSTEM_PROMPT,
+    buildEnhancedTestPrompt,
+    buildEnhancedChatPrompt,
+    CODE_REVIEW_PROMPT,
+    TEST_TYPE_PROMPTS
+} from '../utils/prompts.js';
 import { RAGService } from '../services/RAGService.js';
 import { GitHubService } from '../services/GitHubService.js';
 import { GitLabService } from '../services/GitLabService.js';
+import { LLMService } from '../services/LLMService.js';
 
 class BackgroundService {
     constructor() {
@@ -41,6 +49,7 @@ class BackgroundService {
             });
             this.githubService = new GitHubService();
             this.gitlabService = new GitLabService();
+            this.llmService = new LLMService();
 
             // Wire up RAG service to context analyzer
             this.contextAnalyzer.setRagService(this.ragService);
@@ -54,8 +63,9 @@ class BackgroundService {
         this.setupInstallHandler();
         this.setupHeartbeat();
 
-        // Initialize encryption service asynchronously
+        // Initialize encryption service asynchronously and load tokens
         this.initializeEncryptionAsync();
+        this.loadTokensAsync();
     }
 
     /**
@@ -144,6 +154,36 @@ class BackgroundService {
 
         if (!this.encryptionReady) {
             console.warn('⚠️ Encryption service not ready after 5 seconds');
+        }
+    }
+
+    /**
+     * Load tokens from storage on service worker initialization
+     * This ensures tokens are available even after service worker restarts
+     */
+    async loadTokensAsync() {
+        try {
+            // Wait for encryption to be ready
+            await this.waitForEncryption();
+
+            // Load settings from storage
+            const settings = await this.getStoredSettings();
+
+            // Set tokens on services
+            if (settings && settings.githubToken) {
+                this.githubService.token = settings.githubToken;
+                console.log('✅ GitHub token loaded on startup');
+            }
+            if (settings && settings.gitlabToken) {
+                this.gitlabService.token = settings.gitlabToken;
+                console.log('✅ GitLab token loaded on startup');
+            }
+            if (settings && settings.apiKey) {
+                this.ragService.apiKey = settings.apiKey;
+                console.log('✅ RAG API key loaded on startup');
+            }
+        } catch (error) {
+            console.error('❌ Failed to load tokens on startup:', error);
         }
     }
 
@@ -260,10 +300,10 @@ class BackgroundService {
     }
 
     setupMessageHandlers() {
-        chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-            this.handleMessage(message, sender, sendResponse);
-            return true; // Keep the message channel open for async responses
-        });
+        // NOTE: Message handlers are now set up in the global listener at the bottom of this file
+        // to avoid duplicate listeners. This method is kept for potential future use but
+        // should NOT add a listener here to prevent conflicts.
+        console.log('📡 BackgroundService ready to handle messages');
     }
 
     async handleMessage(message, sender, sendResponse) {
@@ -324,6 +364,14 @@ class BackgroundService {
 
                 case 'GET_INDEX_STATS':
                     await this.handleGetIndexStats(message, sendResponse);
+                    break;
+
+                case 'GET_INDEXED_REPOS':
+                    await this.handleGetIndexedRepos(message, sendResponse);
+                    break;
+
+                case 'DELETE_REPO_INDEX':
+                    await this.handleDeleteRepoIndex(message, sendResponse);
                     break;
 
                 case 'CANCEL_REQUEST':
@@ -614,17 +662,42 @@ class BackgroundService {
             // Get RAG context if Deep Context is enabled
             let ragContext = null;
             let ragTokens = 0;
-            if (useDeepContext && this.ragService) {
+            if (useDeepContext && this.ragService && extractedContext?.url) {
                 try {
-                    const repoUrl = extractedContext?.url || '';
-                    ragContext = await this.ragService.search(repoUrl, extractedCode, 5);
-                    if (ragContext && ragContext.chunks) {
-                        ragTokens = this.tokenManager.estimateTokens(ragContext.chunks);
-                        console.log(`📚 RAG context found: ${ragTokens} tokens`);
+                    // Extract repoId from URL (e.g., "org/repo" from "https://gitlab.com/org/repo/...")
+                    const repoId = this.contextAnalyzer.extractRepoIdFromUrl(
+                        extractedContext.url,
+                        extractedContext.platform
+                    );
+
+                    if (repoId) {
+                        console.log('🔍 Retrieving RAG context for repo:', repoId, '(user enabled Deep Context for tests)');
+
+                        // Build smart query from the code being tested
+                        const codeContext = this.contextAnalyzer.buildSmartRAGQuery(extractedCode, extractedContext);
+                        const smartQuery = `Generate tests for:\n\n${codeContext}`;
+
+                        const relevantChunks = await this.ragService.retrieveContext(repoId, smartQuery, 5);
+
+                        if (relevantChunks && relevantChunks.length > 0) {
+                            // Format for test generation (expects chunks array)
+                            ragContext = {
+                                chunks: relevantChunks  // Keep as array for processWithChunking/processDirect
+                            };
+                            const chunksText = relevantChunks.map(c => c.content || '').join('\n\n');
+                            ragTokens = this.tokenManager.estimateTokens(chunksText);
+                            console.log(`📚 RAG context found: ${relevantChunks.length} chunks, ${ragTokens} tokens`);
+                        } else {
+                            console.log('ℹ️ No RAG context found for this repository');
+                        }
+                    } else {
+                        console.log('⚠️ Could not extract repoId from URL:', extractedContext.url);
                     }
                 } catch (ragError) {
                     console.warn('⚠️ RAG context retrieval failed:', ragError);
                 }
+            } else if (!useDeepContext) {
+                console.log('ℹ️ Deep Context (RAG) disabled by user for test generation');
             }
 
             // Get conversation history tokens if available
@@ -939,9 +1012,9 @@ class BackgroundService {
             console.log('Messages count:', messages.length);
             console.log('Has conversation history:', conversationHistory && conversationHistory.length > 0);
 
-            // Call OpenAI with streaming
+            // Call LLM with streaming (supports OpenAI, Claude, Gemini, Groq, Mistral, Ollama)
             const result = await this.callOpenAI({
-                model: modelId,
+                model: settings.model || modelId,  // Use full model identifier for provider routing
                 messages: messages,
                 temperature: 0.3,
                 max_tokens: 2000
@@ -1004,7 +1077,7 @@ class BackgroundService {
         // Estimate tokens for fixed parts
         const questionTokens = this.tokenManager.estimateTokens(question);
         const codeTokens = this.tokenManager.estimateTokens(code);
-        const ragTokens = ragContext ? this.tokenManager.estimateTokens(ragContext.chunks) : 0;
+        const ragTokens = ragContext?.chunks ? this.tokenManager.estimateTokens(ragContext.chunks) : 0;
 
         console.log(`📊 Token breakdown:
   - Question: ${questionTokens}
@@ -1024,21 +1097,21 @@ class BackgroundService {
             console.warn(`⚠️ Token limit approaching! Fixed content: ${fixedTokens}, Limit: ${availableTokens}`);
 
             // Strategy 1: Reduce RAG context first
-            if (ragTokens > 0) {
+            if (ragTokens > 0 && ragContext?.chunks) {
                 const ragBudget = Math.floor(availableTokens * 0.2); // 20% for RAG
                 if (ragTokens > ragBudget) {
                     console.log(`⚠️ Truncating RAG context from ${ragTokens} to ~${ragBudget} tokens`);
                     const truncatedRAG = this.tokenManager.truncateCode(ragContext.chunks, ragBudget);
                     processedRAG = {
                         chunks: truncatedRAG,
-                        sources: ragContext.sources
+                        sources: ragContext.sources || []
                     };
                 }
             }
 
             // Strategy 2: Truncate code if still too large
             const codeBudget = availableTokens - budgetForHistory - systemPromptEstimate - questionTokens -
-                              (processedRAG ? this.tokenManager.estimateTokens(processedRAG.chunks) : 0);
+                              (processedRAG?.chunks ? this.tokenManager.estimateTokens(processedRAG.chunks) : 0);
 
             if (codeTokens > codeBudget) {
                 console.log(`⚠️ Truncating code from ${codeTokens} to ~${codeBudget} tokens`);
@@ -1048,46 +1121,20 @@ class BackgroundService {
 
         const messages = [];
 
-        // Build system message with code context and optional RAG context (using processed content)
-        let systemContent = `You are an expert code assistant helping a developer understand and work with code. You are discussing the following ${language} code:
+        // Build enhanced system message with code context and optional RAG context
+        // Use the enhanced chat prompt builder for much better code analysis
+        let systemContent = buildEnhancedChatPrompt(processedCode, language, context, processedRAG);
 
-**Code:**
-\`\`\`${language}
-${processedCode}
-\`\`\`
+        // Detect if this is diff content (has + or - line prefixes indicating additions/deletions)
+        const isDiffContent = processedCode.includes('\n+') || processedCode.includes('\n-') ||
+                              processedCode.match(/^[\+\-]/m);
 
-**Context:**
-- File: ${context?.filePath || 'unknown'}
-- Language: ${language}
-- Platform: ${context?.platform || 'unknown'}`;
-
-        // Add RAG context if available (using processed RAG)
-        if (processedRAG && processedRAG.chunks) {
+        if (isDiffContent) {
+            // Add the comprehensive code review prompt for diffs
             systemContent += `
 
-**Related Code from Repository (RAG Context):**
-The following code snippets from the repository may be relevant to the discussion:
-
-${processedRAG.chunks}
-
-**Sources:** ${processedRAG.sources.join(', ')}
-
-Use this repository context to provide more informed and comprehensive answers, especially when the user asks about:
-- How this code integrates with other parts of the codebase
-- Related functions, classes, or modules
-- Dependencies and imports
-- Overall architecture and patterns used in the project`;
+${CODE_REVIEW_PROMPT}`;
         }
-
-        systemContent += `
-
-Please provide clear, concise, and helpful responses. When answering:
-- For **explanations**: Explain what the code does, its purpose, and how it works
-- For **issues**: Identify bugs, security vulnerabilities, code smells, or potential problems
-- For **improvements**: Suggest better patterns, optimizations, or refactoring opportunities
-- For **specific questions**: Answer directly based on the code
-
-Format responses in a developer-friendly way with code examples where appropriate.`;
 
         messages.push({
             role: 'system',
@@ -1180,7 +1227,7 @@ Format responses in a developer-friendly way with code examples where appropriat
 
             try {
                 const result = await this.callOpenAI({
-                    model: this.getModelId(model),
+                    model: model,  // Use full model identifier for provider routing
                     messages: [
                         { role: 'system', content: systemPrompt },
                         { role: 'user', content: chunkPrompt }
@@ -1256,15 +1303,26 @@ Format your response in a developer-friendly way with code examples where approp
 
         console.log(`Processing ${chunks.length} chunks in parallel`);
 
-        // IMPORTANT: Add RAG context to the main context object so it's passed to each chunk
-        // This ensures Deep Context is used even when chunking
+        // OPTIMIZATION: Use summarized RAG context for multi-chunk processing
+        // This reduces token usage significantly when processing many chunks
         if (options.ragContext && options.ragContext.chunks) {
             const ragChunks = options.ragContext.chunks;
-            context.ragContext = ragChunks.map(chunk =>
-                `// File: ${chunk.filePath || 'unknown'}\n${chunk.content || chunk.text || ''}`
-            ).join('\n\n---\n\n');
-            context.ragSources = ragChunks.map(chunk => chunk.filePath || 'unknown');
-            console.log(`📚 Added RAG context from ${ragChunks.length} chunks for all ${chunks.length} code chunks`);
+
+            if (chunks.length > 1) {
+                // For multi-chunk: Use summarized context to reduce token multiplication
+                const summarizedRAG = this.summarizeRAGContext(ragChunks);
+                context.ragContext = summarizedRAG.summaryText;
+                context.ragSources = summarizedRAG.sources;
+                console.log(`📚 Using SUMMARIZED RAG context (${summarizedRAG.sources.length} sources, ~${summarizedRAG.estimatedTokens} tokens) for ${chunks.length} chunks`);
+                console.log(`   Token savings: ~${(ragChunks.length * 500 * (chunks.length - 1))} tokens avoided`);
+            } else {
+                // For single chunk: Use full context
+                context.ragContext = ragChunks.map(chunk =>
+                    `// File: ${chunk.filePath || 'unknown'}\n${chunk.content || chunk.text || ''}`
+                ).join('\n\n---\n\n');
+                context.ragSources = ragChunks.map(chunk => chunk.filePath || 'unknown');
+                console.log(`📚 Added full RAG context from ${ragChunks.length} chunks`);
+            }
         }
 
         // Prepare chunks with context (each chunk will now include RAG context)
@@ -1328,7 +1386,11 @@ Format your response in a developer-friendly way with code examples where approp
         console.log('Model:', modelId);
 
         // TOKEN MANAGEMENT: Check and truncate if needed
-        const messages = [{ role: 'user', content: prompt }];
+        // Use proper system/user message structure for better LLM performance
+        const messages = [
+            { role: 'system', content: TEST_GENERATION_SYSTEM_PROMPT },
+            { role: 'user', content: prompt }
+        ];
 
         // Validate token count
         const validation = this.tokenManager.validateTokenCount(messages, modelId);
@@ -1386,7 +1448,7 @@ Format your response in a developer-friendly way with code examples where approp
                     const historySection = this.formatConversationHistory(options.conversationHistory);
                     prompt = `${historySection}\n\n${prompt}`;
                 }
-                messages[0].content = prompt;
+                messages[1].content = prompt; // Index 1 is the user message
 
                 // Re-validate after context truncation
                 const midValidation = this.tokenManager.validateTokenCount(messages, modelId);
@@ -1409,7 +1471,7 @@ Format your response in a developer-friendly way with code examples where approp
 
                     // Rebuild prompt with truncated code (no extra context since we removed it)
                     prompt = this.buildTestGenerationPrompt(truncatedCode, options, context);
-                    messages[0].content = prompt;
+                    messages[1].content = prompt; // Index 1 is the user message
 
                     // Re-validate
                     const revalidation = this.tokenManager.validateTokenCount(messages, modelId);
@@ -1426,9 +1488,9 @@ Format your response in a developer-friendly way with code examples where approp
         console.log('✅ Token validation passed, sending to OpenAI...');
         console.log('📍 processDirect | isFromPopup:', options.isFromPopup);
 
-        // Enable streaming for better responsiveness
+        // Enable streaming for better responsiveness (supports all LLM providers)
         const result = await this.callOpenAI({
-            model: modelId,
+            model: settings.model || modelId,  // Use full model identifier for provider routing
             messages: messages,
             temperature: 0.1,
             max_tokens: 4000
@@ -1465,7 +1527,11 @@ Format your response in a developer-friendly way with code examples where approp
         prompt = `**Note**: This is chunk ${chunk.index + 1} of ${chunk.total} from a larger code file.\n\n${prompt}`;
 
         // TOKEN MANAGEMENT: Validate chunk doesn't exceed limits
-        const messages = [{ role: 'user', content: prompt }];
+        // Use proper system/user message structure for better LLM performance
+        const messages = [
+            { role: 'system', content: TEST_GENERATION_SYSTEM_PROMPT },
+            { role: 'user', content: prompt }
+        ];
         const validation = this.tokenManager.validateTokenCount(messages, modelId);
 
         if (!validation.valid) {
@@ -1485,7 +1551,7 @@ Format your response in a developer-friendly way with code examples where approp
                 }
                 prompt = this.buildTestGenerationPrompt(chunk.content, options, chunk.context);
                 prompt = `**Note**: This is chunk ${chunk.index + 1} of ${chunk.total} from a larger code file.\n\n${prompt}`;
-                messages[0].content = prompt;
+                messages[1].content = prompt; // Index 1 is the user message
             }
 
             // If still too large, truncate code
@@ -1494,13 +1560,13 @@ Format your response in a developer-friendly way with code examples where approp
                 const truncatedCode = this.tokenManager.truncateCode(chunk.content, availableTokens - 2000);
                 prompt = this.buildTestGenerationPrompt(truncatedCode, options, chunk.context);
                 prompt = `**Note**: This is chunk ${chunk.index + 1} of ${chunk.total} from a larger code file (truncated).\n\n${prompt}`;
-                messages[0].content = prompt;
+                messages[1].content = prompt; // Index 1 is the user message
             }
         }
 
-        // Enable streaming for chunk processing too
+        // Enable streaming for chunk processing too (supports all LLM providers)
         return await this.callOpenAI({
-            model: modelId,
+            model: settings.model || modelId,  // Use full model identifier for provider routing
             messages: messages,
             temperature: 0.1,
             max_tokens: 2000
@@ -1513,112 +1579,24 @@ Format your response in a developer-friendly way with code examples where approp
     }
 
     buildTestGenerationPrompt(code, options, context) {
-        const isDescriptionsOnly = options.testMode === 'descriptions';
-        const testType = options.testType || 'unit';
+        // Use the enhanced prompt builder from prompts.js
+        // This provides much more comprehensive test generation guidance
+        return buildEnhancedTestPrompt(code, options, context);
+    }
 
-        // Handle "All Types" by generating comprehensive test suites
-        const isAllTypes = testType === 'all' || testType === 'All Types';
+    /**
+     * Get the system prompt for test generation
+     * This is used separately from the user prompt for better LLM performance
+     */
+    getTestGenerationSystemPrompt() {
+        return TEST_GENERATION_SYSTEM_PROMPT;
+    }
 
-        let prompt;
-
-        if (isAllTypes) {
-            prompt = `You are an expert test engineer. Generate a COMPREHENSIVE test suite covering ALL test types for the following code.
-
-**IMPORTANT**: Generate separate test suites for each applicable test type:
-1. **Unit Tests** - Test individual functions/methods in isolation
-2. **Integration Tests** - Test component interactions and data flow
-3. **API Tests** - Test API endpoints, request/response handling (if applicable)
-4. **End-to-End Tests** - Test complete user workflows (if applicable)
-
-**Context Information:**
-- Language: ${context.language || 'Auto-detected'}
-- File: ${context.filePath || 'unknown'}
-- Testing Framework: ${options.testFramework && options.testFramework !== 'auto-detect' ? options.testFramework : (context.testingFramework && context.testingFramework !== 'auto-detect' ? context.testingFramework : 'Automatically select the most appropriate framework')}
-- Context Level: ${options.contextLevel || 'smart'}
-
-**CRITICAL INSTRUCTIONS:**
-1. First, analyze the code to identify the programming language
-2. Automatically select the most appropriate testing framework for that language
-3. If the code already contains test patterns (e.g., cy.visit, describe(), it(), @Test, def test_, etc.), follow the EXACT same style and framework
-4. Generate complete, runnable test code - DO NOT return empty results
-5. Use proper imports/requires for the testing framework
-`;
-        } else {
-            prompt = `You are an expert test engineer. Generate comprehensive ${testType} tests for the following code.
-
-**Context Information:**
-- Language: ${context.language || 'Auto-detected'}
-- File: ${context.filePath || 'unknown'}
-- Testing Framework: ${options.testFramework && options.testFramework !== 'auto-detect' ? options.testFramework : (context.testingFramework && context.testingFramework !== 'auto-detect' ? context.testingFramework : 'Automatically select the most appropriate framework')}
-- Context Level: ${options.contextLevel || 'smart'}
-
-**CRITICAL INSTRUCTIONS:**
-1. First, analyze the code to identify the programming language
-2. Automatically select the most appropriate testing framework for that language
-3. If the code already contains test patterns (e.g., cy.visit, describe(), it(), @Test, def test_, etc.), follow the EXACT same style and framework
-4. Generate complete, runnable test code - DO NOT return empty results
-5. Use proper imports/requires for the testing framework
-`;
-        }
-
-        // Add RAG context if available
-        if (context.ragContext && context.ragSources) {
-            prompt += `\n**Related Code from Repository (RAG Context):**\nThe following code snippets from the repository may be relevant:\n\n${context.ragContext}\n\n**Sources:** ${context.ragSources.join(', ')}\n`;
-        }
-
-        if (context.dependencies && context.dependencies.length > 0) {
-            prompt += `\n**Dependencies:**\n${context.dependencies.map(dep => `- ${dep.name}: ${dep.summary}`).join('\n')}`;
-        }
-
-        if (context.projectPatterns) {
-            prompt += `\n**Project Patterns:**\n${JSON.stringify(context.projectPatterns, null, 2)}`;
-        }
-
-        // Add context verification information for transparency
-        if (context.fullContextVerification) {
-            prompt += `\n**FULL CONTEXT VERIFICATION:**\n`;
-            prompt += `- Method: ${context.fullContextVerification.method}\n`;
-            prompt += `- Timestamp: ${context.fullContextVerification.timestamp}\n`;
-
-            if (context.fullContextVerification.repositoryFilesCount) {
-                prompt += `- Repository Files Analyzed: ${context.fullContextVerification.repositoryFilesCount}\n`;
-                prompt += `- Config Files: ${context.fullContextVerification.configFilesAnalyzed?.join(', ') || 'None'}\n`;
-                prompt += `- Test Files: ${context.fullContextVerification.testFilesAnalyzed?.join(', ') || 'None'}\n`;
-                prompt += `- Dependencies: ${context.fullContextVerification.dependenciesCount?.production || 0} production, ${context.fullContextVerification.dependenciesCount?.development || 0} dev\n`;
-            }
-
-            if (context.fullContextVerification.testingFramework) {
-                prompt += `- Testing Framework: ${context.fullContextVerification.testingFramework}\n`;
-            }
-
-            prompt += `- Repository Info Available: ${context.fullContextVerification.repositoryInfo ? 'Yes' : 'No'}\n`;
-            prompt += `- Test Patterns Extracted: ${context.fullContextVerification.hasTestPatterns ? 'Yes' : 'No'}\n`;
-        }
-
-
-        prompt += `\n**Code to Test:**\n\`\`\`${context.language || 'javascript'}\n${code}\n\`\`\`\n\n`;
-
-        // Add user-specific instructions if provided
-        if (options.userPrompt) {
-            prompt += `\n**User Instructions:**\n${options.userPrompt}\n\n`;
-        }
-
-
-        if (isAllTypes) {
-            if (isDescriptionsOnly) {
-                prompt += this.buildAllTypesDescriptionsPrompt();
-            } else {
-                prompt += this.buildAllTypesImplementationPrompt(options);
-            }
-        } else {
-            if (isDescriptionsOnly) {
-                prompt += this.buildSingleTypeDescriptionsPrompt();
-            } else {
-                prompt += this.buildSingleTypeImplementationPrompt();
-            }
-        }
-
-        return prompt;
+    /**
+     * Get additional context for specific test types
+     */
+    getTestTypeContext(testType) {
+        return TEST_TYPE_PROMPTS[testType] || '';
     }
 
     buildAllTypesDescriptionsPrompt() {
@@ -1812,6 +1790,48 @@ Return only the complete test code with proper syntax for the detected language,
     }
 
     /**
+     * Summarize RAG context to reduce token usage in multi-chunk processing
+     * Instead of sending full file contents, sends previews with file paths
+     * @param {Array} ragChunks - Array of RAG chunks with content
+     * @returns {Object} Summarized RAG context
+     */
+    summarizeRAGContext(ragChunks) {
+        if (!ragChunks || ragChunks.length === 0) {
+            return { summaryText: '', sources: [], estimatedTokens: 0 };
+        }
+
+        const maxPreviewLength = 200; // Characters per chunk preview
+        const summaryParts = [];
+        const sources = [];
+
+        for (const chunk of ragChunks) {
+            const filePath = chunk.filePath || 'unknown';
+            const content = chunk.content || chunk.text || '';
+            const relevance = chunk.relevance || chunk.score || 0;
+
+            // Create a preview of the content
+            const preview = content.substring(0, maxPreviewLength).trim();
+            const truncated = content.length > maxPreviewLength;
+
+            summaryParts.push(
+                `// File: ${filePath}${relevance ? ` (relevance: ${(relevance * 100).toFixed(0)}%)` : ''}\n` +
+                `${preview}${truncated ? '...' : ''}`
+            );
+            sources.push(filePath);
+        }
+
+        const summaryText = summaryParts.join('\n\n---\n\n');
+        const estimatedTokens = Math.ceil(summaryText.length / 4); // Rough estimate
+
+        return {
+            summaryText,
+            sources,
+            estimatedTokens,
+            originalChunks: ragChunks.length
+        };
+    }
+
+    /**
      * Format conversation history for inclusion in prompt
      * @param {Array} history - Array of conversation messages
      * @returns {string} Formatted conversation history section
@@ -1840,149 +1860,44 @@ Return only the complete test code with proper syntax for the detected language,
         return formatted;
     }
 
+    /**
+     * Unified LLM call method - delegates to LLMService for multi-provider support
+     * Supports: OpenAI, Anthropic (Claude), Google (Gemini), Groq, Mistral, Ollama (local)
+     *
+     * @param {Object} requestData - Request data with model, messages, temperature, etc.
+     * @param {string} apiKey - API key (not required for local/Ollama)
+     * @param {Object} options - Options: streaming, onChunk, tabId, timeout, requestId
+     * @returns {Promise<string>} LLM response content
+     */
     async callOpenAI(requestData, apiKey, options = {}) {
         try {
-            const { streaming = false, onChunk = null, tabId = null, timeout = 120000 } = options; // 2 min default timeout
-
-            console.log('🔑 API Key present:', !!apiKey);
-            console.log('📋 Request model:', requestData.model);
-            console.log('📏 Request size:', JSON.stringify(requestData).length, 'bytes');
-            console.log('🌊 Streaming mode:', streaming);
-            console.log('⏱️ Timeout:', timeout, 'ms');
-            console.log('🔍 API Key preview:', apiKey ? apiKey.substring(0, 20) + '...' : 'NONE');
-
-            // Add stream parameter if streaming is enabled
-            const requestBody = {
-                ...requestData,
-                stream: streaming
-            };
-
-            console.log('📡 Making fetch request to OpenAI API...');
-            console.log('🤖 Model:', requestBody.model);
-            console.log('🌊 Streaming enabled:', streaming);
-            console.log('💬 Prompt size:', requestData.messages[0]?.content?.length || 0, 'characters');
-            console.log('🔒 Request headers:', {
-                'Content-Type': 'application/json',
-                'Authorization': apiKey ? `Bearer ${apiKey.substring(0, 20)}...` : 'MISSING'
+            console.log('🤖 LLM Request:', {
+                model: requestData.model,
+                streaming: options.streaming || false,
+                hasApiKey: !!apiKey,
+                requestSize: JSON.stringify(requestData).length
             });
 
-            // Create AbortController for timeout and cancellation
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => {
-                console.warn('⏱️ Request timeout after', timeout, 'ms');
-                controller.abort();
-            }, timeout);
+            // Delegate to the LLMService for multi-provider support
+            const result = await this.llmService.callLLM(requestData, apiKey, options);
 
-            // Store controller for potential cancellation
-            if (options.requestId) {
-                this.activeRequests = this.activeRequests || new Map();
-                this.activeRequests.set(options.requestId, controller);
-            }
-
-            try {
-                // Test if we can access OpenAI at all (skip for faster requests)
-                if (!streaming) {
-                    console.log('🧪 Testing basic connectivity to OpenAI...');
-                    const testResponse = await fetch('https://api.openai.com/v1/models', {
-                        method: 'GET',
-                        headers: {
-                            'Authorization': `Bearer ${apiKey}`
-                        },
-                        signal: controller.signal
-                    });
-                    console.log('✅ Basic connectivity test:', testResponse.ok ? 'SUCCESS' : 'FAILED', testResponse.status);
-                }
-            } catch (testError) {
-                if (testError.name === 'AbortError') {
-                    throw new Error('Request timeout during connectivity test');
-                }
-                console.error('❌ Basic connectivity test failed:', testError.message);
-                throw new Error(`Cannot connect to OpenAI API. Check if extension has permission for api.openai.com. Original error: ${testError.message}`);
-            }
-
-            const response = await fetch('https://api.openai.com/v1/chat/completions', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${apiKey}`
-                },
-                body: JSON.stringify(requestBody),
-                signal: controller.signal
+            console.log('✅ LLM Response received:', {
+                length: result?.length || 0,
+                preview: result ? result.substring(0, 100) + '...' : 'EMPTY'
             });
 
-            // Clear timeout if request succeeds
-            clearTimeout(timeoutId);
-
-            console.log('📡 Response status:', response.status, response.statusText);
-
-            if (!response.ok) {
-                const errorText = await response.text();
-                console.error('❌ API Error Response:', errorText);
-                let error;
-                try {
-                    error = JSON.parse(errorText);
-                } catch (e) {
-                    throw new Error(`API request failed: ${response.status} - ${errorText}`);
-                }
-                throw new Error(error.error?.message || `API request failed: ${response.status}`);
-            }
-
-            // Handle streaming response
-            if (streaming) {
-                return await this.handleStreamingResponse(response, onChunk, tabId, options);
-            }
-
-            // Handle regular (non-streaming) response
-            const data = await response.json();
-            console.log('📦 Response data keys:', Object.keys(data));
-
-            if (!data.choices || data.choices.length === 0) {
-                console.error('❌ No choices in response:', data);
-                throw new Error('No response choices received from API');
-            }
-
-            if (!data.choices[0]?.message?.content) {
-                console.error('❌ No content in response:', data.choices[0]);
-                throw new Error('Invalid response format from API');
-            }
-
-            const content = data.choices[0].message.content;
-
-            // Log for debugging
-            console.log('✅ OpenAI Response Length:', content?.length || 0);
-            if (!content || content.trim() === '') {
-                console.warn('⚠️ OpenAI returned empty content');
-                console.warn('Full response:', JSON.stringify(data, null, 2));
-            } else {
-                console.log('✅ Content preview:', content.substring(0, 100) + '...');
-            }
-
-            return content;
+            return result;
         } catch (error) {
-            console.error('❌ callOpenAI error:', error);
-            console.error('❌ Error type:', error.constructor.name);
-            console.error('❌ Error message:', error.message);
-            console.error('❌ Error stack:', error.stack);
+            console.error('❌ LLM call error:', error.message);
 
-            // Cleanup active request tracking
-            if (options.requestId && this.activeRequests) {
-                this.activeRequests.delete(options.requestId);
+            // Check if it's a network/connectivity error
+            if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
+                console.error('🚫 Network error - check connectivity and permissions');
             }
 
-            // Check if it's an abort error (timeout or cancellation)
-            if (error.name === 'AbortError') {
-                console.error('⏱️ Request was aborted (timeout or cancellation)');
-                throw new Error('Request timeout. The operation took too long. Try with a smaller code file or simpler request.');
-            }
-
-            // Check if it's a network error
-            if (error instanceof TypeError && error.message === 'Failed to fetch') {
-                console.error('🚫 Network error - possible causes:');
-                console.error('   1. Host permission not granted (check chrome://extensions)');
-                console.error('   2. CORS issue (OpenAI should allow this)');
-                console.error('   3. Network connectivity issue');
-                console.error('   4. Invalid API key format');
-                console.error('💡 Try: Remove and re-add extension to grant permissions');
+            // Check if it's an Ollama-specific error
+            if (error.message.includes('Ollama server not running')) {
+                console.error('💡 Tip: Start Ollama with: ollama serve');
             }
 
             throw error;
@@ -2170,7 +2085,7 @@ Return only the complete test code with proper syntax for the detected language,
 
     async handleValidateApiKey(message, sendResponse) {
         try {
-            const { apiKey } = message.data;
+            const { apiKey } = message.data || {};
 
             const response = await fetch('https://api.openai.com/v1/models', {
                 headers: { 'Authorization': `Bearer ${apiKey}` }
@@ -2191,7 +2106,7 @@ Return only the complete test code with proper syntax for the detected language,
 
     async handleSaveSettings(message, sendResponse) {
         try {
-            const { settings } = message.data;
+            const { settings } = message.data || {};
 
             // Encrypt all sensitive keys before storing
             const sensitiveKeys = ['apiKey', 'githubToken', 'gitlabToken', 'anthropicApiKey', 'googleApiKey', 'cohereApiKey', 'mistralApiKey', 'groqApiKey', 'huggingfaceApiKey'];
@@ -2297,7 +2212,7 @@ Return only the complete test code with proper syntax for the detected language,
 
     async handleAnalyzeContext(message, sendResponse) {
         try {
-            const { code, url, level } = message.data;
+            const { code, url, level } = message.data || {};
 
             const context = await this.contextAnalyzer.analyzeWithContext(code, {
                 url,
@@ -2319,7 +2234,7 @@ Return only the complete test code with proper syntax for the detected language,
 
     async handleProcessDiff(message, sendResponse) {
         try {
-            const { diffContent, url, options: _options } = message.data;
+            const { diffContent, url, options: _options } = message.data || {};
 
             // This will be enhanced in Phase 2.1
             const context = await this.contextAnalyzer.analyzeWithContext(diffContent, {
@@ -2444,6 +2359,21 @@ Return only the complete test code with proper syntax for the detected language,
 
             console.log('✅ Repository indexed successfully:', result);
 
+            // Determine platform
+            const platform = url.includes('gitlab') ? 'gitlab' : 'github';
+
+            // Save metadata for the repos view
+            await this.saveRepoMetadata(repoId, url, platform, {
+                chunksIndexed: result.chunksIndexed,
+                filesProcessed: files.length
+            });
+
+            // Broadcast completion to popup
+            chrome.runtime.sendMessage({
+                type: 'INDEX_PROGRESS',
+                data: { status: 'complete', repoId }
+            }).catch(() => {});
+
             sendResponse({
                 success: true,
                 repoId,
@@ -2564,6 +2494,112 @@ Return only the complete test code with proper syntax for the detected language,
     }
 
     /**
+     * Get all indexed repositories with metadata
+     */
+    async handleGetIndexedRepos(message, sendResponse) {
+        try {
+            await this.ragService.init();
+
+            // Get all repos from VectorStore
+            const reposFromDb = await this.ragService.vectorStore.getAllRepoIds();
+
+            // Get metadata from chrome.storage.local
+            const result = await chrome.storage.local.get(['indexedReposMetadata']);
+            const metadata = result.indexedReposMetadata || {};
+
+            // Merge data: repo stats from DB + metadata from storage
+            const repos = await Promise.all(reposFromDb.map(async (repo) => {
+                const repoStats = await this.ragService.vectorStore.getRepoStats(repo.repoId);
+                const repoMetadata = metadata[repo.repoId] || {};
+
+                // Determine platform from repoId pattern or stored metadata
+                const platform = repoMetadata.platform ||
+                    (repo.repoId.includes('/') ? 'github' : 'unknown');
+
+                return {
+                    repoId: repo.repoId,
+                    platform: platform,
+                    url: repoMetadata.url || `https://github.com/${repo.repoId}`,
+                    indexedAt: repoMetadata.indexedAt || null,
+                    chunksCount: repoStats.chunksCount,
+                    filesCount: repoStats.filesCount
+                };
+            }));
+
+            sendResponse({
+                success: true,
+                data: repos
+            });
+        } catch (error) {
+            this.errorHandler.logError('Get indexed repos', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
+    }
+
+    /**
+     * Delete a repository index and its metadata
+     */
+    async handleDeleteRepoIndex(message, sendResponse) {
+        try {
+            const { repoId } = message.data || message.payload || {};
+
+            if (!repoId) {
+                sendResponse({ success: false, error: 'Repository ID is required' });
+                return;
+            }
+
+            // Clear from VectorStore
+            await this.ragService.init();
+            await this.ragService.vectorStore.clearRepo(repoId);
+
+            // Remove metadata from storage
+            const result = await chrome.storage.local.get(['indexedReposMetadata']);
+            const metadata = result.indexedReposMetadata || {};
+            delete metadata[repoId];
+            await chrome.storage.local.set({ indexedReposMetadata: metadata });
+
+            console.log('🗑️ Deleted repository index:', repoId);
+
+            sendResponse({
+                success: true,
+                repoId
+            });
+        } catch (error) {
+            this.errorHandler.logError('Delete repo index', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
+    }
+
+    /**
+     * Save repository metadata after indexing
+     */
+    async saveRepoMetadata(repoId, url, platform, stats) {
+        try {
+            const result = await chrome.storage.local.get(['indexedReposMetadata']);
+            const metadata = result.indexedReposMetadata || {};
+
+            metadata[repoId] = {
+                url,
+                platform,
+                indexedAt: Date.now(),
+                chunksCount: stats.chunksIndexed,
+                filesCount: stats.filesProcessed || 0
+            };
+
+            await chrome.storage.local.set({ indexedReposMetadata: metadata });
+            console.log('📝 Saved repo metadata for:', repoId);
+        } catch (error) {
+            console.error('Failed to save repo metadata:', error);
+        }
+    }
+
+    /**
      * Cancel an active request
      */
     handleCancelRequest(message, sendResponse) {
@@ -2663,14 +2699,13 @@ Return only the complete test code with proper syntax for the detected language,
 
 // Initialize services
 let ragService = null;
-let backgroundServiceInstance = null; // Keep a reference to the main service
 
-// Listen for messages
+// Initialize BackgroundService ONCE at startup (not inside message listener)
+const backgroundServiceInstance = new BackgroundService();
+console.log('🚀 BackgroundService initialized at startup');
+
+// Listen for messages - single listener to avoid conflicts
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    // Ensure backgroundServiceInstance is initialized before handling messages
-    if (!backgroundServiceInstance) {
-        backgroundServiceInstance = new BackgroundService();
-    }
     handleMessage(request, sender, sendResponse, backgroundServiceInstance);
     return true; // Keep channel open for async response
 });
@@ -2826,5 +2861,4 @@ async function handleMessage(request, sender, sendResponse, serviceInstance) {
     }
 }
 
-// Initialize the background service (moved inside the listener to ensure it's ready)
-// new BackgroundService();
+// BackgroundService is initialized above (line ~2904) before the message listener
