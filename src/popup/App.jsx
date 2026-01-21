@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Layout } from './components/Layout';
 import { Settings } from './components/Settings';
 import { ChatInterface } from './components/ChatInterface';
@@ -9,12 +9,23 @@ import { ThemeProvider } from './contexts/ThemeContext';
 import { ToastProvider } from './components/ui/Toast';
 import { Button } from './components/ui/Button';
 import { Card, CardContent } from './components/ui/Card';
-import { Sparkles, Code2, FileCode } from 'lucide-react';
+import { PRReviewInterface } from './components/PRReviewInterface';
+import { Sparkles, Code2, FileCode, GitPullRequest, RefreshCw, AlertCircle } from 'lucide-react';
 
 function AppContent() {
     const [activeTab, setActiveTab] = useState('home');
     const [testType, setTestType] = useState(null);
     const [indexedRepoCount, setIndexedRepoCount] = useState(0);
+
+    // PR Review state
+    const [prUrl, setPrUrl] = useState(null);
+    const [prData, setPrData] = useState(null);
+    const [prAnalysisResult, setPrAnalysisResult] = useState(null);
+    const [prStaticAnalysisResult, setPrStaticAnalysisResult] = useState(null);
+    const [prSession, setPrSession] = useState(null);
+    const [prLoading, setPrLoading] = useState(false);
+    const [prError, setPrError] = useState(null);
+    const [isOnPRPage, setIsOnPRPage] = useState(false);
 
     // Load indexed repo count on mount
     useEffect(() => {
@@ -42,6 +53,96 @@ function AppContent() {
 
         chrome.runtime.onMessage.addListener(listener);
         return () => chrome.runtime.onMessage.removeListener(listener);
+    }, []);
+
+    // Detect if on a PR page
+    useEffect(() => {
+        const checkPRPage = async () => {
+            try {
+                const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                if (tab?.url) {
+                    // Flexible PR/MR detection patterns
+                    const isPRPage =
+                        // GitHub-style: any domain with /owner/repo/pull/number
+                        /\/[^/]+\/[^/]+\/pull\/\d+/.test(tab.url) ||
+                        // GitLab-style: any URL containing /merge_requests/number
+                        /\/merge_requests\/\d+/.test(tab.url) ||
+                        // Bitbucket-style: any URL containing /pull-requests/number
+                        /\/pull-requests\/\d+/.test(tab.url);
+
+                    if (isPRPage) {
+                        setIsOnPRPage(true);
+                        setPrUrl(tab.url);
+                    } else {
+                        setIsOnPRPage(false);
+                        setPrUrl(null);
+                    }
+                }
+            } catch (error) {
+                console.error('Failed to check PR page:', error);
+            }
+        };
+
+        checkPRPage();
+    }, [activeTab]);
+
+    // Analyze PR
+    const analyzePR = useCallback(async (focusArea = null) => {
+        if (!prUrl) return;
+
+        setPrLoading(true);
+        setPrError(null);
+
+        try {
+            const response = await chrome.runtime.sendMessage({
+                type: 'ANALYZE_PR_WITH_STATIC_ANALYSIS',
+                data: {
+                    prUrl,
+                    options: {
+                        focusAreas: focusArea ? [focusArea] : ['security', 'bugs', 'performance', 'style'],
+                        enableESLint: true,
+                        enableSemgrep: true,
+                        enableDependency: true
+                    }
+                }
+            });
+
+            if (response.success) {
+                setPrData(response.data.prData);
+                setPrAnalysisResult({
+                    analysis: response.data.analysis,
+                    recommendation: response.data.staticAnalysis?.recommendation
+                });
+                setPrStaticAnalysisResult(response.data.staticAnalysis);
+                // Create a session object for thread management
+                setPrSession({
+                    sessionId: `pr-${Date.now()}`,
+                    prUrl,
+                    createdAt: new Date().toISOString()
+                });
+            } else {
+                setPrError(response.error || 'Failed to analyze PR');
+            }
+        } catch (error) {
+            setPrError(error.message || 'Failed to analyze PR');
+        } finally {
+            setPrLoading(false);
+        }
+    }, [prUrl]);
+
+    // Handle PR focus area change
+    const handlePRFocusArea = useCallback((area) => {
+        analyzePR(area);
+    }, [analyzePR]);
+
+    // Handle PR refresh
+    const handlePRRefresh = useCallback(() => {
+        analyzePR();
+    }, [analyzePR]);
+
+    // Handle asking a question about the PR (switches to chat)
+    const handlePRAskQuestion = useCallback(() => {
+        setActiveTab('chat');
     }, []);
 
     const handleGenerateTests = (type) => {
@@ -72,6 +173,66 @@ function AppContent() {
                 );
             case 'repos':
                 return <ReposView />;
+            case 'prreview':
+                return (
+                    <div className="space-y-4 animate-fade-in">
+                        {!isOnPRPage ? (
+                            // Not on a PR page
+                            <Card className="p-6 text-center">
+                                <GitPullRequest className="w-12 h-12 mx-auto text-textMuted mb-3" />
+                                <h3 className="text-lg font-medium text-text">No Pull Request Detected</h3>
+                                <p className="text-sm text-textMuted mt-2 max-w-[280px] mx-auto">
+                                    Navigate to a GitHub, GitLab, or Bitbucket pull request page to analyze it
+                                </p>
+                            </Card>
+                        ) : prError ? (
+                            // Error state
+                            <Card className="p-6 text-center">
+                                <AlertCircle className="w-12 h-12 mx-auto text-red-500 mb-3" />
+                                <h3 className="text-lg font-medium text-text">Analysis Failed</h3>
+                                <p className="text-sm text-textMuted mt-2">{prError}</p>
+                                <Button
+                                    onClick={handlePRRefresh}
+                                    className="mt-4"
+                                    disabled={prLoading}
+                                >
+                                    <RefreshCw className={`w-4 h-4 mr-2 ${prLoading ? 'animate-spin' : ''}`} />
+                                    Try Again
+                                </Button>
+                            </Card>
+                        ) : !prAnalysisResult && !prLoading ? (
+                            // Ready to analyze
+                            <Card className="p-6 text-center">
+                                <GitPullRequest className="w-12 h-12 mx-auto text-primary mb-3" />
+                                <h3 className="text-lg font-medium text-text">Ready to Analyze</h3>
+                                <p className="text-sm text-textMuted mt-2 max-w-[280px] mx-auto">
+                                    Click below to run AI-powered analysis with static code checks
+                                </p>
+                                <Button
+                                    onClick={() => analyzePR()}
+                                    className="mt-4"
+                                    disabled={prLoading}
+                                >
+                                    <GitPullRequest className="w-4 h-4 mr-2" />
+                                    Analyze Pull Request
+                                </Button>
+                            </Card>
+                        ) : (
+                            // Show PR Review Interface
+                            <PRReviewInterface
+                                prUrl={prUrl}
+                                prData={prData}
+                                analysisResult={prAnalysisResult}
+                                staticAnalysisResult={prStaticAnalysisResult}
+                                session={prSession}
+                                onRefresh={handlePRRefresh}
+                                onAskQuestion={handlePRAskQuestion}
+                                onFocusArea={handlePRFocusArea}
+                                loading={prLoading}
+                            />
+                        )}
+                    </div>
+                );
             case 'home':
             default:
                 return (
@@ -161,6 +322,7 @@ function AppContent() {
                 activeTab={activeTab}
                 onTabChange={handleTabChange}
                 repoCount={indexedRepoCount}
+                isOnPRPage={isOnPRPage}
             />
         </>
     );

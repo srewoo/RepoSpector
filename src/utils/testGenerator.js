@@ -24,6 +24,12 @@ import {
     ANALYSIS_CONFIG
 } from './constants.js';
 
+// Phase 3 enhancements - Test generation improvements
+import { analyzeFunction, buildEdgeCasePromptEnhancements } from './edgeCaseAnalyzer.js';
+import { validateTestQuality as validateTestQualityUtil, detectFramework } from './testQualityValidator.js';
+import { analyzeTestPatterns, buildPatternPromptEnhancement } from './testPatternAnalyzer.js';
+import { validateSyntax } from './syntaxValidator.js';
+
 export class TestGenerator {
     constructor() {
         this.errorHandler = new ErrorHandler();
@@ -32,26 +38,18 @@ export class TestGenerator {
         // this.astAnalyzer = new ASTAnalyzer();
         // this.llmClient = new MultiLLMClient();
 
-        // Enhanced capabilities - disabled, modules removed
-        // this.frameworkSupport = new FrameworkSupport();
-        // this.patternLearning = new TestPatternLearning();
-
-        // Test quality validator and compiler checker
-        // TODO: Implement TestQualityValidator and TestCompiler classes
-        // this.testValidator = new TestQualityValidator();
-        // this.testCompiler = new TestCompiler();
+        // Enhanced capabilities - now implemented via Phase 3 imports:
+        // - edgeCaseAnalyzer.js: Type-specific edge case detection
+        // - testQualityValidator.js: Multi-layer test validation
+        // - testPatternAnalyzer.js: Learn patterns from existing tests
 
         // Coverage tracker to ensure ALL functions are tested
         this.coverageTracker = new CoverageTracker();
 
-        // Framework-specific generators with enhanced capabilities
-        // TODO: Implement framework-specific generator classes
+        // Framework-specific prompts are handled via FRAMEWORK_CONFIGS in prompts.js
+        // which provides detailed patterns for Jest, Mocha, pytest, JUnit, Playwright, Cypress
         this.frameworkGenerators = new Map([
-            // ['jest', new JestTestGenerator()],
-            // ['mocha', new MochaTestGenerator()],
-            // ['vitest', new VitestTestGenerator()],
-            // ['cypress', new CypressTestGenerator()],
-            // ['playwright', new PlaywrightTestGenerator()],
+            // Framework generators now handled via buildFrameworkSpecificPrompt in prompts.js
             // ['pytest', new PytestTestGenerator()],
             // ['junit', new JUnitTestGenerator()],
             // ['nunit', new NUnitTestGenerator()],
@@ -316,20 +314,27 @@ export class TestGenerator {
                 }
             }
 
-            // Compilation check
+            // Compilation/Syntax check using syntaxValidator
             if (compileCheck) {
-                console.log('🔨 Checking test compilation...');
-                // TODO: Implement test compilation validation
-                // const compilationResult = await this.testCompiler.validateCompilation(testSuite, enhancedAnalysis.language);
+                console.log('🔨 Checking test syntax...');
+                const testCode = this.extractTestCode(testSuite);
+                if (testCode) {
+                    const syntaxResult = validateSyntax(testCode, {
+                        language: enhancedAnalysis.language || 'javascript'
+                    });
 
-                // if (!compilationResult.success) {
-                //     console.warn('⚠️  Compilation issues found:', compilationResult.errors);
+                    testSuite.compilation = {
+                        success: syntaxResult.valid,
+                        errors: syntaxResult.errors || [],
+                        warnings: syntaxResult.warnings || []
+                    };
 
-                //     // Attempt to fix compilation issues
-                //     testSuite = await this.fixCompilationIssues(testSuite, compilationResult);
-                // }
-
-                // testSuite.compilation = compilationResult;
+                    if (!syntaxResult.valid) {
+                        console.warn('⚠️ Syntax issues found:', syntaxResult.errors);
+                    } else {
+                        console.log('✅ Syntax validation passed');
+                    }
+                }
             }
 
             // Final coverage report
@@ -1216,14 +1221,160 @@ test.describe('${flowName}', () => {
      * Enhanced helper methods for the new functionality
      */
 
-    async validateTestQuality(_testResults) {
+    async validateTestQuality(testResults) {
+        try {
+            const code = testResults?.code || testResults?.tests || '';
+            if (!code) {
+                return {
+                    score: 0,
+                    coverage: 'unknown',
+                    maintainability: 'unknown',
+                    readability: 'unknown',
+                    suggestions: ['No test code provided for validation']
+                };
+            }
+
+            // Use the real test quality validator
+            const validationResult = validateTestQualityUtil(code, {
+                framework: testResults.framework || detectFramework(code),
+                targetCode: testResults.targetCode,
+                expectedFunctions: testResults.expectedFunctions
+            });
+
+            // Map the detailed validation to the expected format
+            return {
+                score: validationResult.score,
+                coverage: validationResult.score >= 80 ? 'high' : validationResult.score >= 60 ? 'medium' : 'low',
+                maintainability: validationResult.bestPractices?.score >= 20 ? 'good' : 'needs improvement',
+                readability: validationResult.structure?.hasDescriptiveNames ? 'excellent' : 'good',
+                suggestions: validationResult.suggestions || [],
+                details: {
+                    structure: validationResult.structure,
+                    assertions: validationResult.assertions,
+                    coverageDetails: validationResult.coverage,
+                    bestPractices: validationResult.bestPractices,
+                    syntaxValid: validationResult.syntaxValid
+                }
+            };
+        } catch (error) {
+            console.warn('Test quality validation failed:', error);
+            return {
+                score: 70, // Default moderate score on error
+                coverage: 'unknown',
+                maintainability: 'unknown',
+                readability: 'unknown',
+                suggestions: ['Validation encountered an error: ' + error.message]
+            };
+        }
+    }
+
+    /**
+     * Analyze code for edge cases and generate prompt enhancements
+     * @param {string} code - The code to analyze
+     * @returns {Object} Edge case analysis and prompt enhancements
+     */
+    analyzeEdgeCases(code) {
+        try {
+            const analysis = analyzeFunction(code);
+            const promptEnhancements = buildEdgeCasePromptEnhancements(analysis);
+            return {
+                analysis,
+                promptEnhancements,
+                edgeCases: analysis.edgeCases || []
+            };
+        } catch (error) {
+            console.warn('Edge case analysis failed:', error);
+            return {
+                analysis: null,
+                promptEnhancements: '',
+                edgeCases: []
+            };
+        }
+    }
+
+    /**
+     * Analyze existing tests to learn patterns
+     * @param {string} existingTests - Existing test code to analyze
+     * @returns {Object} Pattern analysis results
+     */
+    analyzeExistingTestPatterns(existingTests) {
+        try {
+            const patterns = analyzeTestPatterns(existingTests);
+            const promptEnhancement = buildPatternPromptEnhancement(patterns);
+            return {
+                patterns,
+                promptEnhancement,
+                framework: patterns.framework,
+                style: patterns.style
+            };
+        } catch (error) {
+            console.warn('Test pattern analysis failed:', error);
+            return {
+                patterns: null,
+                promptEnhancement: '',
+                framework: null,
+                style: null
+            };
+        }
+    }
+
+    /**
+     * Build enhanced prompt context with edge cases and patterns
+     * @param {string} code - Code to generate tests for
+     * @param {string} existingTests - Optional existing tests to learn from
+     * @returns {Object} Enhanced prompt context
+     */
+    buildEnhancedPromptContext(code, existingTests = null) {
+        const edgeCaseData = this.analyzeEdgeCases(code);
+        const patternData = existingTests ? this.analyzeExistingTestPatterns(existingTests) : null;
+
         return {
-            score: 85, // Default high score
-            coverage: 'high',
-            maintainability: 'good',
-            readability: 'excellent',
-            suggestions: []
+            edgeCases: edgeCaseData,
+            patterns: patternData,
+            combinedEnhancements: [
+                edgeCaseData.promptEnhancements,
+                patternData?.promptEnhancement || ''
+            ].filter(Boolean).join('\n\n')
         };
+    }
+
+    /**
+     * Extract test code from a test suite for syntax validation
+     * @param {Object} testSuite - The test suite object
+     * @returns {string|null} Combined test code or null if not available
+     */
+    extractTestCode(testSuite) {
+        if (!testSuite) return null;
+
+        const codeParts = [];
+
+        // Extract from tests array
+        if (testSuite.tests && Array.isArray(testSuite.tests)) {
+            for (const test of testSuite.tests) {
+                if (test.code) codeParts.push(test.code);
+            }
+        }
+
+        // Extract from unit tests
+        if (testSuite.tests?.unit && Array.isArray(testSuite.tests.unit)) {
+            for (const test of testSuite.tests.unit) {
+                if (test.code) codeParts.push(test.code);
+            }
+        }
+
+        // Extract from integration tests
+        if (testSuite.tests?.integration && Array.isArray(testSuite.tests.integration)) {
+            for (const test of testSuite.tests.integration) {
+                if (test.code) codeParts.push(test.code);
+            }
+        }
+
+        // Extract from raw code property
+        if (testSuite.code) {
+            codeParts.push(testSuite.code);
+        }
+
+        return codeParts.length > 0 ? codeParts.join('\n\n') : null;
     }
 
     async enhanceTestsWithASTInsights(tests, astAnalysis) {

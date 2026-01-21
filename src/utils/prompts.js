@@ -48,6 +48,23 @@ ${code}
 \`\`\`
 `;
 
+    // Add repository documentation if available (README, docs, etc.)
+    if (context.repoDocumentation) {
+        prompt += `
+### Repository Documentation:
+The following documentation explains what this repository/project is supposed to do:
+
+${context.repoDocumentation.content || context.repoDocumentation}
+
+**Documentation Sources**: ${(context.repoDocumentation.sources || []).join(', ')}
+
+Use this to understand:
+- The purpose and goals of the code you're testing
+- Expected behavior based on project requirements
+- How tests should align with project objectives
+`;
+    }
+
     // Add RAG context if available
     if (context.ragContext && context.ragSources) {
         prompt += `
@@ -74,8 +91,33 @@ ${options.userPrompt}
 `;
     }
 
-    // Add the comprehensive test requirements
-    prompt += buildTestRequirements(testType, isAllTypes, options);
+    // Add edge case enhancements if available (from edgeCaseAnalyzer)
+    if (context.edgeCaseEnhancements) {
+        prompt += `
+### Detected Edge Cases (MUST test these):
+${context.edgeCaseEnhancements}
+`;
+    }
+
+    // Add test pattern enhancements if available (from testPatternAnalyzer)
+    if (context.testPatternEnhancements) {
+        prompt += `
+### Existing Test Patterns in Repository:
+Follow these patterns for consistency:
+${context.testPatternEnhancements}
+`;
+    }
+
+    // Add detected framework preference
+    if (context.detectedFramework) {
+        prompt += `
+### Framework Preference:
+Based on existing tests in the repository, use **${context.detectedFramework}** testing framework.
+`;
+    }
+
+    // Add the comprehensive test requirements (pass context for framework detection)
+    prompt += buildTestRequirements(testType, isAllTypes, options, context);
 
     return prompt;
 }
@@ -83,7 +125,7 @@ ${options.userPrompt}
 /**
  * Build detailed test requirements based on test type
  */
-function buildTestRequirements(testType, isAllTypes, options) {
+function buildTestRequirements(testType, isAllTypes, options, context = {}) {
     if (options.testMode === 'descriptions') {
         return buildDescriptionOnlyRequirements(isAllTypes);
     }
@@ -148,6 +190,19 @@ Test interactions with external systems:
 6. **Comments**: Add comments explaining complex test scenarios
 7. **Mocking**: Use proper mocking for external dependencies
 
+`;
+
+    // Add framework-specific example if framework is detected or specified
+    const detectedFramework = context.detectedFramework || options.testFramework;
+    if (detectedFramework && detectedFramework !== 'auto-detect') {
+        const frameworkPrompt = buildFrameworkSpecificPrompt(detectedFramework, {
+            includeExamples: true,
+            includeEdgeCases: !!context.detectedEdgeCases
+        });
+        requirements += frameworkPrompt;
+    } else {
+        // Default Jest example
+        requirements += `
 ### Example Structure for Jest/JavaScript:
 \`\`\`javascript
 import { functionUnderTest } from './module';
@@ -214,7 +269,10 @@ describe('functionUnderTest', () => {
     });
 });
 \`\`\`
+`;
+    }
 
+    requirements += `
 Generate comprehensive tests following this structure. Include ALL categories that apply to the code.`;
 
     if (isAllTypes) {
@@ -534,7 +592,9 @@ export function buildPRAnalysisPrompt(prData, options = {}) {
         focusAreas = ['security', 'bugs', 'performance', 'style'],
         maxFilesToReview = 20,
         includeTestAnalysis = true,
-        ragContext = null
+        ragContext = null,
+        repoDocumentation = null,
+        repoDocSources = []
     } = options;
 
     // Build file changes section
@@ -587,6 +647,25 @@ ${fileChanges}
 
 ${prData.files.length > maxFilesToReview ? `\n*Note: Showing ${maxFilesToReview} of ${prData.files.length} files. Focus on the most critical ones.*\n` : ''}
 `;
+
+    // Add repository documentation if available (README, docs, etc.)
+    if (repoDocumentation) {
+        prompt += `
+---
+
+## Repository Documentation
+The following documentation helps understand what this repository is supposed to do:
+
+${repoDocumentation}
+
+**Documentation Sources**: ${repoDocSources.join(', ')}
+
+Use this to understand:
+- The overall purpose and goals of this project
+- Expected behavior and design patterns
+- How this PR aligns with project objectives
+`;
+    }
 
     // Add RAG context if available
     if (ragContext && ragContext.chunks) {
@@ -1451,3 +1530,428 @@ export const FRAMEWORK_EXAMPLES = {
         cleanup: `@After public void teardown() { driver.quit(); }`
     }
 };
+
+/**
+ * Comprehensive framework configurations for test generation
+ * Includes imports, assertions, mocking patterns, and best practices
+ */
+export const FRAMEWORK_CONFIGS = {
+    jest: {
+        name: 'Jest',
+        language: 'javascript',
+        imports: [
+            "import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';",
+            "// or for CommonJS: const { describe, it, expect } = require('@jest/globals');"
+        ],
+        structure: {
+            describe: "describe('ComponentName', () => { ... });",
+            test: "it('should behavior when condition', () => { ... });",
+            asyncTest: "it('should handle async', async () => { ... });",
+            beforeEach: "beforeEach(() => { jest.clearAllMocks(); });",
+            afterEach: "afterEach(() => { jest.restoreAllMocks(); });"
+        },
+        assertions: {
+            equal: "expect(actual).toBe(expected);",
+            deepEqual: "expect(actual).toEqual(expected);",
+            truthy: "expect(value).toBeTruthy();",
+            falsy: "expect(value).toBeFalsy();",
+            null: "expect(value).toBeNull();",
+            undefined: "expect(value).toBeUndefined();",
+            contains: "expect(array).toContain(item);",
+            length: "expect(array).toHaveLength(n);",
+            throws: "expect(() => fn()).toThrow(Error);",
+            throwsMessage: "expect(() => fn()).toThrow('error message');",
+            asyncResolves: "await expect(promise).resolves.toBe(value);",
+            asyncRejects: "await expect(promise).rejects.toThrow(Error);",
+            objectMatch: "expect(obj).toMatchObject({ key: value });",
+            calledWith: "expect(mockFn).toHaveBeenCalledWith(args);",
+            calledTimes: "expect(mockFn).toHaveBeenCalledTimes(n);"
+        },
+        mocking: {
+            function: "const mockFn = jest.fn();",
+            returnValue: "mockFn.mockReturnValue(value);",
+            resolvedValue: "mockFn.mockResolvedValue(value);",
+            rejectedValue: "mockFn.mockRejectedValue(new Error('message'));",
+            implementation: "mockFn.mockImplementation((arg) => result);",
+            module: "jest.mock('./module');",
+            spyOn: "jest.spyOn(object, 'methodName');",
+            clearMocks: "jest.clearAllMocks();",
+            resetMocks: "jest.resetAllMocks();",
+            restoreMocks: "jest.restoreAllMocks();"
+        },
+        bestPractices: [
+            "Use descriptive test names: 'should return X when Y'",
+            "Group related tests with describe blocks",
+            "Clear mocks in beforeEach to prevent test pollution",
+            "Use .resolves/.rejects for async assertions",
+            "Prefer toEqual for objects, toBe for primitives",
+            "Use snapshot testing sparingly and intentionally"
+        ]
+    },
+
+    vitest: {
+        name: 'Vitest',
+        language: 'javascript',
+        imports: [
+            "import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';"
+        ],
+        structure: {
+            describe: "describe('ComponentName', () => { ... });",
+            test: "it('should behavior when condition', () => { ... });",
+            asyncTest: "it('should handle async', async () => { ... });",
+            beforeEach: "beforeEach(() => { vi.clearAllMocks(); });",
+            afterEach: "afterEach(() => { vi.restoreAllMocks(); });"
+        },
+        assertions: {
+            equal: "expect(actual).toBe(expected);",
+            deepEqual: "expect(actual).toEqual(expected);",
+            truthy: "expect(value).toBeTruthy();",
+            throws: "expect(() => fn()).toThrow(Error);",
+            asyncResolves: "await expect(promise).resolves.toBe(value);",
+            asyncRejects: "await expect(promise).rejects.toThrow(Error);"
+        },
+        mocking: {
+            function: "const mockFn = vi.fn();",
+            returnValue: "mockFn.mockReturnValue(value);",
+            resolvedValue: "mockFn.mockResolvedValue(value);",
+            module: "vi.mock('./module');",
+            spyOn: "vi.spyOn(object, 'methodName');",
+            clearMocks: "vi.clearAllMocks();"
+        },
+        bestPractices: [
+            "Vitest is Jest-compatible - most Jest patterns work",
+            "Use vi instead of jest for mocking",
+            "Vitest runs tests in parallel by default"
+        ]
+    },
+
+    mocha: {
+        name: 'Mocha + Chai',
+        language: 'javascript',
+        imports: [
+            "import { expect } from 'chai';",
+            "import sinon from 'sinon';",
+            "// or: const { expect } = require('chai');"
+        ],
+        structure: {
+            describe: "describe('ComponentName', function() { ... });",
+            context: "context('when condition', function() { ... });",
+            test: "it('should behavior', function() { ... });",
+            asyncTest: "it('should handle async', async function() { ... });",
+            before: "before(function() { /* one-time setup */ });",
+            beforeEach: "beforeEach(function() { /* per-test setup */ });",
+            after: "after(function() { /* one-time cleanup */ });",
+            afterEach: "afterEach(function() { sinon.restore(); });"
+        },
+        assertions: {
+            equal: "expect(actual).to.equal(expected);",
+            deepEqual: "expect(actual).to.deep.equal(expected);",
+            truthy: "expect(value).to.be.true;",
+            falsy: "expect(value).to.be.false;",
+            null: "expect(value).to.be.null;",
+            undefined: "expect(value).to.be.undefined;",
+            contains: "expect(array).to.include(item);",
+            length: "expect(array).to.have.lengthOf(n);",
+            throws: "expect(() => fn()).to.throw(Error);",
+            throwsMessage: "expect(() => fn()).to.throw('error message');",
+            property: "expect(obj).to.have.property('key', value);",
+            instanceOf: "expect(obj).to.be.instanceOf(Class);"
+        },
+        mocking: {
+            stub: "const stub = sinon.stub(object, 'method');",
+            stubReturns: "stub.returns(value);",
+            stubResolves: "stub.resolves(value);",
+            stubRejects: "stub.rejects(new Error('message'));",
+            spy: "const spy = sinon.spy(object, 'method');",
+            mock: "const mock = sinon.mock(object);",
+            fake: "const fake = sinon.fake.returns(value);",
+            restore: "sinon.restore();"
+        },
+        bestPractices: [
+            "Use context() for grouping scenarios",
+            "Always restore sinon in afterEach",
+            "Use function() instead of arrows for 'this' context",
+            "Chai assertions are chainable: expect(x).to.be.a('string').with.lengthOf(5)"
+        ]
+    },
+
+    pytest: {
+        name: 'pytest',
+        language: 'python',
+        imports: [
+            "import pytest",
+            "from unittest.mock import Mock, patch, MagicMock"
+        ],
+        structure: {
+            testFunction: "def test_function_name():\n    # Arrange, Act, Assert\n    pass",
+            testClass: "class TestClassName:\n    def test_method(self):\n        pass",
+            fixture: "@pytest.fixture\ndef fixture_name():\n    # setup\n    yield value\n    # teardown",
+            parametrize: "@pytest.mark.parametrize('input,expected', [(1, 2), (2, 4)])\ndef test_double(input, expected):\n    assert double(input) == expected",
+            asyncTest: "@pytest.mark.asyncio\nasync def test_async():\n    result = await async_fn()\n    assert result == expected"
+        },
+        assertions: {
+            equal: "assert actual == expected",
+            notEqual: "assert actual != expected",
+            truthy: "assert value",
+            falsy: "assert not value",
+            isNone: "assert value is None",
+            isNotNone: "assert value is not None",
+            contains: "assert item in collection",
+            length: "assert len(collection) == n",
+            raises: "with pytest.raises(ValueError):\n    function_that_raises()",
+            raisesMatch: "with pytest.raises(ValueError, match='pattern'):\n    function_that_raises()",
+            approx: "assert value == pytest.approx(expected, rel=1e-3)",
+            isinstance: "assert isinstance(obj, ClassName)"
+        },
+        mocking: {
+            mock: "mock_obj = Mock()",
+            mockReturn: "mock_obj.return_value = value",
+            mockSideEffect: "mock_obj.side_effect = Exception('error')",
+            patch: "@patch('module.function')\ndef test_fn(mock_fn):\n    mock_fn.return_value = value",
+            patchContext: "with patch('module.function') as mock_fn:\n    mock_fn.return_value = value",
+            magicMock: "mock_obj = MagicMock(spec=ClassName)",
+            assertCalled: "mock_obj.assert_called_once_with(arg1, arg2)"
+        },
+        bestPractices: [
+            "Use fixtures for test setup and teardown",
+            "Use parametrize for testing multiple inputs",
+            "Name tests descriptively: test_should_return_x_when_y",
+            "Use conftest.py for shared fixtures",
+            "Use pytest.raises for exception testing"
+        ]
+    },
+
+    junit: {
+        name: 'JUnit 5',
+        language: 'java',
+        imports: [
+            "import org.junit.jupiter.api.*;",
+            "import static org.junit.jupiter.api.Assertions.*;",
+            "import org.mockito.Mock;",
+            "import org.mockito.MockitoAnnotations;",
+            "import static org.mockito.Mockito.*;"
+        ],
+        structure: {
+            testClass: "@TestInstance(TestInstance.Lifecycle.PER_CLASS)\nclass ClassNameTest { ... }",
+            test: "@Test\nvoid shouldBehaviorWhenCondition() { ... }",
+            displayName: "@Test\n@DisplayName(\"Should return X when Y\")\nvoid testMethod() { ... }",
+            beforeEach: "@BeforeEach\nvoid setUp() { ... }",
+            afterEach: "@AfterEach\nvoid tearDown() { ... }",
+            beforeAll: "@BeforeAll\nstatic void setUpAll() { ... }",
+            parameterized: "@ParameterizedTest\n@ValueSource(ints = {1, 2, 3})\nvoid testMultiple(int value) { ... }"
+        },
+        assertions: {
+            equal: "assertEquals(expected, actual);",
+            equalMessage: "assertEquals(expected, actual, \"message\");",
+            notEqual: "assertNotEquals(unexpected, actual);",
+            truthy: "assertTrue(condition);",
+            falsy: "assertFalse(condition);",
+            null: "assertNull(value);",
+            notNull: "assertNotNull(value);",
+            throws: "assertThrows(Exception.class, () -> methodThatThrows());",
+            throwsMessage: "Exception e = assertThrows(Exception.class, () -> method());\nassertEquals(\"message\", e.getMessage());",
+            arrayEquals: "assertArrayEquals(expected, actual);",
+            timeout: "assertTimeout(Duration.ofSeconds(1), () -> slowMethod());"
+        },
+        mocking: {
+            annotation: "@Mock\nprivate DependencyClass mockDep;",
+            init: "@BeforeEach\nvoid init() {\n    MockitoAnnotations.openMocks(this);\n}",
+            when: "when(mockDep.method()).thenReturn(value);",
+            whenThrow: "when(mockDep.method()).thenThrow(new Exception());",
+            verify: "verify(mockDep).method();",
+            verifyTimes: "verify(mockDep, times(2)).method();",
+            verifyNever: "verify(mockDep, never()).method();",
+            argumentCaptor: "ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);\nverify(mock).method(captor.capture());\nassertEquals(expected, captor.getValue());"
+        },
+        bestPractices: [
+            "Use @DisplayName for readable test names",
+            "Use @Nested for grouping related tests",
+            "Initialize mocks in @BeforeEach",
+            "Use assertAll() for grouped assertions",
+            "Use @ParameterizedTest for data-driven tests"
+        ]
+    },
+
+    playwright: {
+        name: 'Playwright',
+        language: 'javascript',
+        imports: [
+            "import { test, expect } from '@playwright/test';"
+        ],
+        structure: {
+            describe: "test.describe('Feature', () => { ... });",
+            test: "test('should behavior', async ({ page }) => { ... });",
+            beforeEach: "test.beforeEach(async ({ page }) => {\n    await page.goto('/');\n});",
+            afterEach: "test.afterEach(async ({ page }) => { ... });"
+        },
+        assertions: {
+            visible: "await expect(locator).toBeVisible();",
+            hidden: "await expect(locator).toBeHidden();",
+            text: "await expect(locator).toHaveText('text');",
+            value: "await expect(locator).toHaveValue('value');",
+            attribute: "await expect(locator).toHaveAttribute('attr', 'value');",
+            count: "await expect(locator).toHaveCount(n);",
+            url: "await expect(page).toHaveURL(/pattern/);",
+            title: "await expect(page).toHaveTitle('Title');"
+        },
+        mocking: {
+            route: "await page.route('**/api/**', route => route.fulfill({ body: JSON.stringify(data) }));",
+            abort: "await page.route('**/api/**', route => route.abort());",
+            modify: "await page.route('**/api/**', async route => {\n    const response = await route.fetch();\n    const json = await response.json();\n    json.modified = true;\n    await route.fulfill({ response, json });\n});"
+        },
+        bestPractices: [
+            "Use locators: page.getByRole(), page.getByTestId()",
+            "Await all page interactions",
+            "Use auto-waiting - avoid explicit waits when possible",
+            "Use test.describe.configure({ mode: 'serial' }) for dependent tests"
+        ]
+    },
+
+    cypress: {
+        name: 'Cypress',
+        language: 'javascript',
+        imports: [
+            "// Cypress is globally available, no imports needed",
+            "/// <reference types=\"cypress\" />"
+        ],
+        structure: {
+            describe: "describe('Feature', () => { ... });",
+            test: "it('should behavior', () => { ... });",
+            beforeEach: "beforeEach(() => {\n    cy.visit('/');\n});",
+            context: "context('when condition', () => { ... });"
+        },
+        assertions: {
+            visible: "cy.get(selector).should('be.visible');",
+            text: "cy.get(selector).should('have.text', 'text');",
+            contain: "cy.get(selector).should('contain', 'text');",
+            value: "cy.get(selector).should('have.value', 'value');",
+            attribute: "cy.get(selector).should('have.attr', 'attr', 'value');",
+            length: "cy.get(selector).should('have.length', n);",
+            url: "cy.url().should('include', '/path');",
+            disabled: "cy.get(selector).should('be.disabled');"
+        },
+        mocking: {
+            intercept: "cy.intercept('GET', '/api/**', { fixture: 'data.json' }).as('getData');",
+            interceptModify: "cy.intercept('GET', '/api/**', (req) => {\n    req.reply((res) => {\n        res.body.modified = true;\n    });\n});",
+            wait: "cy.wait('@getData');",
+            stub: "cy.stub(obj, 'method').returns(value);"
+        },
+        bestPractices: [
+            "Use data-cy or data-testid attributes for selectors",
+            "Avoid arbitrary waits - use cy.wait('@alias')",
+            "Chain commands instead of storing references",
+            "Use custom commands for repeated actions"
+        ]
+    }
+};
+
+/**
+ * Build framework-specific prompt enhancement
+ */
+export function buildFrameworkSpecificPrompt(framework, options = {}) {
+    const config = FRAMEWORK_CONFIGS[framework.toLowerCase()] || FRAMEWORK_CONFIGS.jest;
+    const { includeExamples = true, focusAreas = [] } = options;
+
+    let prompt = `\n## Framework: ${config.name}\n\n`;
+
+    // Imports
+    prompt += `### Required Imports\n\`\`\`${config.language}\n${config.imports.join('\n')}\n\`\`\`\n\n`;
+
+    // Structure examples
+    prompt += `### Test Structure\n`;
+    for (const [key, value] of Object.entries(config.structure)) {
+        prompt += `- **${key}**: \`${value.replace(/\n/g, ' ')}\`\n`;
+    }
+    prompt += '\n';
+
+    // Assertions
+    if (includeExamples || focusAreas.includes('assertions')) {
+        prompt += `### Assertion Patterns\n`;
+        const assertions = focusAreas.length > 0
+            ? Object.entries(config.assertions).filter(([k]) =>
+                focusAreas.some(f => k.toLowerCase().includes(f.toLowerCase()))
+              )
+            : Object.entries(config.assertions).slice(0, 8);
+
+        for (const [key, value] of assertions) {
+            prompt += `- **${key}**: \`${value}\`\n`;
+        }
+        prompt += '\n';
+    }
+
+    // Mocking
+    if (includeExamples || focusAreas.includes('mocking')) {
+        prompt += `### Mocking Patterns\n`;
+        for (const [key, value] of Object.entries(config.mocking).slice(0, 6)) {
+            prompt += `- **${key}**: \`${value.replace(/\n/g, ' ')}\`\n`;
+        }
+        prompt += '\n';
+    }
+
+    // Best practices
+    prompt += `### Best Practices\n`;
+    for (const practice of config.bestPractices) {
+        prompt += `- ${practice}\n`;
+    }
+
+    return prompt;
+}
+
+/**
+ * Get edge case test patterns for a specific type
+ */
+export function getEdgeCaseTestPatterns(valueType, framework = 'jest') {
+    const config = FRAMEWORK_CONFIGS[framework.toLowerCase()] || FRAMEWORK_CONFIGS.jest;
+    const patterns = [];
+
+    const edgeCasesByType = {
+        string: [
+            { input: '""', description: 'empty string' },
+            { input: '"   "', description: 'whitespace only' },
+            { input: '"a".repeat(10000)', description: 'very long string' },
+            { input: '"<script>alert(1)</script>"', description: 'XSS payload' },
+            { input: 'null', description: 'null value' },
+            { input: 'undefined', description: 'undefined value' }
+        ],
+        number: [
+            { input: '0', description: 'zero' },
+            { input: '-1', description: 'negative' },
+            { input: 'Number.MAX_SAFE_INTEGER', description: 'max integer' },
+            { input: 'NaN', description: 'not a number' },
+            { input: 'Infinity', description: 'infinity' },
+            { input: '0.1 + 0.2', description: 'floating point precision' }
+        ],
+        array: [
+            { input: '[]', description: 'empty array' },
+            { input: '[1]', description: 'single element' },
+            { input: 'new Array(10000).fill(0)', description: 'large array' },
+            { input: '[null, undefined]', description: 'null elements' },
+            { input: '[[[]]]', description: 'deeply nested' }
+        ],
+        object: [
+            { input: '{}', description: 'empty object' },
+            { input: 'null', description: 'null object' },
+            { input: '{ __proto__: {} }', description: 'prototype pollution' },
+            { input: 'Object.create(null)', description: 'null prototype' }
+        ],
+        date: [
+            { input: 'new Date(0)', description: 'epoch' },
+            { input: 'new Date("invalid")', description: 'invalid date' },
+            { input: 'new Date("2024-02-29")', description: 'leap day' },
+            { input: 'new Date(8640000000000000)', description: 'max date' }
+        ]
+    };
+
+    const cases = edgeCasesByType[valueType] || [];
+
+    for (const { input, description } of cases) {
+        patterns.push({
+            input,
+            description,
+            testName: `should handle ${description}`,
+            assertion: config.assertions.equal || 'expect(result).toBe(expected);'
+        });
+    }
+
+    return patterns;
+}

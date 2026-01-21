@@ -107,6 +107,153 @@ export class VectorStore {
     }
 
     /**
+     * Delete specific chunks by their IDs
+     * Used for incremental indexing to remove outdated chunks
+     * @param {Array<string>} chunkIds - Array of chunk IDs to delete
+     * @returns {Promise<{deleted: number, failed: number}>}
+     */
+    async deleteChunks(chunkIds) {
+        if (!chunkIds || chunkIds.length === 0) {
+            return { deleted: 0, failed: 0 };
+        }
+
+        await this.init();
+
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction([this.storeName], 'readwrite');
+            const store = transaction.objectStore(this.storeName);
+
+            let deleted = 0;
+            let failed = 0;
+            let processed = 0;
+
+            const checkComplete = () => {
+                processed++;
+                if (processed === chunkIds.length) {
+                    // Clear cache since data has changed
+                    this.clearCache();
+                    console.log(`🗑️ VectorStore: Deleted ${deleted} chunks, ${failed} failed`);
+                    resolve({ deleted, failed });
+                }
+            };
+
+            for (const chunkId of chunkIds) {
+                const request = store.delete(chunkId);
+
+                request.onsuccess = () => {
+                    deleted++;
+                    checkComplete();
+                };
+
+                request.onerror = () => {
+                    failed++;
+                    checkComplete();
+                };
+            }
+
+            transaction.onerror = (event) => {
+                console.error('VectorStore deleteChunks transaction error:', event.target.error);
+                reject(event.target.error);
+            };
+        });
+    }
+
+    /**
+     * Delete all chunks for specific file paths within a repository
+     * @param {string} repoId - Repository identifier
+     * @param {Array<string>} filePaths - Array of file paths to delete chunks for
+     * @returns {Promise<{deleted: number}>}
+     */
+    async deleteChunksForFiles(repoId, filePaths) {
+        if (!filePaths || filePaths.length === 0) {
+            return { deleted: 0 };
+        }
+
+        await this.init();
+
+        const filePathSet = new Set(filePaths);
+
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction([this.storeName], 'readwrite');
+            const store = transaction.objectStore(this.storeName);
+            const index = store.index('repoId');
+            const request = index.getAll(repoId);
+
+            request.onsuccess = () => {
+                const chunks = request.result;
+                const chunksToDelete = chunks.filter(chunk => filePathSet.has(chunk.filePath));
+
+                if (chunksToDelete.length === 0) {
+                    resolve({ deleted: 0 });
+                    return;
+                }
+
+                let deleted = 0;
+                let processed = 0;
+
+                for (const chunk of chunksToDelete) {
+                    const deleteReq = store.delete(chunk.id);
+                    deleteReq.onsuccess = () => {
+                        deleted++;
+                        processed++;
+                        if (processed === chunksToDelete.length) {
+                            this.clearCache();
+                            console.log(`🗑️ VectorStore: Deleted ${deleted} chunks for ${filePaths.length} files`);
+                            resolve({ deleted });
+                        }
+                    };
+                    deleteReq.onerror = () => {
+                        processed++;
+                        if (processed === chunksToDelete.length) {
+                            this.clearCache();
+                            resolve({ deleted });
+                        }
+                    };
+                }
+            };
+
+            request.onerror = (event) => reject(event.target.error);
+        });
+    }
+
+    /**
+     * Get chunk IDs for specific file paths
+     * @param {string} repoId - Repository identifier
+     * @param {Array<string>} filePaths - File paths to get chunk IDs for
+     * @returns {Promise<Map<string, Array<string>>>} Map of filePath -> chunkIds
+     */
+    async getChunkIdsForFiles(repoId, filePaths) {
+        await this.init();
+
+        const filePathSet = new Set(filePaths);
+
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction([this.storeName], 'readonly');
+            const store = transaction.objectStore(this.storeName);
+            const index = store.index('repoId');
+            const request = index.getAll(repoId);
+
+            request.onsuccess = () => {
+                const chunks = request.result;
+                const chunkMap = new Map();
+
+                for (const chunk of chunks) {
+                    if (filePathSet.has(chunk.filePath)) {
+                        if (!chunkMap.has(chunk.filePath)) {
+                            chunkMap.set(chunk.filePath, []);
+                        }
+                        chunkMap.get(chunk.filePath).push(chunk.id);
+                    }
+                }
+
+                resolve(chunkMap);
+            };
+
+            request.onerror = (event) => reject(event.target.error);
+        });
+    }
+
+    /**
      * Search for similar vectors using cosine similarity
      *
      * Performance optimizations:

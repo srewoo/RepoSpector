@@ -30,6 +30,17 @@ import { GitHubService } from '../services/GitHubService.js';
 import { GitLabService } from '../services/GitLabService.js';
 import { LLMService } from '../services/LLMService.js';
 import { PullRequestService } from '../services/PullRequestService.js';
+import { StaticAnalysisService } from '../services/StaticAnalysisService.js';
+import { PRThreadManager } from '../services/PRThreadManager.js';
+import { PRSessionManager } from '../services/PRSessionManager.js';
+import {
+    THREAD_SYSTEM_PROMPT,
+    buildFindingFollowUpPrompt,
+    buildExplainPrompt,
+    buildHowToFixPrompt,
+    buildFalsePositiveCheckPrompt,
+    getSuggestedQuestions
+} from '../utils/prThreadPrompts.js';
 
 class BackgroundService {
     constructor() {
@@ -59,6 +70,20 @@ class BackgroundService {
             this.gitlabService = new GitLabService();
             this.llmService = new LLMService();
             this.pullRequestService = new PullRequestService();
+            this.staticAnalysisService = new StaticAnalysisService({
+                enableESLint: true,
+                enableSemgrep: true,
+                enableDependency: true,
+                enableConfidenceAggregation: true,
+                minConfidenceThreshold: 0.4
+            });
+            this.prThreadManager = new PRThreadManager({
+                retentionDays: 30,
+                maxMessagesPerThread: 50
+            });
+            this.prSessionManager = new PRSessionManager({
+                retentionDays: 30
+            });
 
             // Wire up RAG service to context analyzer
             this.contextAnalyzer.setRagService(this.ragService);
@@ -403,6 +428,42 @@ class BackgroundService {
                     await this.handleReviewTestAutomation(message, sendResponse);
                     break;
 
+                case 'ANALYZE_PR_WITH_STATIC_ANALYSIS':
+                    await this.handleAnalyzePRWithStaticAnalysis(message, sendResponse);
+                    break;
+
+                case 'RUN_STATIC_ANALYSIS':
+                    await this.handleRunStaticAnalysis(message, sendResponse);
+                    break;
+
+                case 'CREATE_PR_THREAD':
+                    await this.handleCreatePRThread(message, sendResponse);
+                    break;
+
+                case 'GET_PR_THREAD':
+                    await this.handleGetPRThread(message, sendResponse);
+                    break;
+
+                case 'SEND_THREAD_MESSAGE':
+                    await this.handleSendThreadMessage(message, sendResponse);
+                    break;
+
+                case 'THREAD_QUICK_ACTION':
+                    await this.handleThreadQuickAction(message, sendResponse);
+                    break;
+
+                case 'UPDATE_THREAD_STATUS':
+                    await this.handleUpdateThreadStatus(message, sendResponse);
+                    break;
+
+                case 'GET_OR_CREATE_THREAD':
+                    await this.handleGetOrCreateThread(message, sendResponse);
+                    break;
+
+                case 'GET_PR_SESSION':
+                    await this.handleGetPRSession(message, sendResponse);
+                    break;
+
                 default:
                     sendResponse({
                         success: false,
@@ -702,16 +763,36 @@ class BackgroundService {
                         const codeContext = this.contextAnalyzer.buildSmartRAGQuery(extractedCode, extractedContext);
                         const smartQuery = `Generate tests for:\n\n${codeContext}`;
 
+                        // Fetch relevant code chunks
                         const relevantChunks = await this.ragService.retrieveContext(repoId, smartQuery, 5);
+
+                        // Also fetch repository documentation for understanding project purpose
+                        const repoDocumentation = await this.ragService.getRepositoryDocumentation(repoId);
 
                         if (relevantChunks && relevantChunks.length > 0) {
                             // Format for test generation (expects chunks array)
                             ragContext = {
-                                chunks: relevantChunks  // Keep as array for processWithChunking/processDirect
+                                chunks: relevantChunks,  // Keep as array for processWithChunking/processDirect
+                                documentation: repoDocumentation.found ? repoDocumentation : null
                             };
                             const chunksText = relevantChunks.map(c => c.content || '').join('\n\n');
                             ragTokens = this.tokenManager.estimateTokens(chunksText);
+
+                            // Add documentation tokens
+                            if (repoDocumentation.found) {
+                                ragTokens += this.tokenManager.estimateTokens(repoDocumentation.content);
+                                console.log(`📖 Repository documentation found: ${repoDocumentation.sources.join(', ')}`);
+                            }
+
                             console.log(`📚 RAG context found: ${relevantChunks.length} chunks, ${ragTokens} tokens`);
+                        } else if (repoDocumentation.found) {
+                            // Only documentation available
+                            ragContext = {
+                                chunks: [],
+                                documentation: repoDocumentation
+                            };
+                            ragTokens = this.tokenManager.estimateTokens(repoDocumentation.content);
+                            console.log(`📖 Only documentation found: ${repoDocumentation.sources.join(', ')}`);
                         } else {
                             console.log('ℹ️ No RAG context found for this repository');
                         }
@@ -1396,6 +1477,12 @@ Format your response in a developer-friendly way with code examples where approp
             console.log(`📚 Added RAG context from ${ragChunks.length} chunks to prompt`);
         }
 
+        // Include repository documentation if available
+        if (options.ragContext && options.ragContext.documentation) {
+            context.repoDocumentation = options.ragContext.documentation;
+            console.log(`📖 Added repository documentation to prompt context`);
+        }
+
         // Build initial prompt with all context
         let prompt = this.buildTestGenerationPrompt(code, options, context);
 
@@ -1604,9 +1691,37 @@ Format your response in a developer-friendly way with code examples where approp
     }
 
     buildTestGenerationPrompt(code, options, context) {
+        // Enhance context with edge case analysis and test patterns
+        const enhancedContext = { ...context };
+
+        try {
+            // Analyze code for edge cases
+            const edgeCaseData = this.testGenerator.analyzeEdgeCases(code);
+            if (edgeCaseData.promptEnhancements) {
+                enhancedContext.edgeCaseEnhancements = edgeCaseData.promptEnhancements;
+                enhancedContext.detectedEdgeCases = edgeCaseData.edgeCases;
+            }
+
+            // If we have existing tests from RAG, analyze their patterns
+            if (context.ragContext && Array.isArray(context.ragContext)) {
+                const testFiles = context.ragContext.filter(chunk =>
+                    chunk.includes('.test.') || chunk.includes('.spec.') || chunk.includes('__tests__')
+                );
+                if (testFiles.length > 0) {
+                    const patternData = this.testGenerator.analyzeExistingTestPatterns(testFiles.join('\n'));
+                    if (patternData.promptEnhancement) {
+                        enhancedContext.testPatternEnhancements = patternData.promptEnhancement;
+                        enhancedContext.detectedFramework = patternData.framework;
+                    }
+                }
+            }
+        } catch (error) {
+            console.warn('Failed to enhance test prompt context:', error);
+        }
+
         // Use the enhanced prompt builder from prompts.js
         // This provides much more comprehensive test generation guidance
-        return buildEnhancedTestPrompt(code, options, context);
+        return buildEnhancedTestPrompt(code, options, enhancedContext);
     }
 
     /**
@@ -2172,22 +2287,7 @@ Return only the complete test code with proper syntax for the detected language,
 
     async handleGetSettings(message, sendResponse) {
         try {
-            const result = await chrome.storage.local.get('aiRepoSpectorSettings');
-            const settings = result.aiRepoSpectorSettings || {};
-
-            // Decrypt all sensitive keys
-            const sensitiveKeys = ['apiKey', 'githubToken', 'gitlabToken', 'anthropicApiKey', 'googleApiKey', 'cohereApiKey', 'mistralApiKey', 'groqApiKey', 'huggingfaceApiKey'];
-
-            for (const key of sensitiveKeys) {
-                if (settings[key]) {
-                    try {
-                        settings[key] = await this.encryptionService.decrypt(settings[key]);
-                    } catch (decryptError) {
-                        console.warn(`Failed to decrypt ${key}, clearing it`);
-                        settings[key] = '';
-                    }
-                }
-            }
+            const settings = await this.getSettings();
 
             sendResponse({
                 success: true,
@@ -2200,6 +2300,30 @@ Return only the complete test code with proper syntax for the detected language,
                 error: this.getErrorMessage(error)
             });
         }
+    }
+
+    /**
+     * Get decrypted settings - internal helper method
+     */
+    async getSettings() {
+        const result = await chrome.storage.local.get('aiRepoSpectorSettings');
+        const settings = result.aiRepoSpectorSettings || {};
+
+        // Decrypt all sensitive keys
+        const sensitiveKeys = ['apiKey', 'githubToken', 'gitlabToken', 'anthropicApiKey', 'googleApiKey', 'cohereApiKey', 'mistralApiKey', 'groqApiKey', 'huggingfaceApiKey'];
+
+        for (const key of sensitiveKeys) {
+            if (settings[key]) {
+                try {
+                    settings[key] = await this.encryptionService.decrypt(settings[key]);
+                } catch (decryptError) {
+                    console.warn(`Failed to decrypt ${key}, clearing it`);
+                    settings[key] = '';
+                }
+            }
+        }
+
+        return settings;
     }
 
     async getStoredSettings() {
@@ -2368,7 +2492,7 @@ Return only the complete test code with proper syntax for the detected language,
             console.log(`📚 Fetched ${files.length} files from repository`);
 
             // Index the repository
-            const result = await this.ragService.indexRepository(
+            const result = await this.ragService.indexRepositoryIncremental(
                 repoId,
                 files,
                 (progress) => {
@@ -2674,6 +2798,7 @@ Return only the complete test code with proper syntax for the detected language,
 
             // Get RAG context if repo is indexed
             let ragContext = null;
+            let repoDocumentation = null;
             const repoId = `${prData.branches?.targetRepo || prData.author?.login}`;
             if (options.useRepoContext !== false) {
                 try {
@@ -2684,6 +2809,12 @@ Return only the complete test code with proper syntax for the detected language,
                         5,
                         { formatOutput: true }
                     );
+
+                    // Also fetch repository documentation for understanding project context
+                    repoDocumentation = await this.ragService.getRepositoryDocumentation(repoId);
+                    if (repoDocumentation.found) {
+                        console.log(`📖 PR Review: Found repo documentation from ${repoDocumentation.sources.join(', ')}`);
+                    }
                 } catch (e) {
                     console.warn('RAG context not available:', e.message);
                 }
@@ -2695,15 +2826,22 @@ Return only the complete test code with proper syntax for the detected language,
             // Build appropriate prompt
             let systemPrompt, userPrompt;
 
+            // Include repository documentation in context if found
+            const contextWithDocs = {
+                ragContext,
+                repoDocumentation: repoDocumentation?.found ? repoDocumentation.content : null,
+                repoDocSources: repoDocumentation?.found ? repoDocumentation.sources : []
+            };
+
             if (isTestAutomationPR && options.mode !== 'general') {
                 // Use test automation specific review
                 systemPrompt = TEST_AUTOMATION_ANALYSIS_PROMPT;
-                userPrompt = buildTestAutomationPRReviewPrompt(prData, { ragContext });
+                userPrompt = buildTestAutomationPRReviewPrompt(prData, contextWithDocs);
             } else if (options.mode === 'security') {
                 // Security-focused review
                 const highRiskFiles = this.pullRequestService.getHighRiskFiles(prData);
                 systemPrompt = PR_ANALYSIS_SYSTEM_PROMPT;
-                userPrompt = buildSecurityReviewPrompt(prData, highRiskFiles);
+                userPrompt = buildSecurityReviewPrompt(prData, highRiskFiles, contextWithDocs);
             } else {
                 // General comprehensive review
                 systemPrompt = PR_ANALYSIS_SYSTEM_PROMPT;
@@ -2711,7 +2849,7 @@ Return only the complete test code with proper syntax for the detected language,
                     focusAreas: options.focusAreas || ['security', 'bugs', 'performance', 'style'],
                     maxFilesToReview: options.maxFiles || 20,
                     includeTestAnalysis: options.includeTestAnalysis !== false,
-                    ragContext
+                    ...contextWithDocs
                 });
             }
 
@@ -2938,6 +3076,174 @@ Return only the complete test code with proper syntax for the detected language,
     }
 
     /**
+     * Run static analysis on code
+     */
+    async handleRunStaticAnalysis(message, sendResponse) {
+        try {
+            const { code, filePath, options = {} } = message.data || message.payload || {};
+
+            if (!code) {
+                sendResponse({ success: false, error: 'Code is required' });
+                return;
+            }
+
+            console.log('🔍 Running static analysis on:', filePath || 'code snippet');
+
+            const result = await this.staticAnalysisService.analyzeFile(code, {
+                filePath: filePath || 'unknown.js',
+                ...options
+            });
+
+            sendResponse({
+                success: true,
+                data: result
+            });
+        } catch (error) {
+            this.errorHandler.logError('Static Analysis', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
+    }
+
+    /**
+     * Analyze PR with static analysis followed by LLM review
+     * This runs static analysis first, then injects findings into the LLM prompt
+     */
+    async handleAnalyzePRWithStaticAnalysis(message, sendResponse) {
+        try {
+            const { prUrl, options = {} } = message.data || message.payload || {};
+
+            if (!prUrl) {
+                sendResponse({ success: false, error: 'PR URL is required' });
+                return;
+            }
+
+            console.log('📋 Analyzing PR with static analysis:', prUrl);
+
+            // Update tokens for PR service
+            await this.updatePRServiceTokens();
+
+            // Fetch PR data
+            const prData = await this.pullRequestService.fetchPullRequest(prUrl);
+            console.log(`📊 PR fetched: ${prData.files.length} files, +${prData.stats.additions} -${prData.stats.deletions}`);
+
+            // Step 1: Run static analysis on changed files
+            console.log('🔍 Running static analysis on PR files...');
+            const staticAnalysisResult = await this.staticAnalysisService.analyzePullRequest(prData, {
+                enableESLint: options.enableESLint !== false,
+                enableSemgrep: options.enableSemgrep !== false,
+                enableDependency: options.enableDependency !== false
+            });
+
+            console.log(`📊 Static analysis found ${staticAnalysisResult.totalFindings} issues`);
+
+            // Get RAG context if repo is indexed
+            let ragContext = null;
+            const repoId = `${prData.branches?.targetRepo || prData.author?.login}`;
+            if (options.useRepoContext !== false) {
+                try {
+                    const prDescription = `${prData.title} ${prData.description || ''}`;
+                    ragContext = await this.ragService.retrieveContext(
+                        repoId,
+                        prDescription,
+                        5,
+                        { formatOutput: true }
+                    );
+                } catch (e) {
+                    console.warn('RAG context not available:', e.message);
+                }
+            }
+
+            // Step 2: Build enhanced prompt with static analysis findings
+            const staticAnalysisContext = this.staticAnalysisService.formatFindingsForPrompt(
+                staticAnalysisResult.findings,
+                options.maxStaticFindings || 15
+            );
+
+            // Detect if this is a test automation repo/PR
+            const isTestAutomationPR = this.isTestAutomationPR(prData);
+
+            // Build appropriate prompt
+            let systemPrompt, userPrompt;
+
+            if (isTestAutomationPR && options.mode !== 'general') {
+                systemPrompt = TEST_AUTOMATION_ANALYSIS_PROMPT;
+                userPrompt = buildTestAutomationPRReviewPrompt(prData, { ragContext });
+            } else if (options.mode === 'security') {
+                const highRiskFiles = this.pullRequestService.getHighRiskFiles(prData);
+                systemPrompt = PR_ANALYSIS_SYSTEM_PROMPT;
+                userPrompt = buildSecurityReviewPrompt(prData, highRiskFiles);
+            } else {
+                systemPrompt = PR_ANALYSIS_SYSTEM_PROMPT;
+                userPrompt = buildPRAnalysisPrompt(prData, {
+                    focusAreas: options.focusAreas || ['security', 'bugs', 'performance', 'style'],
+                    maxFilesToReview: options.maxFiles || 20,
+                    includeTestAnalysis: options.includeTestAnalysis !== false,
+                    ragContext
+                });
+            }
+
+            // Inject static analysis findings into the prompt
+            if (staticAnalysisContext) {
+                userPrompt = `${staticAnalysisContext}\n\n---\n\n${userPrompt}`;
+            }
+
+            // Step 3: Get LLM analysis
+            const settings = await this.getSettings();
+
+            const response = await this.llmService.streamChat(
+                [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: userPrompt }
+                ],
+                {
+                    provider: settings.provider,
+                    model: settings.model,
+                    apiKey: settings.apiKey,
+                    stream: false
+                }
+            );
+
+            sendResponse({
+                success: true,
+                data: {
+                    analysis: response.content || response,
+                    staticAnalysis: {
+                        findings: staticAnalysisResult.findings,
+                        summary: staticAnalysisResult.summary,
+                        riskScore: staticAnalysisResult.riskScore,
+                        recommendation: staticAnalysisResult.recommendation
+                    },
+                    prSummary: this.pullRequestService.generatePRSummary(prData),
+                    prData: {
+                        title: prData.title,
+                        state: prData.state,
+                        author: prData.author,
+                        stats: prData.stats,
+                        files: prData.files.map(f => ({
+                            filename: f.filename,
+                            status: f.status,
+                            additions: f.additions,
+                            deletions: f.deletions,
+                            language: f.language
+                        })),
+                        url: prData.url
+                    },
+                    isTestAutomationPR
+                }
+            });
+        } catch (error) {
+            this.errorHandler.logError('PR Analysis with Static Analysis', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
+    }
+
+    /**
      * Update PR service with current tokens
      */
     async updatePRServiceTokens() {
@@ -3004,6 +3310,411 @@ Return only the complete test code with proper syntax for the detected language,
             hash = hash & hash; // Convert to 32-bit integer
         }
         return hash.toString();
+    }
+
+    // ==========================================
+    // PR Thread Handler Methods
+    // ==========================================
+
+    /**
+     * Create a new PR thread for a finding
+     */
+    async handleCreatePRThread(message, sendResponse) {
+        try {
+            const { sessionId, prIdentifier, finding, initialQuestion } = message.data || message.payload || {};
+
+            if (!prIdentifier) {
+                sendResponse({ success: false, error: 'PR identifier is required' });
+                return;
+            }
+
+            console.log('📝 Creating PR thread for finding:', finding?.id || 'general');
+
+            // Get or create session
+            let session;
+            if (sessionId) {
+                session = await this.prSessionManager.getSession(sessionId);
+            }
+            if (!session) {
+                session = await this.prSessionManager.createSession(prIdentifier);
+            }
+
+            // Create thread
+            const thread = await this.prThreadManager.createThread(prIdentifier, finding);
+
+            // If there's an initial question, process it
+            if (initialQuestion) {
+                await this.processThreadMessage(thread.threadId, initialQuestion, finding);
+            }
+
+            sendResponse({
+                success: true,
+                data: await this.prThreadManager.getThread(thread.threadId)
+            });
+        } catch (error) {
+            this.errorHandler.logError('Create PR Thread', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
+    }
+
+    /**
+     * Get an existing PR thread
+     */
+    async handleGetPRThread(message, sendResponse) {
+        try {
+            const { threadId } = message.data || message.payload || {};
+
+            if (!threadId) {
+                sendResponse({ success: false, error: 'Thread ID is required' });
+                return;
+            }
+
+            const thread = await this.prThreadManager.getThread(threadId);
+
+            if (!thread) {
+                sendResponse({ success: false, error: 'Thread not found' });
+                return;
+            }
+
+            sendResponse({
+                success: true,
+                data: thread
+            });
+        } catch (error) {
+            this.errorHandler.logError('Get PR Thread', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
+    }
+
+    /**
+     * Send a message in a PR thread
+     */
+    async handleSendThreadMessage(message, sendResponse) {
+        try {
+            const { threadId, message: userMessage, metadata = {} } = message.data || message.payload || {};
+
+            if (!threadId || !userMessage) {
+                sendResponse({ success: false, error: 'Thread ID and message are required' });
+                return;
+            }
+
+            console.log('💬 Processing thread message:', threadId);
+
+            // Get thread
+            const thread = await this.prThreadManager.getThread(threadId);
+            if (!thread) {
+                sendResponse({ success: false, error: 'Thread not found' });
+                return;
+            }
+
+            // Add user message to thread
+            await this.prThreadManager.addMessage(threadId, {
+                role: 'user',
+                content: userMessage,
+                metadata
+            });
+
+            // Process message and get AI response
+            const result = await this.processThreadMessage(threadId, userMessage, thread.finding);
+
+            sendResponse({
+                success: true,
+                data: {
+                    thread: await this.prThreadManager.getThread(threadId),
+                    response: result.response,
+                    suggestedQuestions: result.suggestedQuestions
+                }
+            });
+        } catch (error) {
+            this.errorHandler.logError('Send Thread Message', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
+    }
+
+    /**
+     * Handle quick action in a thread (explain, fix, false-positive)
+     */
+    async handleThreadQuickAction(message, sendResponse) {
+        try {
+            const { threadId, actionType } = message.data || message.payload || {};
+
+            if (!threadId || !actionType) {
+                sendResponse({ success: false, error: 'Thread ID and action type are required' });
+                return;
+            }
+
+            console.log('⚡ Processing quick action:', actionType, 'for thread:', threadId);
+
+            // Get thread
+            const thread = await this.prThreadManager.getThread(threadId);
+            if (!thread) {
+                sendResponse({ success: false, error: 'Thread not found' });
+                return;
+            }
+
+            // Build appropriate prompt based on action type
+            let prompt;
+            const finding = thread.finding;
+
+            switch (actionType) {
+                case 'explain':
+                    prompt = buildExplainPrompt(finding);
+                    break;
+                case 'fix':
+                    prompt = buildHowToFixPrompt(finding);
+                    break;
+                case 'false-positive':
+                    prompt = buildFalsePositiveCheckPrompt(finding);
+                    break;
+                default:
+                    prompt = buildFindingFollowUpPrompt(thread, {}, `Tell me more about this issue: ${actionType}`);
+            }
+
+            // Add action as user message
+            const actionLabels = {
+                'explain': 'Explain this issue in detail',
+                'fix': 'How do I fix this issue?',
+                'false-positive': 'Could this be a false positive?'
+            };
+
+            await this.prThreadManager.addMessage(threadId, {
+                role: 'user',
+                content: actionLabels[actionType] || actionType,
+                metadata: { actionType }
+            });
+
+            // Get AI response
+            const settings = await this.getSettings();
+            const response = await this.llmService.streamChat(
+                [
+                    { role: 'system', content: THREAD_SYSTEM_PROMPT },
+                    { role: 'user', content: prompt }
+                ],
+                {
+                    provider: settings.provider,
+                    model: settings.model,
+                    apiKey: settings.apiKey,
+                    stream: false
+                }
+            );
+
+            const aiResponse = response.content || response;
+
+            // Add AI response to thread
+            await this.prThreadManager.addMessage(threadId, {
+                role: 'assistant',
+                content: aiResponse,
+                metadata: { actionType }
+            });
+
+            // Get suggested follow-up questions
+            const suggestedQuestions = getSuggestedQuestions(finding, actionType);
+
+            sendResponse({
+                success: true,
+                data: {
+                    thread: await this.prThreadManager.getThread(threadId),
+                    response: aiResponse,
+                    suggestedQuestions
+                }
+            });
+        } catch (error) {
+            this.errorHandler.logError('Thread Quick Action', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
+    }
+
+    /**
+     * Update thread status (resolved, dismissed)
+     */
+    async handleUpdateThreadStatus(message, sendResponse) {
+        try {
+            const { threadId, status } = message.data || message.payload || {};
+
+            if (!threadId || !status) {
+                sendResponse({ success: false, error: 'Thread ID and status are required' });
+                return;
+            }
+
+            const validStatuses = ['active', 'resolved', 'dismissed'];
+            if (!validStatuses.includes(status)) {
+                sendResponse({ success: false, error: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
+                return;
+            }
+
+            console.log('📋 Updating thread status:', threadId, '->', status);
+
+            const updated = await this.prThreadManager.updateStatus(threadId, status);
+
+            if (!updated) {
+                sendResponse({ success: false, error: 'Failed to update thread status' });
+                return;
+            }
+
+            sendResponse({
+                success: true,
+                data: await this.prThreadManager.getThread(threadId)
+            });
+        } catch (error) {
+            this.errorHandler.logError('Update Thread Status', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
+    }
+
+    /**
+     * Get or create a thread for a finding
+     */
+    async handleGetOrCreateThread(message, sendResponse) {
+        try {
+            const { sessionId, prIdentifier, finding } = message.data || message.payload || {};
+
+            if (!prIdentifier || !finding) {
+                sendResponse({ success: false, error: 'PR identifier and finding are required' });
+                return;
+            }
+
+            // Try to find existing thread for this finding
+            const existingThreads = await this.prThreadManager.getThreadsForPR(prIdentifier);
+            let thread = existingThreads.find(t =>
+                t.finding?.id === finding.id ||
+                (t.finding?.file === finding.file &&
+                 t.finding?.lineNumber === finding.lineNumber &&
+                 t.finding?.message === finding.message)
+            );
+
+            if (!thread) {
+                // Create new thread
+                thread = await this.prThreadManager.createThread(prIdentifier, finding);
+                console.log('📝 Created new thread for finding:', finding.id || finding.message?.substring(0, 50));
+            } else {
+                console.log('📂 Found existing thread for finding:', thread.threadId);
+            }
+
+            sendResponse({
+                success: true,
+                data: thread
+            });
+        } catch (error) {
+            this.errorHandler.logError('Get Or Create Thread', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
+    }
+
+    /**
+     * Get PR session with all threads
+     */
+    async handleGetPRSession(message, sendResponse) {
+        try {
+            const { sessionId, prIdentifier } = message.data || message.payload || {};
+
+            let session;
+
+            if (sessionId) {
+                session = await this.prSessionManager.getSession(sessionId);
+            } else if (prIdentifier) {
+                // Try to find session by PR identifier
+                const sessions = await this.prSessionManager.getRecentSessions(100);
+                session = sessions.find(s =>
+                    s.prIdentifier?.url === prIdentifier.url ||
+                    (s.prIdentifier?.owner === prIdentifier.owner &&
+                     s.prIdentifier?.repo === prIdentifier.repo &&
+                     s.prIdentifier?.prNumber === prIdentifier.prNumber)
+                );
+            }
+
+            if (!session) {
+                sendResponse({ success: false, error: 'Session not found' });
+                return;
+            }
+
+            // Get all threads for this PR
+            const threads = await this.prThreadManager.getThreadsForPR(session.prIdentifier);
+
+            sendResponse({
+                success: true,
+                data: {
+                    session,
+                    threads
+                }
+            });
+        } catch (error) {
+            this.errorHandler.logError('Get PR Session', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
+    }
+
+    /**
+     * Process a thread message and get AI response
+     * Internal helper method
+     */
+    async processThreadMessage(threadId, userMessage, finding) {
+        try {
+            // Get conversation context
+            const context = await this.prThreadManager.getConversationContext(threadId);
+
+            // Build follow-up prompt
+            const prompt = buildFindingFollowUpPrompt(
+                { finding, messages: context.messages },
+                {}, // Additional context (can add RAG context here)
+                userMessage
+            );
+
+            // Get AI response
+            const settings = await this.getSettings();
+            const response = await this.llmService.streamChat(
+                [
+                    { role: 'system', content: THREAD_SYSTEM_PROMPT },
+                    ...context.messages.map(m => ({ role: m.role, content: m.content })),
+                    { role: 'user', content: prompt }
+                ],
+                {
+                    provider: settings.provider,
+                    model: settings.model,
+                    apiKey: settings.apiKey,
+                    stream: false
+                }
+            );
+
+            const aiResponse = response.content || response;
+
+            // Add AI response to thread
+            await this.prThreadManager.addMessage(threadId, {
+                role: 'assistant',
+                content: aiResponse
+            });
+
+            // Generate suggested questions
+            const suggestedQuestions = getSuggestedQuestions(finding, 'followup');
+
+            return {
+                response: aiResponse,
+                suggestedQuestions
+            };
+        } catch (error) {
+            console.error('Error processing thread message:', error);
+            throw error;
+        }
     }
 
     setupContextMenus() {
@@ -3125,7 +3836,7 @@ async function handleMessage(request, sender, sendResponse, serviceInstance) {
                 }
                 // Note: In a real extension, we'd need to fetch files here or pass them in
                 // For this demo, we assume files are passed in payload
-                await ragService.indexRepository(payload.repoId, payload.files, (progress) => {
+                await ragService.indexRepositoryIncremental(payload.repoId, payload.files, (progress) => {
                     // Optional: Send progress updates back to UI via runtime.sendMessage
                     chrome.runtime.sendMessage({ type: 'RAG_PROGRESS', payload: progress });
                 });
@@ -3181,7 +3892,7 @@ async function handleMessage(request, sender, sendResponse, serviceInstance) {
                     });
 
                     // Index the repository
-                    await ragService.indexRepository(repoId, files, (progress) => {
+                    await ragService.indexRepositoryIncremental(repoId, files, (progress) => {
                         chrome.runtime.sendMessage({ type: 'RAG_PROGRESS', payload: progress });
                     });
 

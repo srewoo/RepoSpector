@@ -1,15 +1,16 @@
 import React from 'react';
-import { Home, Database, MessageSquare, Settings } from 'lucide-react';
+import { Home, Database, MessageSquare, Settings, GitPullRequest } from 'lucide-react';
 import { motion } from 'framer-motion';
 
 const tabs = [
     { id: 'home', label: 'Home', icon: Home },
     { id: 'repos', label: 'Repos', icon: Database },
+    { id: 'prreview', label: 'PR', icon: GitPullRequest },
     { id: 'chat', label: 'Chat', icon: MessageSquare },
     { id: 'settings', label: 'Settings', icon: Settings }
 ];
 
-export function TabNavigation({ activeTab, onTabChange, repoCount = 0 }) {
+export function TabNavigation({ activeTab, onTabChange, repoCount = 0, isOnPRPage = false }) {
     return (
         <nav className="fixed bottom-0 left-0 right-0 bg-surface/95 backdrop-blur-md border-t border-border z-50">
             <div className="flex items-center justify-around h-14 px-2">
@@ -17,6 +18,7 @@ export function TabNavigation({ activeTab, onTabChange, repoCount = 0 }) {
                     const Icon = tab.icon;
                     const isActive = activeTab === tab.id;
                     const showBadge = tab.id === 'repos' && repoCount > 0;
+                    const showPRIndicator = tab.id === 'prreview' && isOnPRPage;
 
                     return (
                         <button
@@ -34,6 +36,9 @@ export function TabNavigation({ activeTab, onTabChange, repoCount = 0 }) {
                                     <span className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-primary text-white text-[10px] font-medium rounded-full flex items-center justify-center">
                                         {repoCount > 9 ? '9+' : repoCount}
                                     </span>
+                                )}
+                                {showPRIndicator && (
+                                    <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-green-500 rounded-full animate-pulse" />
                                 )}
                             </div>
                             <span className="text-[10px] mt-1 font-medium">

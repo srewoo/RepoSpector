@@ -11,6 +11,33 @@ export class LLMService {
     }
 
     /**
+     * Stream chat method - wrapper for callLLM with simplified interface
+     * @param {Array} messages - Array of { role, content } message objects
+     * @param {Object} options - Options including provider, model, apiKey, stream
+     * @returns {Promise<Object>} Response with content property
+     */
+    async streamChat(messages, options = {}) {
+        const { provider, model, apiKey, stream = false, onChunk, tabId } = options;
+
+        const requestData = {
+            model: model || 'openai:gpt-4o-mini',
+            messages
+        };
+
+        const response = await this.callLLM(requestData, apiKey, {
+            streaming: stream,
+            onChunk,
+            tabId
+        });
+
+        // Normalize response format
+        if (typeof response === 'string') {
+            return { content: response };
+        }
+        return response;
+    }
+
+    /**
      * Get provider from model identifier (e.g., "openai:gpt-4o-mini" -> "openai")
      * @param {string} modelIdentifier - Full model identifier with provider prefix
      * @returns {string} Provider name

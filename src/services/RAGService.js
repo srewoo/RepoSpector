@@ -1,11 +1,33 @@
 import { VectorStore } from './VectorStore';
 import { CodeChunker } from '../utils/chunking';
 import { OffscreenEmbeddingService } from './OffscreenEmbeddingService';
+import { HybridSearcher } from './HybridSearcher.js';
+import { IndexManifest, ManifestStore } from './IndexManifest.js';
+import { RelevanceScorer } from './RelevanceScorer.js';
+import { expandQuery } from '../utils/queryExpander.js';
 
 export class RAGService {
     constructor(options = {}) {
         this.vectorStore = new VectorStore();
         this.chunker = new CodeChunker();
+
+        // Hybrid search components
+        this.hybridSearcher = new HybridSearcher({
+            semanticWeight: options.semanticWeight || 0.6,
+            keywordWeight: options.keywordWeight || 0.4
+        });
+        this.hybridSearcher.setVectorStore(this.vectorStore);
+
+        // Manifest store for incremental indexing
+        this.manifestStore = new ManifestStore();
+
+        // Relevance scorer for re-ranking
+        this.relevanceScorer = new RelevanceScorer(options.scorerWeights);
+
+        // Feature flags
+        this.enableHybridSearch = options.enableHybridSearch !== false;
+        this.enableQueryExpansion = options.enableQueryExpansion !== false;
+        this.enableIncrementalIndexing = options.enableIncrementalIndexing !== false;
 
         // Support for multiple embedding providers
         this.provider = options.provider || 'local'; // 'openai' or 'local'
@@ -127,8 +149,160 @@ export class RAGService {
     }
 
     /**
+     * Incremental repository indexing
+     * Only re-indexes changed files based on content hash comparison
+     *
+     * @param {string} repoId - "owner/repo"
+     * @param {Array} files - Array of file objects { path, content }
+     * @param {function} onProgress - Callback for progress updates
+     */
+    async indexRepositoryIncremental(repoId, files, onProgress) {
+        if (!this.enableIncrementalIndexing) {
+            return this.indexRepository(repoId, files, onProgress);
+        }
+
+        await this.init();
+
+        // Load existing manifest
+        if (onProgress) onProgress({ status: 'loading', message: 'Loading index manifest...' });
+        let manifest = await this.manifestStore.load(repoId);
+
+        if (!manifest) {
+            // No existing index, do full indexing
+            console.log('📚 No existing index found, performing full indexing');
+            return this.indexRepository(repoId, files, onProgress);
+        }
+
+        // Compare files with manifest
+        if (onProgress) onProgress({ status: 'comparing', message: 'Comparing files...' });
+        const comparison = manifest.compare(files);
+
+        console.log(`📊 Index comparison: ${comparison.toAdd.length} new, ${comparison.toUpdate.length} changed, ${comparison.toRemove.length} removed, ${comparison.unchanged.length} unchanged`);
+
+        // If no changes, return early
+        if (comparison.toAdd.length === 0 &&
+            comparison.toUpdate.length === 0 &&
+            comparison.toRemove.length === 0) {
+            if (onProgress) onProgress({ status: 'complete', message: 'Index is up to date!' });
+            return { success: true, chunksIndexed: 0, skipped: comparison.unchanged.length };
+        }
+
+        // Delete chunks for removed/updated files
+        const chunksToDelete = [];
+        for (const file of comparison.toRemove) {
+            chunksToDelete.push(...file.chunkIds);
+            manifest.removeFile(file.path);
+        }
+        for (const file of comparison.toUpdate) {
+            if (file.oldChunkIds) {
+                chunksToDelete.push(...file.oldChunkIds);
+            }
+        }
+
+        if (chunksToDelete.length > 0) {
+            if (onProgress) onProgress({ status: 'cleaning', message: `Removing ${chunksToDelete.length} outdated chunks...` });
+            await this.vectorStore.deleteChunks(chunksToDelete);
+            this.hybridSearcher.clearCache();
+        }
+
+        // Index new and updated files
+        const filesToIndex = [...comparison.toAdd, ...comparison.toUpdate];
+
+        if (filesToIndex.length === 0) {
+            await this.manifestStore.save(manifest);
+            if (onProgress) onProgress({ status: 'complete', message: 'Index updated!' });
+            return { success: true, chunksIndexed: 0 };
+        }
+
+        if (onProgress) onProgress({ status: 'chunking', message: `Chunking ${filesToIndex.length} files...` });
+
+        let allChunks = [];
+        for (const file of filesToIndex) {
+            const chunks = this.chunker.createSemanticChunks(file.content, 'gpt-4o-mini');
+            const chunkIds = [];
+
+            chunks.forEach((chunk, idx) => {
+                const chunkId = `${repoId}:${file.path}:${idx}`;
+                chunkIds.push(chunkId);
+
+                allChunks.push({
+                    id: chunkId,
+                    repoId,
+                    filePath: file.path,
+                    content: chunk.content,
+                    chunkIndex: idx,
+                    metadata: {
+                        tokens: chunk.tokens,
+                        type: chunk.type,
+                        language: manifest.detectLanguage(file.path)
+                    }
+                });
+            });
+
+            // Update manifest
+            manifest.addFile(file.path, file.content, chunkIds, {
+                language: manifest.detectLanguage(file.path)
+            });
+        }
+
+        // Generate embeddings and store
+        if (onProgress) onProgress({
+            status: 'embedding',
+            message: `Generating embeddings for ${allChunks.length} chunks...`,
+            total: allChunks.length,
+            current: 0
+        });
+
+        const BATCH_SIZE = 20;
+        for (let i = 0; i < allChunks.length; i += BATCH_SIZE) {
+            const batch = allChunks.slice(i, i + BATCH_SIZE);
+            const texts = batch.map(c => c.content);
+
+            try {
+                const embeddings = await this.generateEmbeddings(texts);
+                batch.forEach((chunk, idx) => {
+                    chunk.embedding = embeddings[idx];
+                });
+
+                await this.vectorStore.addVectors(batch);
+
+                // Also add to BM25 index
+                for (const chunk of batch) {
+                    this.hybridSearcher.bm25Index.addDocument(
+                        chunk.id,
+                        chunk.content,
+                        chunk.metadata
+                    );
+                }
+
+                if (onProgress) onProgress({
+                    status: 'embedding',
+                    message: `Indexed ${Math.min(i + BATCH_SIZE, allChunks.length)}/${allChunks.length} chunks`,
+                    total: allChunks.length,
+                    current: Math.min(i + BATCH_SIZE, allChunks.length)
+                });
+            } catch (error) {
+                console.error('Error generating embeddings batch:', error);
+            }
+        }
+
+        // Save updated manifest
+        await this.manifestStore.save(manifest);
+
+        if (onProgress) onProgress({ status: 'complete', message: 'Incremental indexing complete!' });
+        return {
+            success: true,
+            chunksIndexed: allChunks.length,
+            filesAdded: comparison.toAdd.length,
+            filesUpdated: comparison.toUpdate.length,
+            filesRemoved: comparison.toRemove.length,
+            filesUnchanged: comparison.unchanged.length
+        };
+    }
+
+    /**
      * Retrieve relevant context for a query
-     * IMPROVED: Better relevance filtering and context formatting
+     * IMPROVED: Supports hybrid search with BM25 + semantic
      *
      * @param {string} repoId
      * @param {string} query
@@ -141,32 +315,78 @@ export class RAGService {
         const {
             minScore = 0.3,           // Minimum relevance score
             maxChunksPerFile = 2,     // Prevent one file from dominating
-            formatOutput = false      // Return formatted string vs raw chunks
+            formatOutput = false,     // Return formatted string vs raw chunks
+            useHybridSearch = this.enableHybridSearch,
+            useQueryExpansion = this.enableQueryExpansion,
+            rerank = true             // Apply relevance scoring re-ranking
         } = options;
 
         try {
-            // 1. Generate embedding for query
             const startTime = performance.now();
-            const [queryEmbedding] = await this.generateEmbeddings([query]);
-            const embedTime = performance.now() - startTime;
 
-            // 2. Search vector store with improved options
-            const results = await this.vectorStore.search(repoId, queryEmbedding, limit, {
-                minScore,
-                deduplicate: true,
-                maxChunksPerFile
-            });
+            // 1. Optionally expand query for better recall
+            let searchQuery = query;
+            if (useQueryExpansion) {
+                const expanded = expandQuery(query);
+                searchQuery = expanded.expandedQuery;
+                if (expanded.expansions.length > 0) {
+                    console.log(`🔄 Query expanded: "${query}" -> "${searchQuery.substring(0, 100)}..."`);
+                }
+            }
 
-            const searchTime = performance.now() - startTime - embedTime;
-            console.log(`🔍 RAG: Retrieved ${results.length} chunks in ${searchTime.toFixed(0)}ms (embed: ${embedTime.toFixed(0)}ms)`);
+            let results;
+
+            // 2. Use hybrid search or vector-only search
+            if (useHybridSearch) {
+                // Hybrid search combines BM25 keyword + semantic vector search
+                results = await this.hybridSearcher.search(searchQuery, repoId, {
+                    limit: limit * 2, // Fetch more for re-ranking
+                    useSemanticSearch: true,
+                    useKeywordSearch: true,
+                    filters: options.filters
+                });
+
+                // Map to expected format
+                results = results.map(r => ({
+                    ...r,
+                    id: r.docId,
+                    score: r.score || r.relevanceScore || 0,
+                    filePath: r.metadata?.filePath || r.filePath
+                }));
+
+                console.log(`🔍 RAG Hybrid: Retrieved ${results.length} chunks`);
+            } else {
+                // Traditional vector-only search
+                const [queryEmbedding] = await this.generateEmbeddings([searchQuery]);
+                results = await this.vectorStore.search(repoId, queryEmbedding, limit * 2, {
+                    minScore,
+                    deduplicate: true,
+                    maxChunksPerFile
+                });
+            }
+
+            // 3. Re-rank results using relevance scorer
+            if (rerank && results.length > 0) {
+                results = this.relevanceScorer.rerank(results, query, {
+                    language: options.language,
+                    preferredFileTypes: options.preferredFileTypes
+                });
+            }
+
+            // 4. Apply deduplication and limit
+            results = this.deduplicateResults(results, maxChunksPerFile);
+            results = results.slice(0, limit);
+
+            const totalTime = performance.now() - startTime;
+            console.log(`🔍 RAG: Retrieved ${results.length} chunks in ${totalTime.toFixed(0)}ms`);
 
             // Log relevance scores for debugging
             if (results.length > 0) {
-                const scores = results.map(r => r.score.toFixed(3)).join(', ');
+                const scores = results.map(r => (r.relevanceScore || r.score || 0).toFixed(3)).join(', ');
                 console.log(`📊 RAG scores: [${scores}]`);
             }
 
-            // 3. Format output if requested
+            // 5. Format output if requested
             if (formatOutput && results.length > 0) {
                 return this.formatRetrievedContext(results);
             }
@@ -177,6 +397,26 @@ export class RAGService {
             // Return empty results on error (graceful degradation)
             return formatOutput ? { chunks: '', sources: [] } : [];
         }
+    }
+
+    /**
+     * Deduplicate results by file path
+     */
+    deduplicateResults(results, maxChunksPerFile = 2) {
+        const fileChunkCount = new Map();
+        const deduplicated = [];
+
+        for (const result of results) {
+            const filePath = result.filePath || result.metadata?.filePath || 'unknown';
+            const currentCount = fileChunkCount.get(filePath) || 0;
+
+            if (currentCount < maxChunksPerFile) {
+                deduplicated.push(result);
+                fileChunkCount.set(filePath, currentCount + 1);
+            }
+        }
+
+        return deduplicated;
     }
 
     /**
@@ -439,5 +679,148 @@ export class RAGService {
                 dimension: 1536
             };
         }
+    }
+
+    /**
+     * Retrieve repository documentation (README, docs, etc.)
+     * Used to understand what the repository is about
+     *
+     * @param {string} repoId - "owner/repo"
+     * @returns {Object} Documentation context with content and sources
+     */
+    async getRepositoryDocumentation(repoId) {
+        await this.init();
+
+        try {
+            // Documentation file patterns to look for
+            const docPatterns = [
+                'readme.md', 'readme.txt', 'readme',
+                'docs/readme.md', 'documentation/readme.md',
+                'doc/readme.md', 'docs/index.md',
+                'contributing.md', 'architecture.md',
+                'overview.md', 'getting-started.md'
+            ];
+
+            // Get all chunks for this repo
+            const transaction = this.vectorStore.db.transaction([this.vectorStore.storeName], 'readonly');
+            const store = transaction.objectStore(this.vectorStore.storeName);
+            const index = store.index('repoId');
+
+            return new Promise((resolve, reject) => {
+                const request = index.getAll(repoId);
+
+                request.onsuccess = () => {
+                    const allChunks = request.result;
+                    const docChunks = [];
+
+                    // Find documentation files
+                    for (const chunk of allChunks) {
+                        const filePath = (chunk.filePath || '').toLowerCase();
+                        const fileName = filePath.split('/').pop();
+
+                        // Check if it matches documentation patterns
+                        const isDocFile = docPatterns.some(pattern =>
+                            filePath.endsWith(pattern) || fileName === pattern
+                        ) || filePath.includes('/docs/') || filePath.includes('/documentation/');
+
+                        if (isDocFile) {
+                            docChunks.push(chunk);
+                        }
+                    }
+
+                    // Sort by file path (README first) and chunk index
+                    docChunks.sort((a, b) => {
+                        const aPath = (a.filePath || '').toLowerCase();
+                        const bPath = (b.filePath || '').toLowerCase();
+
+                        // Prioritize README files
+                        const aIsReadme = aPath.includes('readme');
+                        const bIsReadme = bPath.includes('readme');
+                        if (aIsReadme && !bIsReadme) return -1;
+                        if (!aIsReadme && bIsReadme) return 1;
+
+                        // Then by path
+                        if (aPath !== bPath) return aPath.localeCompare(bPath);
+
+                        // Then by chunk index
+                        return (a.chunkIndex || 0) - (b.chunkIndex || 0);
+                    });
+
+                    // Limit to reasonable size (first 5 chunks of docs)
+                    const limitedChunks = docChunks.slice(0, 5);
+                    const sources = [...new Set(limitedChunks.map(c => c.filePath))];
+
+                    if (limitedChunks.length > 0) {
+                        const formattedContent = limitedChunks
+                            .map(c => `// From: ${c.filePath}\n${c.content}`)
+                            .join('\n\n---\n\n');
+
+                        resolve({
+                            found: true,
+                            content: formattedContent,
+                            sources,
+                            chunksCount: limitedChunks.length
+                        });
+                    } else {
+                        resolve({
+                            found: false,
+                            content: '',
+                            sources: [],
+                            chunksCount: 0
+                        });
+                    }
+                };
+
+                request.onerror = () => reject(request.error);
+            });
+        } catch (error) {
+            console.warn('Failed to get repository documentation:', error);
+            return {
+                found: false,
+                content: '',
+                sources: [],
+                error: error.message
+            };
+        }
+    }
+
+    /**
+     * Enhanced context retrieval that includes repository documentation
+     *
+     * @param {string} repoId - "owner/repo"
+     * @param {string} query - Search query
+     * @param {number} limit - Max results
+     * @param {Object} options - Options including includeDocumentation flag
+     */
+    async retrieveContextWithDocs(repoId, query, limit = 5, options = {}) {
+        const {
+            includeDocumentation = true,
+            documentationFirst = false,  // If true, prepend docs to context
+            ...searchOptions
+        } = options;
+
+        // Get regular search results
+        const searchResults = await this.retrieveContext(repoId, query, limit, searchOptions);
+
+        // Optionally include repository documentation
+        if (includeDocumentation) {
+            const docs = await this.getRepositoryDocumentation(repoId);
+
+            if (docs.found) {
+                return {
+                    results: searchResults,
+                    documentation: docs,
+                    combinedContext: documentationFirst
+                        ? `## Repository Documentation\n${docs.content}\n\n## Relevant Code\n${searchResults.map(r => r.content).join('\n\n')}`
+                        : `## Relevant Code\n${searchResults.map(r => r.content).join('\n\n')}\n\n## Repository Documentation\n${docs.content}`
+                };
+            }
+        }
+
+        return {
+            results: searchResults,
+            documentation: null,
+            combinedContext: searchResults.map(r => r.content).join('\n\n')
+        };
     }
 }

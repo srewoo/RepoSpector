@@ -5,6 +5,7 @@ import { Modal } from './ui/Modal';
 import { CodePreview } from './CodePreview';
 import { TokenUsageIndicator } from './TokenUsageIndicator';
 import { TypingIndicator } from './TypingIndicator';
+import { MarkdownRenderer } from './ui/MarkdownRenderer';
 import { cn } from '@/lib/utils';
 import { useExtension } from '@/hooks/useExtension';
 import { conversationHistory } from '@/services/conversationHistory';
@@ -722,14 +723,21 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                         <div className={cn("space-y-2", msg.type === 'code' ? "flex-1 min-w-0" : "w-full")}>
                             {msg.content && (
                                 <div className={cn(
-                                    "p-3 rounded-2xl text-sm whitespace-pre-line",
+                                    "p-3 rounded-2xl text-sm",
                                     msg.role === 'assistant'
                                         ? "bg-surfaceHighlight/50 rounded-tl-none"
-                                        : "bg-primary text-white rounded-tr-none",
+                                        : "bg-primary text-white rounded-tr-none whitespace-pre-line",
                                     msg.type === 'error' && "bg-error/10 text-error border border-error/20",
                                     msg.type === 'info' && "bg-blue-500/10 text-blue-300 border border-blue-500/20"
                                 )}>
-                                    {formatMessageContent(msg.content)}
+                                    {msg.role === 'assistant' ? (
+                                        <MarkdownRenderer
+                                            content={msg.content}
+                                            showCopy={msg.type !== 'code'}
+                                        />
+                                    ) : (
+                                        msg.content
+                                    )}
                                 </div>
                             )}
 
