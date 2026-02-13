@@ -28,6 +28,7 @@ import { FindingThread } from './FindingThread';
 import { StaticAnalysisResults } from './StaticAnalysisResults';
 import { PRQuickActions } from './QuickActions';
 import { MarkdownRenderer } from './ui/MarkdownRenderer';
+import { MermaidDiagram } from './ui/MermaidDiagram';
 
 export function PRReviewInterface({
     prUrl,
@@ -776,9 +777,7 @@ export function PRReviewInterface({
                                     </div>
                                 </CardHeader>
                                 <CardContent>
-                                    <pre className="p-3 bg-background rounded-lg text-xs overflow-x-auto font-mono whitespace-pre-wrap">
-                                        <code>{generatedMermaid}</code>
-                                    </pre>
+                                    <MermaidDiagram code={generatedMermaid} />
                                 </CardContent>
                             </Card>
                         )}

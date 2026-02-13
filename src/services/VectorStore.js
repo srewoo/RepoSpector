@@ -562,4 +562,62 @@ export class VectorStore {
             request.onerror = (event) => reject(event.target.error);
         });
     }
+
+    /**
+     * Get all unique file paths for a repository
+     * @param {string} repoId
+     * @returns {Promise<string[]>}
+     */
+    async getFilePaths(repoId) {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction([this.storeName], 'readonly');
+            const store = transaction.objectStore(this.storeName);
+            const index = store.index('repoId');
+            const request = index.getAll(repoId);
+
+            request.onsuccess = () => {
+                const chunks = request.result;
+                const uniqueFiles = [...new Set(chunks.map(c => c.filePath).filter(Boolean))];
+                resolve(uniqueFiles.sort());
+            };
+
+            request.onerror = (event) => reject(event.target.error);
+        });
+    }
+
+    /**
+     * Get file contents for a repository (concatenated chunks per file)
+     * @param {string} repoId
+     * @returns {Promise<Map<string, string>>} filePath -> content
+     */
+    async getFileContents(repoId) {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction([this.storeName], 'readonly');
+            const store = transaction.objectStore(this.storeName);
+            const index = store.index('repoId');
+            const request = index.getAll(repoId);
+
+            request.onsuccess = () => {
+                const chunks = request.result;
+                const fileMap = new Map();
+                for (const chunk of chunks) {
+                    if (!chunk.filePath || !chunk.content) continue;
+                    if (!fileMap.has(chunk.filePath)) {
+                        fileMap.set(chunk.filePath, []);
+                    }
+                    fileMap.get(chunk.filePath).push(chunk.content);
+                }
+                // Concatenate chunks per file
+                const result = new Map();
+                for (const [path, contents] of fileMap) {
+                    result.set(path, contents.join('\n'));
+                }
+                resolve(result);
+            };
+
+            request.onerror = (event) => reject(event.target.error);
+        });
+    }
 }

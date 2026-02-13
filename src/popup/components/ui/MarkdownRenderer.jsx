@@ -103,11 +103,14 @@ export function MarkdownRenderer({ content, className, showCopy = true }) {
                     <li className="text-text">{children}</li>
                 ),
 
-                // Code
+                // Code — detect inline vs block by checking for language className
+                // In react-markdown v9+ the `inline` prop is removed, so we infer:
+                // code blocks have a className like "language-js", inline code does not
                 code: ({ inline, className, children }) => {
-                    if (inline) {
+                    const isCodeBlock = className || inline === false;
+                    if (!isCodeBlock) {
                         return (
-                            <code className="px-1.5 py-0.5 bg-surface rounded text-xs font-mono text-primary">
+                            <code className="inline px-1.5 py-0.5 bg-surface rounded text-xs font-mono text-primary whitespace-nowrap">
                                 {children}
                             </code>
                         );

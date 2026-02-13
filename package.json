@@ -1,6 +1,6 @@
 {
   "name": "repospector",
-  "version": "5.0",
+  "version": "5.1",
   "description": "AI-powered Chrome extension for generating comprehensive test cases from code",
   "author": "AI RepoSpector Team",
   "license": "MIT",
@@ -100,6 +100,7 @@
     "framer-motion": "^12.23.24",
     "js-tiktoken": "^1.0.21",
     "lucide-react": "^0.554.0",
+    "mermaid": "^11.12.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-markdown": "^10.1.0",

@@ -1,11 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Bot, User, Sparkles, AlertCircle, Database, GitBranch, Clock } from 'lucide-react';
+import { Send, Bot, User, Sparkles, AlertCircle, Database, GitBranch, Clock, Network } from 'lucide-react';
 import { Button } from './ui/Button';
 import { Modal } from './ui/Modal';
 import { CodePreview } from './CodePreview';
 import { TokenUsageIndicator } from './TokenUsageIndicator';
 import { TypingIndicator } from './TypingIndicator';
 import { MarkdownRenderer } from './ui/MarkdownRenderer';
+import { MermaidDiagram } from './ui/MermaidDiagram';
 import { cn } from '@/lib/utils';
 import { useExtension } from '@/hooks/useExtension';
 import { conversationHistory } from '@/services/conversationHistory';
@@ -63,12 +64,20 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
         });
     };
 
+    const suggestions = [
+        { label: 'Generate unit tests', icon: '🧪' },
+        { label: 'Create integration tests', icon: '🔗' },
+        { label: 'Explain this code', icon: '📖' },
+        { label: 'Find issues in this code', icon: '🔍' },
+        { label: 'Suggest improvements', icon: '💡' },
+    ];
+
     const [messages, setMessages] = useState([
         {
             id: 1,
             role: 'assistant',
-            content: "Hi! I'm RepoSpector Copilot. I can help you with:\n\n**Test Generation:**\n\n• generate unit tests\n\n• create integration tests\n\n• add pytest tests\n\n**Code Analysis:**\n\n• explain this code\n\n• find issues in this code\n\n• suggest improvements\n\n• how does this function work?\n\n• what are potential bugs?\n\nWhat can I help you with?",
-            type: 'text'
+            content: "Hi! I'm RepoSpector Copilot. Ask me anything about your code, or click a suggestion below to get started.",
+            type: 'welcome'
         }
     ]);
     const [input, setInput] = useState('');
@@ -324,7 +333,7 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                 setMessages([{
                     id: 1,
                     role: 'assistant',
-                    content: "Hi! I'm RepoSpector Copilot. I can help you with:\n\n**Test Generation:**\n\n• generate unit tests\n\n• create integration tests\n\n• add pytest tests\n\n**Code Analysis:**\n\n• explain this code\n\n• find issues in this code\n\n• suggest improvements\n\n• how does this function work?\n\n• what are potential bugs?\n\nWhat can I help you with?",
+                    content: "Hi! I'm RepoSpector Copilot. Ask me anything about your code, or click a suggestion below to get started.",
                     type: 'text'
                 }]);
 
@@ -500,10 +509,45 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                 (lowerPrompt.includes('test') || lowerPrompt.includes('spec'))
             ) || lowerPrompt === 'test' || lowerPrompt === 'tests';
 
+            // Detect mindmap request
+            const isMindmapRequest = lowerPrompt.includes('mindmap') && lowerPrompt.includes('repo');
+
             const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
             // Route to appropriate handler
-            if (isTestGeneration) {
+            if (isMindmapRequest && isRepoIndexed && currentRepo) {
+                setStreamingPhase('🗺️ Generating repo mindmap...');
+
+                const response = await sendMessage('GENERATE_REPO_MINDMAP', {
+                    repoId: currentRepo.repoId,
+                    url: tab?.url
+                });
+
+                setStreamingPhase('');
+
+                if (response.success && response.data?.mermaidCode) {
+                    const aiMessage = {
+                        id: Date.now() + 1,
+                        role: 'assistant',
+                        content: `Here's the mindmap for **${currentRepo.repoId}**:`,
+                        type: 'mindmap',
+                        mermaidCode: response.data.mermaidCode
+                    };
+                    setMessages(prev => [...prev, aiMessage]);
+                    conversationHistory.addMessage(aiMessage).catch(console.error);
+                } else {
+                    throw new Error(response.error || 'Failed to generate mindmap');
+                }
+            } else if (isMindmapRequest && !isRepoIndexed) {
+                setStreamingPhase('');
+                const aiMessage = {
+                    id: Date.now() + 1,
+                    role: 'assistant',
+                    content: 'Please index the repository first to generate a mindmap. Use the indexing feature in settings.',
+                    type: 'text'
+                };
+                setMessages(prev => [...prev, aiMessage]);
+            } else if (isTestGeneration) {
                 // Update phase for test generation
                 setStreamingPhase('🤖 Sending code to AI for test generation...');
                 // Test generation flow
@@ -704,7 +748,7 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                         key={msg.id}
                         className={cn(
                             "flex gap-3",
-                            msg.type === 'code' ? "max-w-full" : "max-w-[90%]",
+                            (msg.type === 'code' || msg.type === 'mindmap') ? "max-w-full" : "max-w-[90%]",
                             msg.role === 'user' ? "ml-auto flex-row-reverse" : ""
                         )}
                     >
@@ -720,7 +764,7 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                             {msg.type === 'info' && <Sparkles className="w-5 h-5" />}
                         </div>
 
-                        <div className={cn("space-y-2", msg.type === 'code' ? "flex-1 min-w-0" : "w-full")}>
+                        <div className={cn("space-y-2", (msg.type === 'code' || msg.type === 'mindmap') ? "flex-1 min-w-0" : "w-full")}>
                             {msg.content && (
                                 <div className={cn(
                                     "p-3 rounded-2xl text-sm",
@@ -733,11 +777,42 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                                     {msg.role === 'assistant' ? (
                                         <MarkdownRenderer
                                             content={msg.content}
-                                            showCopy={msg.type !== 'code'}
+                                            showCopy={msg.type !== 'code' && msg.type !== 'welcome'}
                                         />
                                     ) : (
                                         msg.content
                                     )}
+                                </div>
+                            )}
+
+                            {/* Clickable suggestion chips on welcome message */}
+                            {msg.type === 'welcome' && (
+                                <div className="flex flex-wrap gap-2 mt-2">
+                                    {suggestions.map((s) => (
+                                        <button
+                                            key={s.label}
+                                            onClick={() => setInput(s.label.toLowerCase())}
+                                            className="px-3 py-1.5 text-xs bg-surface hover:bg-surfaceHighlight border border-border rounded-full text-textMuted hover:text-text transition-colors cursor-pointer"
+                                        >
+                                            {s.icon} {s.label}
+                                        </button>
+                                    ))}
+                                    {isRepoIndexed && (
+                                        <button
+                                            onClick={() => setInput('generate repo mindmap')}
+                                            className="px-3 py-1.5 text-xs bg-primary/10 hover:bg-primary/20 border border-primary/30 rounded-full text-primary hover:text-primary transition-colors cursor-pointer flex items-center gap-1"
+                                        >
+                                            <Network className="w-3 h-3" />
+                                            Generate repo mindmap
+                                        </button>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* Mermaid mindmap rendering */}
+                            {msg.type === 'mindmap' && msg.mermaidCode && (
+                                <div className="animate-fade-in mt-2">
+                                    <MermaidDiagram code={msg.mermaidCode} className="rounded-lg" />
                                 </div>
                             )}
 

@@ -174,6 +174,162 @@ Rules:
 }
 
 /**
+ * Generate Mermaid flowchart showing actual files grouped by directory
+ * with import dependency edges. No LLM needed — free and instant.
+ *
+ * @param {string[]} filePaths - All file paths in the repo
+ * @param {string} repoId - Repository identifier
+ * @param {Map<string, {imports: Array}>} importGraph - Import graph from ImportGraphService
+ * @returns {string} Mermaid flowchart code
+ */
+export function generateRepoMindmapCode(filePaths, repoId, importGraph) {
+    if (!filePaths || filePaths.length === 0) return null;
+
+    const MAX_FILES = 30;
+    const safe = (s) => s.replace(/"/g, "'").replace(/[<>]/g, '').replace(/&/g, 'and');
+    const fileSet = new Set(filePaths);
+
+    // --- Resolve import sources to actual repo file paths ---
+    function resolveImport(source, fromFile) {
+        // Skip external/stdlib imports
+        if (!source.startsWith('.') && !source.startsWith('src') && !source.includes('/')) {
+            // Could be a Python dotted import like "src.events.base_event"
+            const dotPath = source.replace(/\./g, '/');
+            if (fileSet.has(dotPath + '.py')) return dotPath + '.py';
+            if (fileSet.has(dotPath + '/__init__.py')) return dotPath + '/__init__.py';
+            return null; // external
+        }
+
+        // Relative imports (JS/TS)
+        if (source.startsWith('.')) {
+            const fromDir = fromFile.split('/').slice(0, -1).join('/');
+            const parts = [...fromDir.split('/'), ...source.split('/')];
+            const resolved = [];
+            for (const p of parts) {
+                if (p === '..') resolved.pop();
+                else if (p !== '.' && p !== '') resolved.push(p);
+            }
+            const base = resolved.join('/');
+            // Try with extensions
+            for (const ext of ['', '.py', '.js', '.ts', '.jsx', '.tsx', '/index.js', '/index.ts', '/__init__.py']) {
+                if (fileSet.has(base + ext)) return base + ext;
+            }
+            return null;
+        }
+
+        // Absolute-style imports (Python: from src.x.y import Z)
+        const slashPath = source.replace(/\./g, '/');
+        for (const ext of ['', '.py', '.js', '.ts', '.jsx', '.tsx', '/__init__.py', '/index.js']) {
+            if (fileSet.has(slashPath + ext)) return slashPath + ext;
+        }
+
+        return null;
+    }
+
+    // --- Build dependency edges ---
+    const deps = []; // { from, to }
+    const connectionCount = {}; // filePath -> number of connections
+    filePaths.forEach(fp => { connectionCount[fp] = 0; });
+
+    if (importGraph) {
+        for (const [filePath, data] of importGraph.entries()) {
+            if (!data?.imports) continue;
+            for (const imp of data.imports) {
+                const target = resolveImport(imp.source, filePath);
+                if (target && target !== filePath) {
+                    deps.push({ from: filePath, to: target });
+                    connectionCount[filePath] = (connectionCount[filePath] || 0) + 1;
+                    connectionCount[target] = (connectionCount[target] || 0) + 1;
+                }
+            }
+        }
+    }
+
+    // --- Select top files by connection count ---
+    const rankedFiles = filePaths
+        .slice()
+        .sort((a, b) => (connectionCount[b] || 0) - (connectionCount[a] || 0))
+        .slice(0, MAX_FILES);
+    const selectedSet = new Set(rankedFiles);
+
+    // Filter deps to only selected files
+    const selectedDeps = deps.filter(d => selectedSet.has(d.from) && selectedSet.has(d.to));
+
+    // --- Group files by directory ---
+    const dirGroups = {};
+    for (const fp of rankedFiles) {
+        const parts = fp.split('/');
+        const dir = parts.length > 1 ? parts.slice(0, -1).join('/') : '(root)';
+        if (!dirGroups[dir]) dirGroups[dir] = [];
+        dirGroups[dir].push(fp);
+    }
+
+    // --- Generate Mermaid flowchart ---
+    const repoName = safe(repoId.split('/').pop() || repoId);
+    const nodeIds = {}; // filePath -> nodeId
+    let nid = 0;
+
+    const lines = ['flowchart LR'];
+
+    // Create subgraphs for each directory
+    const sortedDirs = Object.entries(dirGroups)
+        .sort((a, b) => b[1].length - a[1].length);
+
+    for (const [dir, files] of sortedDirs) {
+        const dirLabel = safe(dir === '(root)' ? repoName : dir);
+        const sgId = `sg${nid++}`;
+        lines.push(`    subgraph ${sgId}["${dirLabel}"]`);
+
+        for (const fp of files) {
+            const id = `f${nid++}`;
+            nodeIds[fp] = id;
+            const fileName = safe(fp.split('/').pop());
+            const conns = connectionCount[fp] || 0;
+            lines.push(`        ${id}["${fileName}"]`);
+        }
+
+        lines.push('    end');
+    }
+
+    // Add dependency edges
+    lines.push('');
+    const addedEdges = new Set();
+    for (const { from, to } of selectedDeps) {
+        const fromId = nodeIds[from];
+        const toId = nodeIds[to];
+        if (fromId && toId) {
+            const key = `${fromId}-${toId}`;
+            if (!addedEdges.has(key)) {
+                lines.push(`    ${fromId} --> ${toId}`);
+                addedEdges.add(key);
+            }
+        }
+    }
+
+    // Styling
+    lines.push('');
+    lines.push('    classDef hub fill:#6366f1,stroke:#818cf8,color:#fff,font-weight:bold');
+    lines.push('    classDef mid fill:#334155,stroke:#475569,color:#e2e8f0');
+    lines.push('    classDef leaf fill:#1e293b,stroke:#334155,color:#94a3b8');
+
+    const hubs = [];
+    const mids = [];
+    const leaves = [];
+    for (const fp of rankedFiles) {
+        const id = nodeIds[fp];
+        const c = connectionCount[fp] || 0;
+        if (c >= 5) hubs.push(id);
+        else if (c >= 2) mids.push(id);
+        else leaves.push(id);
+    }
+    if (hubs.length) lines.push(`    class ${hubs.join(',')} hub`);
+    if (mids.length) lines.push(`    class ${mids.join(',')} mid`);
+    if (leaves.length) lines.push(`    class ${leaves.join(',')} leaf`);
+
+    return lines.join('\n');
+}
+
+/**
  * Categorize PR files by type
  */
 export function categorizeFiles(files) {

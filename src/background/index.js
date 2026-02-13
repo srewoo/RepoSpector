@@ -8,6 +8,7 @@ import { BatchProcessor } from '../utils/batchProcessor.js';
 import { CodeChunker } from '../utils/chunking.js';
 import { TestGenerator } from '../utils/testGenerator.js';
 import { CacheManager } from '../utils/cacheManager.js';
+import { ImportGraphService } from '../services/ImportGraphService.js';
 import { LanguageDetector } from '../utils/languageDetector.js';
 import { TokenManager } from '../utils/tokenManager.js';
 import { PLATFORM_PATTERNS as _PLATFORM_PATTERNS, MODELS } from '../utils/constants.js';
@@ -53,7 +54,8 @@ import {
     CHANGELOG_SYSTEM_PROMPT,
     buildChangelogPrompt,
     MERMAID_SYSTEM_PROMPT,
-    buildMermaidPrompt
+    buildMermaidPrompt,
+    generateRepoMindmapCode
 } from '../utils/prSummaryPrompts.js';
 
 class BackgroundService {
@@ -505,6 +507,10 @@ class BackgroundService {
 
                 case 'GENERATE_CHANGELOG':
                     await this.handleGenerateChangelog(message, sendResponse);
+                    break;
+
+                case 'GENERATE_REPO_MINDMAP':
+                    await this.handleGenerateRepoMindmap(message, sendResponse);
                     break;
 
                 case 'RECORD_FINDING_ACTION':
@@ -3853,6 +3859,73 @@ Return only the complete test code with proper syntax for the detected language,
             sendResponse({ success: true, data: { changelog: response.content || response } });
         } catch (error) {
             this.errorHandler.logError('Generate Changelog', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
+    async handleGenerateRepoMindmap(message, sendResponse) {
+        try {
+            const { repoId: providedRepoId, url: providedUrl, tabId } = message.data || message.payload || {};
+
+            // Get URL from tab if not provided (popup iframe can't access tab.url without tabs permission)
+            let url = providedUrl;
+            if (!url && tabId) {
+                try {
+                    const tab = await chrome.tabs.get(tabId);
+                    url = tab?.url;
+                } catch (e) {
+                    console.warn('Could not get tab URL:', e);
+                }
+            }
+
+            // Always derive repoId from URL when available (matches indexing format)
+            let repoId = null;
+            if (url) {
+                if (url.includes('github.com')) {
+                    repoId = this.githubService.getRepoId(url);
+                } else if (url.includes('gitlab.com')) {
+                    repoId = this.gitlabService.getRepoId(url);
+                }
+            }
+            if (!repoId) {
+                repoId = providedRepoId;
+            }
+
+            if (!repoId) {
+                sendResponse({ success: false, error: 'Repository ID or URL required' });
+                return;
+            }
+
+            // Get file contents from VectorStore (indexed chunks)
+            await this.ragService.init();
+            const fileContents = await this.ragService.vectorStore.getFileContents(repoId);
+
+            if (!fileContents || fileContents.size === 0) {
+                sendResponse({ success: false, error: 'No indexed files found for this repository. Please index the repo first.' });
+                return;
+            }
+
+            const filePaths = [...fileContents.keys()].sort();
+
+            // Build import dependency graph from file contents
+            const importGraphService = new ImportGraphService();
+            const files = [];
+            for (const [filePath, content] of fileContents) {
+                files.push({ filename: filePath, content });
+            }
+            const importGraph = importGraphService.buildGraph(files);
+
+            // Generate dependency flowchart — free & instant, no LLM
+            const mermaidCode = generateRepoMindmapCode(filePaths, repoId, importGraph);
+
+            if (!mermaidCode) {
+                sendResponse({ success: false, error: 'Failed to generate dependency map.' });
+                return;
+            }
+
+            sendResponse({ success: true, data: { mermaidCode } });
+        } catch (error) {
+            this.errorHandler.logError('Generate Repo Mindmap', error);
             sendResponse({ success: false, error: this.getErrorMessage(error) });
         }
     }
