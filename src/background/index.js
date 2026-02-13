@@ -3830,12 +3830,30 @@ Return only the complete test code with proper syntax for the detected language,
             let mermaidCode = (response.content || response).trim();
             // Strip markdown fences if present
             mermaidCode = mermaidCode.replace(/^```(?:mermaid)?\n?/, '').replace(/\n?```$/, '').trim();
+            // Sanitize: fix nested brackets/special chars in node labels
+            mermaidCode = this.sanitizeMermaidCode(mermaidCode);
 
             sendResponse({ success: true, data: { mermaidCode } });
         } catch (error) {
             this.errorHandler.logError('Generate Mermaid Diagram', error);
             sendResponse({ success: false, error: this.getErrorMessage(error) });
         }
+    }
+
+    /**
+     * Sanitize LLM-generated Mermaid code to fix common syntax issues
+     */
+    sanitizeMermaidCode(code) {
+        // Fix node labels with nested brackets: A[text [inner]] → A["text inner"]
+        // Process line by line
+        return code.split('\n').map(line => {
+            // Match node definitions: ID[label] or ID(label) etc.
+            // Fix lines where brackets appear inside labels
+            return line.replace(/(\w+)\[([^\]]*)\[([^\]]*)\]([^\]]*)\]/g, (_, id, pre, inner, post) => {
+                const label = `${pre}${inner}${post}`.replace(/[\[\]]/g, '').trim();
+                return `${id}["${label}"]`;
+            });
+        }).join('\n');
     }
 
     async handleGenerateChangelog(message, sendResponse) {
