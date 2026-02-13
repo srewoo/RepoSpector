@@ -605,10 +605,11 @@ export const SEVERITY_WEIGHTS = {
  * Tool weights for confidence aggregation
  */
 export const TOOL_WEIGHTS = {
-    eslint: 0.25,
-    semgrep: 0.30,
-    dependency: 0.20,
-    llm: 0.25
+    eslint: 0.22,
+    semgrep: 0.28,
+    dependency: 0.18,
+    eol: 0.12,
+    llm: 0.20
 };
 
 /**

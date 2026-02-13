@@ -22,6 +22,7 @@ function AppContent() {
     const [prData, setPrData] = useState(null);
     const [prAnalysisResult, setPrAnalysisResult] = useState(null);
     const [prStaticAnalysisResult, setPrStaticAnalysisResult] = useState(null);
+    const [prAiSummary, setPrAiSummary] = useState(null);
     const [prSession, setPrSession] = useState(null);
     const [prLoading, setPrLoading] = useState(false);
     const [prError, setPrError] = useState(null);
@@ -92,6 +93,7 @@ function AppContent() {
 
         setPrLoading(true);
         setPrError(null);
+        setPrAiSummary(null);
 
         try {
             const response = await chrome.runtime.sendMessage({
@@ -111,9 +113,11 @@ function AppContent() {
                 setPrData(response.data.prData);
                 setPrAnalysisResult({
                     analysis: response.data.analysis,
-                    recommendation: response.data.staticAnalysis?.recommendation
+                    recommendation: response.data.staticAnalysis?.recommendation,
+                    reviewEffort: response.data.reviewEffort
                 });
                 setPrStaticAnalysisResult(response.data.staticAnalysis);
+                setPrAiSummary(response.data.aiSummary || null);
                 // Create a session object for thread management
                 setPrSession({
                     sessionId: `pr-${Date.now()}`,
@@ -224,6 +228,7 @@ function AppContent() {
                                 prData={prData}
                                 analysisResult={prAnalysisResult}
                                 staticAnalysisResult={prStaticAnalysisResult}
+                                aiSummary={prAiSummary}
                                 session={prSession}
                                 onRefresh={handlePRRefresh}
                                 onAskQuestion={handlePRAskQuestion}

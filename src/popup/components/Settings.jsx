@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Save, Eye, EyeOff, Key, AlertCircle, CheckCircle, Cpu, Sun, Moon, Palette, Github, GitBranch } from 'lucide-react';
+import { Save, Eye, EyeOff, Key, AlertCircle, CheckCircle, Cpu, Sun, Moon, Palette, Github, GitBranch, Shield } from 'lucide-react';
 import { Button } from './ui/Button';
 import { Card, CardHeader, CardTitle, CardContent } from './ui/Card';
 import { Collapsible } from './ui/Collapsible';
@@ -16,8 +16,8 @@ const LLM_PROVIDERS = {
 
 const AVAILABLE_MODELS = {
     [LLM_PROVIDERS.OPENAI]: [
-        { id: 'openai:gpt-4o', name: 'GPT-4o (Latest Flagship)', recommended: true },
-        { id: 'openai:gpt-4o-mini', name: 'GPT-4o Mini (Fast & Cheap)' },
+        { id: 'openai:gpt-4.1', name: 'GPT-4.1 (Latest Flagship)', recommended: true },
+        { id: 'openai:gpt-4.1-mini', name: 'GPT-4.1 Mini (Fast & Cheap)' },
         { id: 'openai:o1-mini', name: 'o1-mini (Reasoning)' }
     ],
     [LLM_PROVIDERS.ANTHROPIC]: [
@@ -51,7 +51,7 @@ export function Settings({ onClose }) {
     const { theme, toggleTheme } = useTheme();
     const [apiKey, setApiKey] = useState('');
     const [provider, setProvider] = useState(LLM_PROVIDERS.OPENAI);
-    const [model, setModel] = useState('openai:gpt-4o-mini');
+    const [model, setModel] = useState('openai:gpt-4.1-mini');
     const [showKey, setShowKey] = useState(false);
     const [isLoading, setIsLoading] = useState(false);
     const [isSaved, setIsSaved] = useState(false);
@@ -63,6 +63,16 @@ export function Settings({ onClose }) {
     const [gitlabToken, setGitlabToken] = useState('');
     const [showGithubToken, setShowGithubToken] = useState(false);
     const [showGitlabToken, setShowGitlabToken] = useState(false);
+
+    // Review quality settings
+    const [severityThreshold, setSeverityThreshold] = useState('medium');
+    const [groupFindings, setGroupFindings] = useState(true);
+
+    // Analysis feature toggles
+    const [enableOSV, setEnableOSV] = useState(true);
+    const [enableEOL, setEnableEOL] = useState(true);
+    const [enableAdaptiveLearning, setEnableAdaptiveLearning] = useState(true);
+    const [enablePRComments, setEnablePRComments] = useState(false);
 
     // Load settings from background service (with decryption)
     useEffect(() => {
@@ -79,9 +89,19 @@ export function Settings({ onClose }) {
                     setGithubToken(settings.githubToken || '');
                     setGitlabToken(settings.gitlabToken || '');
 
+                    // Load review quality settings
+                    if (settings.reviewSettings) {
+                        setSeverityThreshold(settings.reviewSettings.severityThreshold || 'medium');
+                        setGroupFindings(settings.reviewSettings.groupRelatedFindings !== false);
+                        setEnableOSV(settings.reviewSettings.enableOSV !== false);
+                        setEnableEOL(settings.reviewSettings.enableEOL !== false);
+                        setEnableAdaptiveLearning(settings.reviewSettings.enableAdaptiveLearning !== false);
+                        setEnablePRComments(settings.reviewSettings.enablePRComments === true);
+                    }
+
                     // Load model selection
                     if (settings.model && typeof settings.model === 'string') {
-                        // Check if model has provider prefix (e.g., "openai:gpt-4o")
+                        // Check if model has provider prefix (e.g., "openai:gpt-4.1")
                         if (settings.model.includes(':')) {
                             const providerFromModel = settings.model.split(':')[0];
                             if (Object.values(LLM_PROVIDERS).includes(providerFromModel)) {
@@ -90,12 +110,12 @@ export function Settings({ onClose }) {
                             } else {
                                 // Unknown provider, use default
                                 setProvider(LLM_PROVIDERS.OPENAI);
-                                setModel('openai:gpt-4o');
+                                setModel('openai:gpt-4.1');
                             }
                         } else {
                             // Legacy model without provider prefix, default to OpenAI
                             setProvider(LLM_PROVIDERS.OPENAI);
-                            setModel('openai:gpt-4o');
+                            setModel('openai:gpt-4.1');
                         }
                     }
                 } else {
@@ -141,7 +161,15 @@ export function Settings({ onClose }) {
                         model: model,
                         provider: provider,
                         githubToken: githubToken,
-                        gitlabToken: gitlabToken
+                        gitlabToken: gitlabToken,
+                        reviewSettings: {
+                            severityThreshold: severityThreshold,
+                            groupRelatedFindings: groupFindings,
+                            enableOSV: enableOSV,
+                            enableEOL: enableEOL,
+                            enableAdaptiveLearning: enableAdaptiveLearning,
+                            enablePRComments: enablePRComments
+                        }
                     }
                 }
             });
@@ -429,6 +457,154 @@ export function Settings({ onClose }) {
                             </a>
                             {' '}- Use "read_api" scope
                         </p>
+                    </div>
+                </div>
+            </Collapsible>
+
+            {/* Review Quality Section */}
+            <Collapsible
+                title="Review Quality"
+                icon={Shield}
+                defaultOpen={false}
+                badge={severityThreshold === 'all' ? 'Show All' : `${severityThreshold}+`}
+            >
+                <div className="space-y-4">
+                    <div className="space-y-2">
+                        <label className="text-sm font-medium text-text">Minimum Severity</label>
+                        <select
+                            value={severityThreshold}
+                            onChange={(e) => setSeverityThreshold(e.target.value)}
+                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+                        >
+                            <option value="all">Show All Findings</option>
+                            <option value="low">Low and above</option>
+                            <option value="medium">Medium and above</option>
+                            <option value="high">High and Critical only</option>
+                            <option value="critical">Critical only</option>
+                        </select>
+                        <p className="text-xs text-textMuted">
+                            Filter out low-priority findings to reduce noise
+                        </p>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                            <p className="text-sm font-medium text-text">Group Related Findings</p>
+                            <p className="text-xs text-textMuted">
+                                Collapse similar findings in the same file
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => setGroupFindings(!groupFindings)}
+                            className={`relative w-11 h-6 rounded-full transition-colors ${
+                                groupFindings ? 'bg-primary' : 'bg-surface'
+                            }`}
+                        >
+                            <span
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                                    groupFindings ? 'translate-x-5' : 'translate-x-0'
+                                }`}
+                            />
+                        </button>
+                    </div>
+                </div>
+            </Collapsible>
+
+            {/* Analysis Features Section */}
+            <Collapsible
+                title="Analysis Features"
+                icon={Shield}
+                defaultOpen={false}
+                badge={[enableOSV && 'OSV', enableEOL && 'EOL', enableAdaptiveLearning && 'Learning', enablePRComments && 'Comments'].filter(Boolean).join(', ') || 'None'}
+            >
+                <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                            <p className="text-sm font-medium text-text">OSV Vulnerability Scanning</p>
+                            <p className="text-xs text-textMuted">
+                                Check dependencies against the OSV.dev database
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => setEnableOSV(!enableOSV)}
+                            className={`relative w-11 h-6 rounded-full transition-colors ${
+                                enableOSV ? 'bg-primary' : 'bg-surface'
+                            }`}
+                        >
+                            <span
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                                    enableOSV ? 'translate-x-5' : 'translate-x-0'
+                                }`}
+                            />
+                        </button>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                            <p className="text-sm font-medium text-text">End-of-Life Detection</p>
+                            <p className="text-xs text-textMuted">
+                                Detect EOL runtimes and frameworks
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => setEnableEOL(!enableEOL)}
+                            className={`relative w-11 h-6 rounded-full transition-colors ${
+                                enableEOL ? 'bg-primary' : 'bg-surface'
+                            }`}
+                        >
+                            <span
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                                    enableEOL ? 'translate-x-5' : 'translate-x-0'
+                                }`}
+                            />
+                        </button>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                            <p className="text-sm font-medium text-text">Adaptive Learning</p>
+                            <p className="text-xs text-textMuted">
+                                Reduce noise by learning from dismissed findings
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => setEnableAdaptiveLearning(!enableAdaptiveLearning)}
+                            className={`relative w-11 h-6 rounded-full transition-colors ${
+                                enableAdaptiveLearning ? 'bg-primary' : 'bg-surface'
+                            }`}
+                        >
+                            <span
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                                    enableAdaptiveLearning ? 'translate-x-5' : 'translate-x-0'
+                                }`}
+                            />
+                        </button>
+                    </div>
+
+                    <div className="flex items-center justify-between pt-3 border-t border-border">
+                        <div className="space-y-0.5">
+                            <p className="text-sm font-medium text-text">Post Comments to PR</p>
+                            <p className="text-xs text-textMuted">
+                                Allow posting review comments directly on GitHub/GitLab PRs
+                            </p>
+                            {!enablePRComments && (
+                                <p className="text-xs text-yellow-500">
+                                    Disabled by default — requires a platform token
+                                </p>
+                            )}
+                        </div>
+                        <button
+                            onClick={() => setEnablePRComments(!enablePRComments)}
+                            className={`relative w-11 h-6 rounded-full transition-colors ${
+                                enablePRComments ? 'bg-primary' : 'bg-surface'
+                            }`}
+                        >
+                            <span
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                                    enablePRComments ? 'translate-x-5' : 'translate-x-0'
+                                }`}
+                            />
+                        </button>
                     </div>
                 </div>
             </Collapsible>

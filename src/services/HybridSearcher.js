@@ -84,7 +84,8 @@ export class HybridSearcher {
             useSemanticSearch = true,
             useKeywordSearch = true,
             filters = null,
-            boostFactors = {}
+            boostFactors = {},
+            queryEmbedding = null  // Pre-computed embedding vector for semantic search
         } = options;
 
         // Check cache
@@ -97,7 +98,7 @@ export class HybridSearcher {
         const results = [];
         const expandedLimit = this.config.expandedLimit;
 
-        // Perform keyword search (BM25)
+        // Perform keyword search (BM25) using text query
         let keywordResults = [];
         if (useKeywordSearch) {
             keywordResults = this.bm25Index.search(query, {
@@ -106,19 +107,21 @@ export class HybridSearcher {
             });
         }
 
-        // Perform semantic search (Vector)
+        // Perform semantic search (Vector) using embedding vector
         let semanticResults = [];
-        if (useSemanticSearch && this.vectorStore) {
+        if (useSemanticSearch && this.vectorStore && queryEmbedding) {
             try {
                 semanticResults = await this.vectorStore.search(
                     repoId,
-                    query,
+                    queryEmbedding,
                     expandedLimit,
                     { filters }
                 );
             } catch (error) {
                 console.warn('Semantic search failed, falling back to keyword only:', error);
             }
+        } else if (useSemanticSearch && this.vectorStore && !queryEmbedding) {
+            console.warn('HybridSearcher: No queryEmbedding provided, skipping semantic search. Pass queryEmbedding in options.');
         }
 
         // Fuse results using RRF

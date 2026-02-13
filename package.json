@@ -1,6 +1,6 @@
 {
   "name": "repospector",
-  "version": "4.2.2",
+  "version": "5.0",
   "description": "AI-powered Chrome extension for generating comprehensive test cases from code",
   "author": "AI RepoSpector Team",
   "license": "MIT",

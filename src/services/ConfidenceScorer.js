@@ -7,7 +7,7 @@
  * Algorithm:
  * Finding Confidence = Σ(tool_weight × tool_confidence) + correlation_bonus
  *
- * Weights: ESLint=0.25, Semgrep=0.30, Dependency=0.20, LLM=0.25
+ * Weights: ESLint=0.22, Semgrep=0.28, Dependency=0.18, EOL=0.12, LLM=0.20
  * Bonuses: 2-tool agreement=+0.15, 3-tool=+0.25, LLM corroboration=+0.10
  */
 
@@ -247,7 +247,7 @@ export class ConfidenceScorer {
         // Then ESLint (good bug detection)
         // Then dependency (specific CVEs)
         // Finally LLM (most context but less precise)
-        const priority = { semgrep: 0, eslint: 1, dependency: 2, llm: 3 };
+        const priority = { semgrep: 0, eslint: 1, dependency: 2, eol: 3, llm: 4 };
 
         const sorted = [...group].sort((a, b) => {
             const priorityDiff = priority[a.tool] - priority[b.tool];
@@ -264,7 +264,7 @@ export class ConfidenceScorer {
     generateAggregatedSummary(findings, analysisResults) {
         const bySeverity = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
         const byCategory = {};
-        const byTool = { eslint: 0, semgrep: 0, dependency: 0, llm: 0 };
+        const byTool = { eslint: 0, semgrep: 0, dependency: 0, eol: 0, llm: 0 };
         let corroboratedCount = 0;
 
         for (const finding of findings) {
@@ -330,7 +330,7 @@ export class ConfidenceScorer {
         };
 
         // Initialize agreement matrix
-        const tools = ['eslint', 'semgrep', 'dependency', 'llm'];
+        const tools = ['eslint', 'semgrep', 'dependency', 'eol', 'llm'];
         for (const t1 of tools) {
             report.toolAgreementMatrix[t1] = {};
             for (const t2 of tools) {

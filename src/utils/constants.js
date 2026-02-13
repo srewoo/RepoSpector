@@ -67,10 +67,10 @@ const API_ENDPOINTS = {
 
 const MODELS = {
     // OpenAI Models (Latest 2024-2025)
-    'openai:gpt-4o': {
-        name: 'GPT-4o',
+    'openai:gpt-4.1': {
+        name: 'GPT-4.1',
         provider: LLM_PROVIDERS.OPENAI,
-        modelId: 'gpt-4o',
+        modelId: 'gpt-4.1',
         maxTokens: 16384,
         contextWindow: 128000,
         costPer1kTokens: { input: 0.0025, output: 0.01 },
@@ -78,10 +78,10 @@ const MODELS = {
         supportsCode: true,
         quality: 'premium'
     },
-    'openai:gpt-4o-mini': {
-        name: 'GPT-4o Mini',
+    'openai:gpt-4.1-mini': {
+        name: 'GPT-4.1 Mini',
         provider: LLM_PROVIDERS.OPENAI,
-        modelId: 'gpt-4o-mini',
+        modelId: 'gpt-4.1-mini',
         maxTokens: 16384,
         contextWindow: 128000,
         costPer1kTokens: { input: 0.00015, output: 0.0006 },
@@ -374,7 +374,7 @@ const PERFORMANCE_CONFIG = {
     LAZY_LOADING: true, // Enable lazy loading for components
     VIRTUALIZATION_THRESHOLD: 100, // Items threshold for virtualization
     COMPRESSION_THRESHOLD: 10000, // Characters threshold for compression
-    PREFETCH_MODELS: ['openai:gpt-4o-mini', 'anthropic:claude-3-haiku'], // Models to prefetch
+    PREFETCH_MODELS: ['openai:gpt-4.1-mini', 'anthropic:claude-3-haiku'], // Models to prefetch
     BACKGROUND_PROCESSING: true // Enable background processing
 };
 

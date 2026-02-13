@@ -28,7 +28,8 @@ export function StaticAnalysisResults({
     onRefresh,
     onExport,
     loading = false,
-    compact = false
+    compact = false,
+    repoId = null
 }) {
     const [selectedSeverity, setSelectedSeverity] = useState(null);
     const [selectedCategory, setSelectedCategory] = useState(null);
@@ -37,8 +38,10 @@ export function StaticAnalysisResults({
     const [dismissedFindings, setDismissedFindings] = useState(new Set());
     const [resolvedFindings, setResolvedFindings] = useState(new Set());
     const [expandedFiles, setExpandedFiles] = useState(new Set());
+    const [showAll, setShowAll] = useState(false);
 
-    const { findings = [], summary = {}, riskScore = {} } = results || {};
+    const { findings = [], summary = {}, riskScore = {}, unfilteredCount } = results || {};
+    const isFiltered = unfilteredCount && unfilteredCount > findings.length;
 
     // Filter and sort findings
     const filteredFindings = useMemo(() => {
@@ -93,11 +96,39 @@ export function StaticAnalysisResults({
     const handleDismiss = (finding) => {
         const id = `${finding.filePath}:${finding.line}:${finding.ruleId}`;
         setDismissedFindings(prev => new Set([...prev, id]));
+
+        // Record to adaptive learning
+        if (repoId && finding.ruleId) {
+            chrome.runtime.sendMessage({
+                type: 'RECORD_FINDING_ACTION',
+                data: {
+                    ruleId: finding.ruleId,
+                    repoId,
+                    action: 'dismissed',
+                    filePath: finding.filePath,
+                    findingMessage: finding.message
+                }
+            }).catch(() => {});
+        }
     };
 
     const handleMarkResolved = (finding) => {
         const id = `${finding.filePath}:${finding.line}:${finding.ruleId}`;
         setResolvedFindings(prev => new Set([...prev, id]));
+
+        // Record to adaptive learning
+        if (repoId && finding.ruleId) {
+            chrome.runtime.sendMessage({
+                type: 'RECORD_FINDING_ACTION',
+                data: {
+                    ruleId: finding.ruleId,
+                    repoId,
+                    action: 'resolved',
+                    filePath: finding.filePath,
+                    findingMessage: finding.message
+                }
+            }).catch(() => {});
+        }
     };
 
     const toggleFileExpanded = (file) => {
@@ -276,6 +307,30 @@ export function StaticAnalysisResults({
                         </select>
                     </div>
                 </div>
+
+                {/* Threshold indicator */}
+                {isFiltered && !showAll && (
+                    <div className="flex items-center gap-2 mt-2 text-xs text-textMuted">
+                        <span>Showing {findings.length} of {unfilteredCount} findings (filtered by severity)</span>
+                        <button
+                            onClick={() => setShowAll(true)}
+                            className="text-primary hover:underline"
+                        >
+                            Show All
+                        </button>
+                    </div>
+                )}
+                {showAll && isFiltered && (
+                    <div className="flex items-center gap-2 mt-2 text-xs text-textMuted">
+                        <span>Showing all {unfilteredCount} findings</span>
+                        <button
+                            onClick={() => setShowAll(false)}
+                            className="text-primary hover:underline"
+                        >
+                            Apply Filter
+                        </button>
+                    </div>
+                )}
 
                 {/* Active filters summary */}
                 {(dismissedFindings.size > 0 || resolvedFindings.size > 0) && (

@@ -8,8 +8,8 @@ export class TokenManager {
         // Model token limits (context windows)
         this.modelLimits = {
             // OpenAI
-            'gpt-4o': 128000,
-            'gpt-4o-mini': 128000,
+            'gpt-4.1': 128000,
+            'gpt-4.1-mini': 128000,
             'gpt-4-turbo': 128000,
             'gpt-4': 8192,
             'gpt-3.5-turbo': 16385,
@@ -37,8 +37,8 @@ export class TokenManager {
 
         // Output token limits (max response length)
         this.outputLimits = {
-            'gpt-4o': 16384,
-            'gpt-4o-mini': 16384,
+            'gpt-4.1': 16384,
+            'gpt-4.1-mini': 16384,
             'gpt-4-turbo': 4096,
             'claude-3.5-sonnet': 8192,
             'claude-3-haiku': 4096,
@@ -88,7 +88,7 @@ export class TokenManager {
      * Get maximum context tokens for a model
      */
     getModelLimit(modelIdentifier) {
-        // Extract model name from identifier (e.g., "openai:gpt-4o" -> "gpt-4o")
+        // Extract model name from identifier (e.g., "openai:gpt-4.1" -> "gpt-4.1")
         const modelName = this.extractModelName(modelIdentifier);
         return this.modelLimits[modelName] || this.modelLimits.default;
     }

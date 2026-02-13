@@ -14,7 +14,12 @@ import {
     ExternalLink,
     FileCode,
     Clock,
-    User
+    User,
+    Send,
+    FileText,
+    GitBranch,
+    BookOpen,
+    Copy
 } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent } from './ui/Card';
 import { Button } from './ui/Button';
@@ -29,19 +34,26 @@ export function PRReviewInterface({
     prData,
     analysisResult,
     staticAnalysisResult,
+    aiSummary,
     session,
     onRefresh,
     onAskQuestion,
     onFocusArea,
     loading = false
 }) {
-    const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'findings' | 'static'
+    const [activeTab, setActiveTab] = useState('summary'); // 'summary' | 'overview' | 'findings' | 'static'
     const [selectedFinding, setSelectedFinding] = useState(null);
     const [threadView, setThreadView] = useState(false);
     const [activeThread, setActiveThread] = useState(null);
     const [sendingMessage, setSendingMessage] = useState(false);
+    const [postingReview, setPostingReview] = useState(false);
+    const [postResult, setPostResult] = useState(null); // { success, error }
+    const [generatedDescription, setGeneratedDescription] = useState(null);
+    const [generatedChangelog, setGeneratedChangelog] = useState(null);
+    const [generatedMermaid, setGeneratedMermaid] = useState(null);
+    const [generating, setGenerating] = useState(null); // 'description' | 'changelog' | 'mermaid' | null
 
-    const { analysis, staticAnalysis } = analysisResult || {};
+    const { analysis, staticAnalysis, reviewEffort } = analysisResult || {};
     const staticFindings = staticAnalysisResult?.findings || staticAnalysis?.findings || [];
 
     // Parse findings from LLM analysis text
@@ -345,6 +357,146 @@ export function PRReviewInterface({
         }
     }, [activeThread]);
 
+    // Derive repoId for adaptive learning
+    const repoId = prData?.branches?.targetRepo ||
+        (prUrl ? prUrl.match(/(?:github\.com|gitlab\.com)\/([^/]+\/[^/]+)/)?.[1] : null) ||
+        'unknown';
+
+    // Handle finding-level dismiss (records to adaptive learning)
+    const handleDismissFinding = useCallback(async (finding) => {
+        if (!finding?.ruleId) return;
+        try {
+            await chrome.runtime.sendMessage({
+                type: 'RECORD_FINDING_ACTION',
+                data: {
+                    ruleId: finding.ruleId,
+                    repoId,
+                    action: 'dismissed',
+                    filePath: finding.filePath || finding.file,
+                    findingMessage: finding.message
+                }
+            });
+        } catch (err) {
+            console.error('Failed to record dismiss:', err);
+        }
+    }, [repoId]);
+
+    // Handle finding-level resolve (records to adaptive learning)
+    const handleResolveFinding = useCallback(async (finding) => {
+        if (!finding?.ruleId) return;
+        try {
+            await chrome.runtime.sendMessage({
+                type: 'RECORD_FINDING_ACTION',
+                data: {
+                    ruleId: finding.ruleId,
+                    repoId,
+                    action: 'resolved',
+                    filePath: finding.filePath || finding.file,
+                    findingMessage: finding.message
+                }
+            });
+        } catch (err) {
+            console.error('Failed to record resolve:', err);
+        }
+    }, [repoId]);
+
+    // Post review to PR
+    const handlePostReview = useCallback(async () => {
+        if (!prUrl || postingReview) return;
+        setPostingReview(true);
+        setPostResult(null);
+
+        try {
+            const response = await chrome.runtime.sendMessage({
+                type: 'POST_PR_REVIEW',
+                data: {
+                    prUrl,
+                    analysisResult: staticAnalysisResult || { findings: staticFindings },
+                    aiSummary,
+                    options: {
+                        includeInlineComments: true,
+                        maxFindings: 10,
+                        maxInlineComments: 15,
+                        event: 'COMMENT'
+                    }
+                }
+            });
+
+            if (response.success) {
+                setPostResult({
+                    success: true,
+                    message: `Review posted! ${response.data?.commentsPosted || 0} inline comments added.`
+                });
+            } else {
+                setPostResult({ success: false, error: response.error });
+            }
+        } catch (err) {
+            setPostResult({ success: false, error: err.message });
+        } finally {
+            setPostingReview(false);
+            // Clear result after 5 seconds
+            setTimeout(() => setPostResult(null), 5000);
+        }
+    }, [prUrl, staticAnalysisResult, staticFindings, aiSummary, postingReview]);
+
+    // Generate PR description
+    const handleGenerateDescription = useCallback(async (apply = false) => {
+        if (!prUrl || generating) return;
+        setGenerating('description');
+        try {
+            const response = await chrome.runtime.sendMessage({
+                type: 'GENERATE_PR_DESCRIPTION',
+                data: { prUrl, applyToGit: apply }
+            });
+            if (response.success) {
+                setGeneratedDescription(response.data.description);
+                if (apply) setPostResult({ success: true, message: 'PR description updated!' });
+            }
+        } catch (err) {
+            console.error('Failed to generate description:', err);
+        } finally {
+            setGenerating(null);
+        }
+    }, [prUrl, generating]);
+
+    // Generate changelog
+    const handleGenerateChangelog = useCallback(async () => {
+        if (!prUrl || generating) return;
+        setGenerating('changelog');
+        try {
+            const response = await chrome.runtime.sendMessage({
+                type: 'GENERATE_CHANGELOG',
+                data: { prUrl }
+            });
+            if (response.success) setGeneratedChangelog(response.data.changelog);
+        } catch (err) {
+            console.error('Failed to generate changelog:', err);
+        } finally {
+            setGenerating(null);
+        }
+    }, [prUrl, generating]);
+
+    // Generate Mermaid diagram
+    const handleGenerateMermaid = useCallback(async () => {
+        if (!prUrl || generating) return;
+        setGenerating('mermaid');
+        try {
+            const response = await chrome.runtime.sendMessage({
+                type: 'GENERATE_MERMAID_DIAGRAM',
+                data: { prUrl }
+            });
+            if (response.success) setGeneratedMermaid(response.data.mermaidCode);
+        } catch (err) {
+            console.error('Failed to generate diagram:', err);
+        } finally {
+            setGenerating(null);
+        }
+    }, [prUrl, generating]);
+
+    const handleCopyToClipboard = async (text) => {
+        await navigator.clipboard.writeText(text);
+    };
+
     // Close thread view
     const handleCloseThread = () => {
         setThreadView(false);
@@ -437,6 +589,14 @@ export function PRReviewInterface({
                     </div>
 
                     <div className="flex items-center gap-2">
+                        {reviewEffort && (
+                            <div className="text-right" title={reviewEffort.reasons?.join(', ')}>
+                                <div className="text-lg font-bold text-primary">
+                                    {reviewEffort.score}/5
+                                </div>
+                                <div className="text-xs text-textMuted">~{reviewEffort.estimatedMinutes}m</div>
+                            </div>
+                        )}
                         {riskScore && (
                             <div className="text-right">
                                 <div className={cn('text-lg font-bold', getRiskColor())}>
@@ -458,18 +618,50 @@ export function PRReviewInterface({
                     </div>
                 </div>
 
-                {/* Quick Actions */}
+                {/* Quick Actions + Post to PR */}
                 <div className="mt-4 pt-4 border-t border-border">
-                    <PRQuickActions
-                        onAction={handlePRAction}
-                        disabled={loading}
-                    />
+                    <div className="flex items-center justify-between gap-2">
+                        <PRQuickActions
+                            onAction={handlePRAction}
+                            disabled={loading}
+                        />
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={handlePostReview}
+                            disabled={loading || postingReview || !findings.length}
+                            className="shrink-0 text-xs"
+                        >
+                            {postingReview ? (
+                                <RefreshCw className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                            ) : (
+                                <Send className="w-3.5 h-3.5 mr-1.5" />
+                            )}
+                            {postingReview ? 'Posting...' : 'Post to PR'}
+                        </Button>
+                    </div>
+                    {postResult && (
+                        <div className={cn(
+                            'mt-2 px-3 py-2 rounded-lg text-xs flex items-center gap-2',
+                            postResult.success
+                                ? 'bg-green-500/10 text-green-500'
+                                : 'bg-red-500/10 text-red-400'
+                        )}>
+                            {postResult.success ? (
+                                <CheckCircle className="w-3.5 h-3.5 shrink-0" />
+                            ) : (
+                                <XCircle className="w-3.5 h-3.5 shrink-0" />
+                            )}
+                            {postResult.success ? postResult.message : postResult.error}
+                        </div>
+                    )}
                 </div>
             </Card>
 
             {/* Tabs */}
             <div className="flex border-b border-border">
                 {[
+                    { id: 'summary', label: 'Summary' },
                     { id: 'overview', label: 'Overview' },
                     { id: 'findings', label: `Findings (${findings.length})` },
                     { id: 'static', label: 'Static Analysis' }
@@ -491,6 +683,125 @@ export function PRReviewInterface({
 
             {/* Tab Content */}
             <AnimatePresence mode="wait">
+                {activeTab === 'summary' && (
+                    <motion.div
+                        key="summary"
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -10 }}
+                        className="space-y-4"
+                    >
+                        {aiSummary ? (
+                            <Card>
+                                <CardHeader className="pb-2">
+                                    <CardTitle className="text-sm">PR Summary</CardTitle>
+                                </CardHeader>
+                                <CardContent>
+                                    <MarkdownRenderer content={aiSummary} />
+                                </CardContent>
+                            </Card>
+                        ) : (
+                            <Card className="p-6 text-center">
+                                <p className="text-textMuted text-sm">
+                                    {loading ? 'Generating summary...' : 'No AI summary available for this PR.'}
+                                </p>
+                            </Card>
+                        )}
+
+                        {/* Generation Actions */}
+                        <Card className="p-4">
+                            <p className="text-xs font-medium text-textMuted mb-3">Generate</p>
+                            <div className="flex flex-wrap gap-2">
+                                <Button
+                                    variant="outline" size="sm"
+                                    onClick={() => handleGenerateDescription(false)}
+                                    disabled={!!generating}
+                                    className="text-xs"
+                                >
+                                    {generating === 'description' ? <RefreshCw className="w-3 h-3 mr-1 animate-spin" /> : <FileText className="w-3 h-3 mr-1" />}
+                                    PR Description
+                                </Button>
+                                <Button
+                                    variant="outline" size="sm"
+                                    onClick={handleGenerateMermaid}
+                                    disabled={!!generating}
+                                    className="text-xs"
+                                >
+                                    {generating === 'mermaid' ? <RefreshCw className="w-3 h-3 mr-1 animate-spin" /> : <GitBranch className="w-3 h-3 mr-1" />}
+                                    Diagram
+                                </Button>
+                                <Button
+                                    variant="outline" size="sm"
+                                    onClick={handleGenerateChangelog}
+                                    disabled={!!generating}
+                                    className="text-xs"
+                                >
+                                    {generating === 'changelog' ? <RefreshCw className="w-3 h-3 mr-1 animate-spin" /> : <BookOpen className="w-3 h-3 mr-1" />}
+                                    Changelog
+                                </Button>
+                            </div>
+                        </Card>
+
+                        {/* Generated PR Description */}
+                        {generatedDescription && (
+                            <Card>
+                                <CardHeader className="pb-2">
+                                    <div className="flex items-center justify-between">
+                                        <CardTitle className="text-sm">Generated PR Description</CardTitle>
+                                        <div className="flex gap-1">
+                                            <Button variant="ghost" size="sm" onClick={() => handleCopyToClipboard(generatedDescription)} className="h-7 px-2 text-xs">
+                                                <Copy className="w-3 h-3 mr-1" /> Copy
+                                            </Button>
+                                            <Button variant="outline" size="sm" onClick={() => handleGenerateDescription(true)} className="h-7 px-2 text-xs">
+                                                <Send className="w-3 h-3 mr-1" /> Apply to PR
+                                            </Button>
+                                        </div>
+                                    </div>
+                                </CardHeader>
+                                <CardContent>
+                                    <MarkdownRenderer content={generatedDescription} />
+                                </CardContent>
+                            </Card>
+                        )}
+
+                        {/* Generated Mermaid Diagram */}
+                        {generatedMermaid && (
+                            <Card>
+                                <CardHeader className="pb-2">
+                                    <div className="flex items-center justify-between">
+                                        <CardTitle className="text-sm">Architecture Diagram</CardTitle>
+                                        <Button variant="ghost" size="sm" onClick={() => handleCopyToClipboard('```mermaid\n' + generatedMermaid + '\n```')} className="h-7 px-2 text-xs">
+                                            <Copy className="w-3 h-3 mr-1" /> Copy
+                                        </Button>
+                                    </div>
+                                </CardHeader>
+                                <CardContent>
+                                    <pre className="p-3 bg-background rounded-lg text-xs overflow-x-auto font-mono whitespace-pre-wrap">
+                                        <code>{generatedMermaid}</code>
+                                    </pre>
+                                </CardContent>
+                            </Card>
+                        )}
+
+                        {/* Generated Changelog */}
+                        {generatedChangelog && (
+                            <Card>
+                                <CardHeader className="pb-2">
+                                    <div className="flex items-center justify-between">
+                                        <CardTitle className="text-sm">Changelog Entry</CardTitle>
+                                        <Button variant="ghost" size="sm" onClick={() => handleCopyToClipboard(generatedChangelog)} className="h-7 px-2 text-xs">
+                                            <Copy className="w-3 h-3 mr-1" /> Copy
+                                        </Button>
+                                    </div>
+                                </CardHeader>
+                                <CardContent>
+                                    <MarkdownRenderer content={generatedChangelog} />
+                                </CardContent>
+                            </Card>
+                        )}
+                    </motion.div>
+                )}
+
                 {activeTab === 'overview' && (
                     <motion.div
                         key="overview"
@@ -547,8 +858,8 @@ export function PRReviewInterface({
                                 <div key={`${finding.filePath || finding.file}-${finding.line}-${i}`} className="relative group">
                                     <FindingCard
                                         finding={finding}
-                                        onDismiss={() => { }}
-                                        onMarkResolved={() => { }}
+                                        onDismiss={handleDismissFinding}
+                                        onMarkResolved={handleResolveFinding}
                                     />
                                     <button
                                         onClick={() => handleOpenThread(finding)}
@@ -582,6 +893,7 @@ export function PRReviewInterface({
                             results={staticAnalysisResult}
                             onRefresh={onRefresh}
                             loading={loading}
+                            repoId={repoId}
                         />
                     </motion.div>
                 )}

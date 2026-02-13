@@ -10,6 +10,7 @@ import {
     VULNERABLE_PYTHON_PACKAGES,
     SEVERITY_WEIGHTS
 } from '../utils/staticAnalysisPatterns.js';
+import { LockfileParser } from '../utils/lockfileParser.js';
 
 export class DependencyAnalyzer {
     constructor(options = {}) {
@@ -23,6 +24,9 @@ export class DependencyAnalyzer {
             ...options
         };
 
+        this.osvService = options.osvService || null;
+        this.lockfileParser = new LockfileParser();
+
         // Supported dependency file patterns
         this.dependencyFilePatterns = {
             npm: /package\.json$/,
@@ -33,7 +37,12 @@ export class DependencyAnalyzer {
             composer: /composer\.json$/,
             cargo: /Cargo\.toml$/,
             gradle: /build\.gradle$/,
-            maven: /pom\.xml$/
+            maven: /pom\.xml$/,
+            packageLock: /package-lock\.json$/,
+            yarnLock: /yarn\.lock$/,
+            pipfileLock: /Pipfile\.lock$/,
+            gemfileLock: /Gemfile\.lock$/,
+            cargoLock: /Cargo\.lock$/
         };
     }
 
@@ -489,6 +498,107 @@ export class DependencyAnalyzer {
             confidence: 1.0,
             skipped: true,
             skipReason: reason
+        };
+    }
+
+    /**
+     * Check vulnerabilities using OSV.dev API with static DB fallback
+     */
+    async checkVulnerabilitiesWithOSV(dependencies, fileType, filePath) {
+        if (!this.osvService) {
+            return this.checkVulnerabilities(dependencies, fileType, filePath);
+        }
+
+        const ecosystem = this.osvService.mapEcosystem(fileType);
+        if (!ecosystem) {
+            return this.checkVulnerabilities(dependencies, fileType, filePath);
+        }
+
+        try {
+            const packages = dependencies
+                .filter(d => d.name && d.version)
+                .map(d => ({
+                    name: d.name,
+                    version: d.version.replace(/^[~^>=<]+/, ''),
+                    ecosystem
+                }));
+
+            const osvResults = await this.osvService.queryBatch(packages);
+            const findings = [];
+
+            for (const pkg of packages) {
+                const key = this.osvService.getCacheKey(pkg.name, pkg.version, pkg.ecosystem);
+                const vulns = osvResults.get(key) || [];
+
+                for (const vuln of vulns) {
+                    const dep = dependencies.find(d => d.name === pkg.name);
+                    findings.push({
+                        ruleId: `vulnerable-dependency-${vuln.cve || vuln.id}`,
+                        severity: vuln.severity,
+                        category: 'A06:2021-Vulnerable Components',
+                        packageName: pkg.name,
+                        installedVersion: pkg.version,
+                        cve: vuln.cve,
+                        description: vuln.summary,
+                        dependencyType: dep?.type || 'production',
+                        message: `${pkg.name}@${pkg.version} has known vulnerability ${vuln.cve}: ${vuln.summary}`,
+                        confidence: vuln.severity === 'critical' ? 0.95 : vuln.severity === 'high' ? 0.9 : 0.8,
+                        remediation: vuln.fixedVersions.length > 0
+                            ? `Upgrade to ${vuln.fixedVersions[0]} or later`
+                            : 'Check the vulnerability details for mitigation steps',
+                        filePath,
+                        tool: 'dependency',
+                        osvId: vuln.id,
+                        references: vuln.references
+                    });
+                }
+            }
+
+            return findings;
+        } catch (error) {
+            console.warn('OSV query failed, falling back to static DB:', error.message);
+            return this.checkVulnerabilities(dependencies, fileType, filePath);
+        }
+    }
+
+    /**
+     * Analyze a lockfile for transitive dependency vulnerabilities
+     */
+    async analyzeLockfile(content, context = {}) {
+        const { filePath = 'unknown' } = context;
+        const lockfileType = this.lockfileParser.detectLockfileType(filePath);
+
+        if (!lockfileType) {
+            return this.createEmptyResult(filePath, 'Not a lockfile');
+        }
+
+        const dependencies = this.lockfileParser.parse(content, filePath);
+
+        if (dependencies.length === 0) {
+            return this.createEmptyResult(filePath, 'No dependencies found in lockfile');
+        }
+
+        // Map lockfile type to ecosystem type
+        const ecosystemMap = {
+            packageLock: 'npm', yarnLock: 'npm', pnpmLock: 'npm',
+            pipfileLock: 'pip', poetryLock: 'poetry',
+            gemfileLock: 'gemfile', cargoLock: 'cargo'
+        };
+        const fileType = ecosystemMap[lockfileType] || 'npm';
+
+        const findings = this.osvService
+            ? await this.checkVulnerabilitiesWithOSV(dependencies, fileType, filePath)
+            : this.checkVulnerabilities(dependencies, fileType, filePath);
+
+        return {
+            tool: 'dependency',
+            filePath,
+            fileType: lockfileType,
+            dependencies,
+            findings,
+            summary: this.generateSummary(dependencies, findings),
+            isLockfile: true,
+            totalDependencies: dependencies.length
         };
     }
 

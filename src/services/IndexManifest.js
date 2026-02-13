@@ -8,7 +8,7 @@
 /**
  * Calculate hash for content (using FNV-1a algorithm for speed)
  */
-function hashContent(content) {
+export function hashContent(content) {
     if (!content) return '0';
 
     let hash = 2166136261; // FNV offset basis
@@ -46,8 +46,13 @@ export class IndexManifest {
 
     /**
      * Add or update a file entry
+     * @param {string} filePath
+     * @param {string} content - Full file content
+     * @param {Array<string>} chunkIds
+     * @param {Object} metadata
+     * @param {Object} chunkHashes - Optional Map/Object of chunkId -> contentHash for chunk-level caching
      */
-    addFile(filePath, content, chunkIds = [], metadata = {}) {
+    addFile(filePath, content, chunkIds = [], metadata = {}, chunkHashes = null) {
         const hash = hashContent(content);
         const existingEntry = this.files.get(filePath);
 
@@ -63,6 +68,7 @@ export class IndexManifest {
         const entry = {
             hash,
             chunkIds,
+            chunkHashes: chunkHashes || {},
             lastIndexed: Date.now(),
             size: content?.length || 0,
             language: metadata.language || this.detectLanguage(filePath),
@@ -84,6 +90,49 @@ export class IndexManifest {
         this.metadata.updatedAt = Date.now();
 
         return entry;
+    }
+
+    /**
+     * Compare chunks of a changed file against new chunks
+     * Returns which chunks can be reused vs which need re-embedding
+     *
+     * @param {string} filePath
+     * @param {Array<{id: string, content: string}>} newChunks - New chunks with id and content
+     * @returns {{ reuse: string[], reEmbed: string[], remove: string[] }}
+     */
+    compareChunks(filePath, newChunks) {
+        const entry = this.files.get(filePath);
+        const oldChunkHashes = entry?.chunkHashes || {};
+        const oldChunkIds = new Set(entry?.chunkIds || []);
+
+        const result = {
+            reuse: [],    // Chunk IDs where content hash matches — skip embedding
+            reEmbed: [],  // Chunk IDs where content changed or is new — need embedding
+            remove: []    // Old chunk IDs no longer present — delete from store
+        };
+
+        const newChunkIds = new Set();
+
+        for (const chunk of newChunks) {
+            newChunkIds.add(chunk.id);
+            const newHash = hashContent(chunk.content);
+            const oldHash = oldChunkHashes[chunk.id];
+
+            if (oldHash && oldHash === newHash) {
+                result.reuse.push(chunk.id);
+            } else {
+                result.reEmbed.push(chunk.id);
+            }
+        }
+
+        // Find chunks that existed before but are gone now
+        for (const oldId of oldChunkIds) {
+            if (!newChunkIds.has(oldId)) {
+                result.remove.push(oldId);
+            }
+        }
+
+        return result;
     }
 
     /**

@@ -9,6 +9,9 @@ import { ESLintAnalyzer } from './ESLintAnalyzer.js';
 import { SemgrepAnalyzer } from './SemgrepAnalyzer.js';
 import { DependencyAnalyzer } from './DependencyAnalyzer.js';
 import { ConfidenceScorer } from './ConfidenceScorer.js';
+import { EOLService } from './EOLService.js';
+import { ImportGraphService } from './ImportGraphService.js';
+import { SecretsScanner } from './SecretsScanner.js';
 
 export class StaticAnalysisService {
     constructor(options = {}) {
@@ -17,11 +20,19 @@ export class StaticAnalysisService {
         this.semgrepAnalyzer = new SemgrepAnalyzer(options.semgrep || {});
         this.dependencyAnalyzer = new DependencyAnalyzer(options.dependency || {});
         this.confidenceScorer = new ConfidenceScorer(options.confidence || {});
+        this.eolService = options.eolService || (options.enableEOL !== false ? new EOLService(options.eol || {}) : null);
+        this.importGraphService = options.importGraphService || new ImportGraphService();
+        this.secretsScanner = new SecretsScanner();
+
+        // Optional services (injected from background)
+        this.adaptiveLearningService = options.adaptiveLearningService || null;
+        this.customRulesService = options.customRulesService || null;
 
         this.options = {
             enableESLint: options.enableESLint ?? true,
             enableSemgrep: options.enableSemgrep ?? true,
             enableDependency: options.enableDependency ?? true,
+            enableEOL: options.enableEOL ?? true,
             enableConfidenceAggregation: options.enableConfidenceAggregation ?? true,
             parallelAnalysis: options.parallelAnalysis ?? true,
             minConfidenceThreshold: options.minConfidenceThreshold ?? 0.4,
@@ -247,9 +258,97 @@ export class StaticAnalysisService {
         // Run analysis
         const analysisResult = await this.analyzeFiles(filesToAnalyze, options);
 
+        // Run EOL checks if enabled
+        if (this.options.enableEOL && this.eolService) {
+            try {
+                const eolFindings = await this.eolService.checkDependencies(
+                    // Pass dependencies extracted from analysis
+                    analysisResult.findings
+                        .filter(f => f.tool === 'dependency' && f.packageName)
+                        .map(f => ({ name: f.packageName, version: f.installedVersion })),
+                    // Pass PR files for config file checking
+                    prData.files || []
+                );
+
+                if (eolFindings.length > 0) {
+                    analysisResult.findings.push(...eolFindings);
+                    analysisResult.totalFindings = analysisResult.findings.length;
+                    console.log(`📅 EOL check found ${eolFindings.length} issues`);
+                }
+            } catch (e) {
+                console.warn('EOL check failed:', e.message);
+            }
+        }
+
+        // Run cross-file import graph analysis
+        let importGraphContext = null;
+        if (this.importGraphService) {
+            try {
+                this.importGraphService.buildGraph(prData.files || []);
+                const breakingChanges = this.importGraphService.detectBreakingChanges(prData.files || []);
+                if (breakingChanges.length > 0) {
+                    analysisResult.findings.push(...breakingChanges);
+                    analysisResult.totalFindings = analysisResult.findings.length;
+                    console.log(`🔗 Import graph found ${breakingChanges.length} cross-file issues`);
+                }
+                importGraphContext = this.importGraphService.formatForPrompt(prData.files || []);
+            } catch (e) {
+                console.warn('Import graph analysis failed:', e.message);
+            }
+        }
+
+        // Run secrets detection on PR files
+        try {
+            const secretFindings = this.secretsScanner.scanPRFiles(prData.files || []);
+            if (secretFindings.length > 0) {
+                analysisResult.findings.push(...secretFindings);
+                analysisResult.totalFindings = analysisResult.findings.length;
+                console.log(`🔑 Secrets scan found ${secretFindings.length} exposed secrets`);
+            }
+        } catch (e) {
+            console.warn('Secrets scan failed:', e.message);
+        }
+
+        // Apply adaptive learning adjustments
+        if (this.adaptiveLearningService && options.repoId) {
+            try {
+                analysisResult.findings = await this.adaptiveLearningService.applyAdaptiveScoring(
+                    analysisResult.findings,
+                    options.repoId
+                );
+            } catch (e) {
+                console.warn('Adaptive scoring failed:', e.message);
+            }
+        }
+
+        // Apply custom rules from .repospector.yaml
+        if (this.customRulesService && options.customConfig) {
+            try {
+                analysisResult.findings = this.customRulesService.applyAllRules(
+                    analysisResult.findings,
+                    options.customConfig
+                );
+            } catch (e) {
+                console.warn('Custom rules failed:', e.message);
+            }
+        }
+
+        // Apply noise reduction
+        let processedFindings = analysisResult.findings;
+
+        if (options.severityThreshold && options.severityThreshold !== 'all') {
+            processedFindings = this.applySeverityThreshold(processedFindings, options.severityThreshold);
+        }
+
+        if (options.groupRelatedFindings !== false) {
+            processedFindings = this.groupRelatedFindings(processedFindings);
+        }
+
+        const processedResult = { ...analysisResult, findings: processedFindings };
+
         // Enhance with PR-specific context
         return {
-            ...analysisResult,
+            ...processedResult,
             prContext: {
                 title: prData.title,
                 author: prData.author?.login,
@@ -257,10 +356,14 @@ export class StaticAnalysisService {
                 additions: prData.stats?.additions || 0,
                 deletions: prData.stats?.deletions || 0
             },
+            // Keep unfiltered count for "Show All" toggle
+            unfilteredCount: analysisResult.findings.length,
             // Group findings by file for easier review
-            findingsByFile: this.groupFindingsByFile(analysisResult.findings),
-            // High-level recommendation
-            recommendation: this.generatePRRecommendation(analysisResult)
+            findingsByFile: this.groupFindingsByFile(processedFindings),
+            // High-level recommendation (use unfiltered for accurate verdict)
+            recommendation: this.generatePRRecommendation(analysisResult),
+            // Cross-file import graph context for LLM prompt injection
+            importGraphContext
         };
     }
 
@@ -288,7 +391,7 @@ export class StaticAnalysisService {
      */
     isDependencyFile(filePath) {
         if (!filePath) return false;
-        return /(?:package\.json|requirements\.txt|Pipfile|pyproject\.toml|Gemfile|composer\.json|Cargo\.toml|go\.mod)$/i.test(filePath);
+        return /(?:package\.json|package-lock\.json|yarn\.lock|requirements\.txt|Pipfile|Pipfile\.lock|pyproject\.toml|Gemfile|Gemfile\.lock|composer\.json|Cargo\.toml|Cargo\.lock|go\.mod)$/i.test(filePath);
     }
 
     /**
@@ -497,6 +600,68 @@ export class StaticAnalysisService {
 
         // Update options
         this.options = { ...this.options, ...options };
+    }
+
+    /**
+     * Group related findings (same ruleId + same file within proximity)
+     * @param {Array} findings - Findings array
+     * @param {number} lineProximity - Lines within which findings are considered related
+     * @returns {Array} Findings with groupCount and groupedFindings
+     */
+    groupRelatedFindings(findings, lineProximity = 10) {
+        if (!findings || findings.length === 0) return [];
+
+        const groups = [];
+        const used = new Set();
+
+        for (let i = 0; i < findings.length; i++) {
+            if (used.has(i)) continue;
+
+            const primary = findings[i];
+            const group = [primary];
+            used.add(i);
+
+            for (let j = i + 1; j < findings.length; j++) {
+                if (used.has(j)) continue;
+                const candidate = findings[j];
+
+                if (
+                    candidate.ruleId === primary.ruleId &&
+                    candidate.filePath === primary.filePath &&
+                    Math.abs((candidate.line || 0) - (primary.line || 0)) <= lineProximity
+                ) {
+                    group.push(candidate);
+                    used.add(j);
+                }
+            }
+
+            if (group.length > 1) {
+                groups.push({
+                    ...primary,
+                    groupCount: group.length,
+                    groupedFindings: group.slice(1)
+                });
+            } else {
+                groups.push({ ...primary, groupCount: 1, groupedFindings: [] });
+            }
+        }
+
+        return groups;
+    }
+
+    /**
+     * Filter findings below a severity threshold
+     * @param {Array} findings - Findings array
+     * @param {string} threshold - Minimum severity: 'all' | 'low' | 'medium' | 'high' | 'critical'
+     * @returns {Array} Filtered findings
+     */
+    applySeverityThreshold(findings, threshold = 'all') {
+        if (!threshold || threshold === 'all') return findings;
+
+        const severityRank = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
+        const minRank = severityRank[threshold] || 0;
+
+        return findings.filter(f => (severityRank[f.severity] || 0) >= minRank);
     }
 
     /**

@@ -31,6 +31,10 @@ import { GitLabService } from '../services/GitLabService.js';
 import { LLMService } from '../services/LLMService.js';
 import { PullRequestService } from '../services/PullRequestService.js';
 import { StaticAnalysisService } from '../services/StaticAnalysisService.js';
+import { OSVService } from '../services/OSVService.js';
+import { EOLService } from '../services/EOLService.js';
+import { AdaptiveLearningService } from '../services/AdaptiveLearningService.js';
+import { CustomRulesService } from '../services/CustomRulesService.js';
 import { PRThreadManager } from '../services/PRThreadManager.js';
 import { PRSessionManager } from '../services/PRSessionManager.js';
 import {
@@ -41,6 +45,16 @@ import {
     buildFalsePositiveCheckPrompt,
     getSuggestedQuestions
 } from '../utils/prThreadPrompts.js';
+import {
+    PR_SUMMARY_SYSTEM_PROMPT,
+    buildPRSummaryGenerationPrompt,
+    PR_DESCRIPTION_SYSTEM_PROMPT,
+    buildPRDescriptionPrompt,
+    CHANGELOG_SYSTEM_PROMPT,
+    buildChangelogPrompt,
+    MERMAID_SYSTEM_PROMPT,
+    buildMermaidPrompt
+} from '../utils/prSummaryPrompts.js';
 
 class BackgroundService {
     constructor() {
@@ -69,13 +83,22 @@ class BackgroundService {
             this.githubService = new GitHubService();
             this.gitlabService = new GitLabService();
             this.llmService = new LLMService();
+            this.osvService = new OSVService({ cacheTTL: 86400000 });
+            this.eolService = new EOLService({ cacheTTL: 604800000 });
+            this.adaptiveLearningService = new AdaptiveLearningService();
+            this.customRulesService = new CustomRulesService();
             this.pullRequestService = new PullRequestService();
             this.staticAnalysisService = new StaticAnalysisService({
                 enableESLint: true,
                 enableSemgrep: true,
                 enableDependency: true,
+                enableEOL: true,
                 enableConfidenceAggregation: true,
-                minConfidenceThreshold: 0.4
+                minConfidenceThreshold: 0.4,
+                dependency: { osvService: this.osvService },
+                eolService: this.eolService,
+                adaptiveLearningService: this.adaptiveLearningService,
+                customRulesService: this.customRulesService
             });
             this.prThreadManager = new PRThreadManager({
                 retentionDays: 30,
@@ -100,6 +123,7 @@ class BackgroundService {
         // Initialize encryption service asynchronously and load tokens
         this.initializeEncryptionAsync();
         this.loadTokensAsync();
+        this.osvService.loadCache();
     }
 
     /**
@@ -216,6 +240,9 @@ class BackgroundService {
                 this.ragService.apiKey = settings.apiKey;
                 console.log('✅ RAG API key loaded on startup');
             }
+
+            // Load EOL cache from storage
+            this.eolService.loadCache();
         } catch (error) {
             console.error('❌ Failed to load tokens on startup:', error);
         }
@@ -462,6 +489,34 @@ class BackgroundService {
 
                 case 'GET_PR_SESSION':
                     await this.handleGetPRSession(message, sendResponse);
+                    break;
+
+                case 'POST_PR_REVIEW':
+                    await this.handlePostPRReview(message, sendResponse);
+                    break;
+
+                case 'GENERATE_PR_DESCRIPTION':
+                    await this.handleGeneratePRDescription(message, sendResponse);
+                    break;
+
+                case 'GENERATE_MERMAID_DIAGRAM':
+                    await this.handleGenerateMermaidDiagram(message, sendResponse);
+                    break;
+
+                case 'GENERATE_CHANGELOG':
+                    await this.handleGenerateChangelog(message, sendResponse);
+                    break;
+
+                case 'RECORD_FINDING_ACTION':
+                    await this.handleRecordFindingAction(message, sendResponse);
+                    break;
+
+                case 'GET_LEARNING_STATS':
+                    await this.handleGetLearningStats(message, sendResponse);
+                    break;
+
+                case 'FETCH_CUSTOM_CONFIG':
+                    await this.handleFetchCustomConfig(message, sendResponse);
                     break;
 
                 default:
@@ -1173,7 +1228,7 @@ class BackgroundService {
      * @param {string} model - Model identifier for token limits
      * @returns {array} - Array of messages for OpenAI API
      */
-    buildChatMessages(code, question, languageDetection, context, conversationHistory = [], ragContext = null, model = 'gpt-4o-mini') {
+    buildChatMessages(code, question, languageDetection, context, conversationHistory = [], ragContext = null, model = 'gpt-4.1-mini') {
         const language = languageDetection.language || 'unknown';
 
         // Get model limits
@@ -1911,7 +1966,7 @@ Return only the complete test code with proper syntax for the detected language,
      * Extracts modelId from MODELS config if available, otherwise returns the model as-is
      */
     getModelId(modelIdentifier) {
-        if (!modelIdentifier) return 'gpt-4o-mini'; // default fallback
+        if (!modelIdentifier) return 'gpt-4.1-mini'; // default fallback
 
         // If it's already a plain model name (no provider prefix), return as-is
         if (!modelIdentifier.includes(':')) {
@@ -3131,17 +3186,43 @@ Return only the complete test code with proper syntax for the detected language,
 
             // Step 1: Run static analysis on changed files
             console.log('🔍 Running static analysis on PR files...');
+            // Load review quality settings
+            const settings = await this.getSettings();
+            const reviewSettings = settings.reviewSettings || {};
+
+            // Derive repoId from PR data for adaptive learning
+            const repoId = prData.branches?.targetRepo ||
+                `${prData.author?.login || 'unknown'}/${prData.title || 'unknown'}`;
+
+            // Detect platform and parse owner/repo from PR URL
+            let customConfig = null;
+            try {
+                const urlMatch = prUrl.match(/(?:github\.com|gitlab\.com)\/([^/]+)\/([^/]+)/);
+                if (urlMatch) {
+                    const platform = prUrl.includes('gitlab.com') ? 'gitlab' : 'github';
+                    const owner = urlMatch[1];
+                    const repo = urlMatch[2];
+                    const token = platform === 'gitlab' ? settings.gitlabToken : settings.githubToken;
+                    customConfig = await this.customRulesService.fetchConfig(platform, owner, repo, token);
+                }
+            } catch (e) {
+                console.warn('Failed to fetch custom config:', e.message);
+            }
+
             const staticAnalysisResult = await this.staticAnalysisService.analyzePullRequest(prData, {
                 enableESLint: options.enableESLint !== false,
                 enableSemgrep: options.enableSemgrep !== false,
-                enableDependency: options.enableDependency !== false
+                enableDependency: options.enableDependency !== false,
+                severityThreshold: options.severityThreshold || reviewSettings.severityThreshold || 'all',
+                groupRelatedFindings: options.groupRelatedFindings ?? reviewSettings.groupRelatedFindings ?? true,
+                repoId,
+                customConfig
             });
 
             console.log(`📊 Static analysis found ${staticAnalysisResult.totalFindings} issues`);
 
             // Get RAG context if repo is indexed
             let ragContext = null;
-            const repoId = `${prData.branches?.targetRepo || prData.author?.login}`;
             if (options.useRepoContext !== false) {
                 try {
                     const prDescription = `${prData.title} ${prData.description || ''}`;
@@ -3191,8 +3272,6 @@ Return only the complete test code with proper syntax for the detected language,
             }
 
             // Step 3: Get LLM analysis
-            const settings = await this.getSettings();
-
             const response = await this.llmService.streamChat(
                 [
                     { role: 'system', content: systemPrompt },
@@ -3206,10 +3285,35 @@ Return only the complete test code with proper syntax for the detected language,
                 }
             );
 
+            // Generate AI summary
+            let aiSummary = null;
+            try {
+                const summaryPrompt = buildPRSummaryGenerationPrompt(
+                    prData,
+                    staticAnalysisResult.summary
+                );
+                const summaryResponse = await this.llmService.streamChat(
+                    [
+                        { role: 'system', content: PR_SUMMARY_SYSTEM_PROMPT },
+                        { role: 'user', content: summaryPrompt }
+                    ],
+                    {
+                        provider: settings.provider,
+                        model: settings.model,
+                        apiKey: settings.apiKey,
+                        stream: false
+                    }
+                );
+                aiSummary = summaryResponse.content || summaryResponse;
+            } catch (e) {
+                console.warn('Failed to generate PR summary:', e.message);
+            }
+
             sendResponse({
                 success: true,
                 data: {
                     analysis: response.content || response,
+                    aiSummary,
                     staticAnalysis: {
                         findings: staticAnalysisResult.findings,
                         summary: staticAnalysisResult.summary,
@@ -3217,6 +3321,7 @@ Return only the complete test code with proper syntax for the detected language,
                         recommendation: staticAnalysisResult.recommendation
                     },
                     prSummary: this.pullRequestService.generatePRSummary(prData),
+                    reviewEffort: this.pullRequestService.estimateReviewEffort(prData),
                     prData: {
                         title: prData.title,
                         state: prData.state,
@@ -3661,6 +3766,221 @@ Return only the complete test code with proper syntax for the detected language,
                 success: false,
                 error: this.getErrorMessage(error)
             });
+        }
+    }
+
+    async handleGeneratePRDescription(message, sendResponse) {
+        try {
+            const { prUrl, applyToGit = false } = message.data || message.payload || {};
+            if (!prUrl) { sendResponse({ success: false, error: 'PR URL required' }); return; }
+
+            await this.updatePRServiceTokens();
+            const prData = await this.pullRequestService.fetchPullRequest(prUrl);
+            const settings = await this.getSettings();
+
+            const prompt = buildPRDescriptionPrompt(prData);
+            const response = await this.llmService.streamChat(
+                [
+                    { role: 'system', content: PR_DESCRIPTION_SYSTEM_PROMPT },
+                    { role: 'user', content: prompt }
+                ],
+                { provider: settings.provider, model: settings.model, apiKey: settings.apiKey, stream: false }
+            );
+
+            const description = response.content || response;
+
+            // Optionally write to GitHub/GitLab
+            let applied = false;
+            if (applyToGit) {
+                await this.pullRequestService.updatePRDescription(prUrl, description);
+                applied = true;
+            }
+
+            sendResponse({ success: true, data: { description, applied } });
+        } catch (error) {
+            this.errorHandler.logError('Generate PR Description', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
+    async handleGenerateMermaidDiagram(message, sendResponse) {
+        try {
+            const { prUrl } = message.data || message.payload || {};
+            if (!prUrl) { sendResponse({ success: false, error: 'PR URL required' }); return; }
+
+            await this.updatePRServiceTokens();
+            const prData = await this.pullRequestService.fetchPullRequest(prUrl);
+            const settings = await this.getSettings();
+
+            const prompt = buildMermaidPrompt(prData);
+            const response = await this.llmService.streamChat(
+                [
+                    { role: 'system', content: MERMAID_SYSTEM_PROMPT },
+                    { role: 'user', content: prompt }
+                ],
+                { provider: settings.provider, model: settings.model, apiKey: settings.apiKey, stream: false }
+            );
+
+            let mermaidCode = (response.content || response).trim();
+            // Strip markdown fences if present
+            mermaidCode = mermaidCode.replace(/^```(?:mermaid)?\n?/, '').replace(/\n?```$/, '').trim();
+
+            sendResponse({ success: true, data: { mermaidCode } });
+        } catch (error) {
+            this.errorHandler.logError('Generate Mermaid Diagram', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
+    async handleGenerateChangelog(message, sendResponse) {
+        try {
+            const { prUrl } = message.data || message.payload || {};
+            if (!prUrl) { sendResponse({ success: false, error: 'PR URL required' }); return; }
+
+            await this.updatePRServiceTokens();
+            const prData = await this.pullRequestService.fetchPullRequest(prUrl);
+            const settings = await this.getSettings();
+
+            const prompt = buildChangelogPrompt(prData);
+            const response = await this.llmService.streamChat(
+                [
+                    { role: 'system', content: CHANGELOG_SYSTEM_PROMPT },
+                    { role: 'user', content: prompt }
+                ],
+                { provider: settings.provider, model: settings.model, apiKey: settings.apiKey, stream: false }
+            );
+
+            sendResponse({ success: true, data: { changelog: response.content || response } });
+        } catch (error) {
+            this.errorHandler.logError('Generate Changelog', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
+    async handlePostPRReview(message, sendResponse) {
+        try {
+            const { prUrl, analysisResult, aiSummary, options = {} } = message.data || message.payload || {};
+
+            if (!prUrl) {
+                sendResponse({ success: false, error: 'PR URL is required' });
+                return;
+            }
+
+            // Check if PR comment posting is enabled
+            const settings = await this.getSettings();
+            const reviewSettings = settings.reviewSettings || {};
+            if (reviewSettings.enablePRComments === false) {
+                sendResponse({ success: false, error: 'PR comment posting is disabled in Settings' });
+                return;
+            }
+
+            // Update tokens
+            await this.updatePRServiceTokens();
+
+            // Format the review summary
+            const summaryBody = this.pullRequestService.formatReviewSummary(
+                analysisResult,
+                aiSummary,
+                { maxFindings: options.maxFindings || 10 }
+            );
+
+            // Generate one-click fix suggestions for high/critical findings
+            let findings = analysisResult?.findings || [];
+            if (options.generateFixes !== false) {
+                try {
+                    findings = await this.pullRequestService.generateFixSuggestions(
+                        findings, this.llmService, settings
+                    );
+                } catch (e) {
+                    console.warn('Fix suggestion generation failed:', e.message);
+                }
+            }
+
+            // Format inline comments from findings (with suggestion syntax for fixes)
+            const inlineComments = options.includeInlineComments !== false
+                ? this.pullRequestService.formatInlineComments(
+                    findings,
+                    { maxInlineComments: options.maxInlineComments || 15 }
+                )
+                : [];
+
+            // Post the review
+            const result = await this.pullRequestService.postReview(prUrl, {
+                summary: summaryBody,
+                inlineComments,
+                event: options.event || 'COMMENT' // COMMENT, APPROVE, REQUEST_CHANGES
+            });
+
+            console.log(`✅ Posted PR review: ${result.commentsPosted} inline comments, summary: ${result.hasSummary}`);
+
+            sendResponse({
+                success: true,
+                data: result
+            });
+        } catch (error) {
+            this.errorHandler.logError('Post PR Review', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
+    }
+
+    async handleRecordFindingAction(message, sendResponse) {
+        try {
+            const { ruleId, repoId, action, filePath, findingMessage } = message.data || message.payload || {};
+
+            if (!ruleId || !repoId || !action) {
+                sendResponse({ success: false, error: 'ruleId, repoId, and action are required' });
+                return;
+            }
+
+            await this.adaptiveLearningService.recordAction({
+                ruleId,
+                repoId,
+                action, // 'dismissed' | 'resolved'
+                filePath,
+                findingMessage
+            });
+
+            sendResponse({ success: true });
+        } catch (error) {
+            this.errorHandler.logError('Record Finding Action', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
+    async handleGetLearningStats(message, sendResponse) {
+        try {
+            const { repoId } = message.data || message.payload || {};
+
+            if (!repoId) {
+                sendResponse({ success: false, error: 'repoId is required' });
+                return;
+            }
+
+            const stats = await this.adaptiveLearningService.getStats(repoId);
+            sendResponse({ success: true, data: stats });
+        } catch (error) {
+            this.errorHandler.logError('Get Learning Stats', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
+    async handleFetchCustomConfig(message, sendResponse) {
+        try {
+            const { platform, owner, repo, token } = message.data || message.payload || {};
+
+            if (!platform || !owner || !repo) {
+                sendResponse({ success: false, error: 'platform, owner, and repo are required' });
+                return;
+            }
+
+            const config = await this.customRulesService.fetchConfig(platform, owner, repo, token);
+            sendResponse({ success: true, data: config });
+        } catch (error) {
+            this.errorHandler.logError('Fetch Custom Config', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
         }
     }
 

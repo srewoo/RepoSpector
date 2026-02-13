@@ -20,7 +20,7 @@ export class LLMService {
         const { provider, model, apiKey, stream = false, onChunk, tabId } = options;
 
         const requestData = {
-            model: model || 'openai:gpt-4o-mini',
+            model: model || 'openai:gpt-4.1-mini',
             messages
         };
 
@@ -38,7 +38,7 @@ export class LLMService {
     }
 
     /**
-     * Get provider from model identifier (e.g., "openai:gpt-4o-mini" -> "openai")
+     * Get provider from model identifier (e.g., "openai:gpt-4.1-mini" -> "openai")
      * @param {string} modelIdentifier - Full model identifier with provider prefix
      * @returns {string} Provider name
      */
@@ -49,12 +49,12 @@ export class LLMService {
     }
 
     /**
-     * Get model ID from model identifier (e.g., "openai:gpt-4o-mini" -> "gpt-4o-mini")
+     * Get model ID from model identifier (e.g., "openai:gpt-4.1-mini" -> "gpt-4.1-mini")
      * @param {string} modelIdentifier - Full model identifier
      * @returns {string} Model ID for API calls
      */
     getModelId(modelIdentifier) {
-        if (!modelIdentifier || typeof modelIdentifier !== 'string') return 'gpt-4o-mini';
+        if (!modelIdentifier || typeof modelIdentifier !== 'string') return 'gpt-4.1-mini';
 
         const modelConfig = MODELS[modelIdentifier];
         if (modelConfig?.modelId) {

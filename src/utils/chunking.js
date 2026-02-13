@@ -4,8 +4,8 @@ export class CodeChunker {
         // Token limits for different models
         this.modelLimits = {
             'gpt-4.1': 128000,
-            'gpt-4o': 128000,
-            'gpt-4o-mini': 128000,
+            'gpt-4.1': 128000,
+            'gpt-4.1-mini': 128000,
             'o3': 200000,
             'o3-mini': 200000,
             'gpt-4.1-mini': 128000,

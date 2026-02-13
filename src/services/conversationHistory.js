@@ -16,7 +16,7 @@ export class ConversationHistoryManager {
         this.sessionId = null;
         this.codeContext = null;
         this.initialized = false;
-        this.tokenizer = encodingForModel('gpt-4o-mini');
+        this.tokenizer = encodingForModel('gpt-4.1-mini');
     }
 
     /**

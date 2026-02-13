@@ -67,7 +67,11 @@ const categoryIcons = {
 
 export function FindingCard({ finding, onDismiss, onMarkResolved, compact = false }) {
     const [isExpanded, setIsExpanded] = useState(false);
+    const [showGrouped, setShowGrouped] = useState(false);
     const [copied, setCopied] = useState(false);
+
+    const groupCount = finding.groupCount || 1;
+    const groupedFindings = finding.groupedFindings || [];
 
     const severity = severityConfig[finding.severity] || severityConfig.medium;
     const SeverityIcon = severity.icon;
@@ -169,6 +173,11 @@ export function FindingCard({ finding, onDismiss, onMarkResolved, compact = fals
                         <span className="text-xs text-textMuted truncate">
                             {finding.ruleId || finding.category}
                         </span>
+                        {groupCount > 1 && (
+                            <span className="px-1.5 py-0.5 text-xs rounded bg-purple-500/10 text-purple-400">
+                                {groupCount} similar
+                            </span>
+                        )}
                         {finding.isCorroborated && (
                             <span className="px-1.5 py-0.5 text-xs rounded bg-green-500/10 text-green-500">
                                 Corroborated
@@ -327,6 +336,41 @@ export function FindingCard({ finding, onDismiss, onMarkResolved, compact = fals
                                     </Button>
                                 )}
                             </div>
+
+                            {/* Grouped Similar Findings */}
+                            {groupCount > 1 && (
+                                <div className="mt-4">
+                                    <button
+                                        onClick={() => setShowGrouped(!showGrouped)}
+                                        className="flex items-center gap-2 text-xs text-primary hover:underline"
+                                    >
+                                        {showGrouped ? (
+                                            <ChevronDown className="w-3 h-3" />
+                                        ) : (
+                                            <ChevronRight className="w-3 h-3" />
+                                        )}
+                                        {groupCount - 1} similar finding{groupCount - 1 > 1 ? 's' : ''} in this file
+                                    </button>
+                                    <AnimatePresence>
+                                        {showGrouped && (
+                                            <motion.div
+                                                initial={{ height: 0, opacity: 0 }}
+                                                animate={{ height: 'auto', opacity: 1 }}
+                                                exit={{ height: 0, opacity: 0 }}
+                                                transition={{ duration: 0.15 }}
+                                                className="mt-2 space-y-1 pl-4 border-l-2 border-border"
+                                            >
+                                                {groupedFindings.map((gf, idx) => (
+                                                    <div key={idx} className="text-xs text-textMuted py-1">
+                                                        <span className="text-text">Line {gf.line || '?'}</span>
+                                                        {' '}&mdash; {gf.message}
+                                                    </div>
+                                                ))}
+                                            </motion.div>
+                                        )}
+                                    </AnimatePresence>
+                                </div>
+                            )}
                         </CardContent>
                     </motion.div>
                 )}

@@ -111,13 +111,13 @@ export class Sanitizer {
     sanitizeModel(model) {
         // This would be populated from the constants
         const validModels = [
-            'gpt-4o-mini',
-            'gpt-4o',
+            'gpt-4.1-mini',
+            'gpt-4.1',
             'gpt-4-turbo',
             'gpt-4',
             'gpt-3.5-turbo'
         ];
-        return validModels.includes(model) ? model : 'gpt-4o-mini';
+        return validModels.includes(model) ? model : 'gpt-4.1-mini';
     }
 
     sanitizeNumber(value, min = 0, max = 100, defaultValue = 0) {

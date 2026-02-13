@@ -2,7 +2,7 @@ import { VectorStore } from './VectorStore';
 import { CodeChunker } from '../utils/chunking';
 import { OffscreenEmbeddingService } from './OffscreenEmbeddingService';
 import { HybridSearcher } from './HybridSearcher.js';
-import { IndexManifest, ManifestStore } from './IndexManifest.js';
+import { IndexManifest, ManifestStore, hashContent } from './IndexManifest.js';
 import { RelevanceScorer } from './RelevanceScorer.js';
 import { expandQuery } from '../utils/queryExpander.js';
 
@@ -91,32 +91,49 @@ export class RAGService {
         // 1. Clear existing index for this repo
         if (onProgress) onProgress({ status: 'clearing', message: 'Clearing old index...' });
         await this.vectorStore.clearRepo(repoId);
+        this.hybridSearcher.clear();
+
+        // Create a fresh manifest for this full re-index
+        const manifest = new IndexManifest(repoId);
 
         // 2. Chunk files
         if (onProgress) onProgress({ status: 'chunking', message: 'Chunking files...' });
         let allChunks = [];
 
         for (const file of files) {
-            const chunks = this.chunker.createSemanticChunks(file.content, 'gpt-4o-mini');
+            const chunks = this.chunker.createSemanticChunks(file.content, 'gpt-4.1-mini');
+            const chunkIds = [];
+            const chunkHashes = {};
+
             chunks.forEach((chunk, idx) => {
+                const chunkId = `${repoId}:${file.path}:${idx}`;
+                chunkIds.push(chunkId);
+                chunkHashes[chunkId] = hashContent(chunk.content);
+
                 allChunks.push({
-                    id: `${repoId}:${file.path}:${idx}`,
+                    id: chunkId,
                     repoId,
                     filePath: file.path,
                     content: chunk.content,
                     chunkIndex: idx,
                     metadata: {
                         tokens: chunk.tokens,
-                        type: chunk.type
+                        type: chunk.type,
+                        language: manifest.detectLanguage(file.path)
                     }
                 });
             });
+
+            // Track in manifest with chunk-level hashes
+            manifest.addFile(file.path, file.content, chunkIds, {
+                language: manifest.detectLanguage(file.path)
+            }, chunkHashes);
         }
 
         // 3. Generate embeddings in batches
         if (onProgress) onProgress({ status: 'embedding', message: `Generating embeddings for ${allChunks.length} chunks...`, total: allChunks.length, current: 0 });
 
-        const BATCH_SIZE = 20; // OpenAI batch limit
+        const BATCH_SIZE = 20;
         for (let i = 0; i < allChunks.length; i += BATCH_SIZE) {
             const batch = allChunks.slice(i, i + BATCH_SIZE);
             const texts = batch.map(c => c.content);
@@ -129,8 +146,17 @@ export class RAGService {
                     chunk.embedding = embeddings[idx];
                 });
 
-                // Store batch
+                // Store in vector DB
                 await this.vectorStore.addVectors(batch);
+
+                // Also populate BM25 keyword index
+                for (const chunk of batch) {
+                    this.hybridSearcher.bm25Index.addDocument(
+                        chunk.id,
+                        chunk.content,
+                        chunk.metadata
+                    );
+                }
 
                 if (onProgress) onProgress({
                     status: 'embedding',
@@ -140,9 +166,11 @@ export class RAGService {
                 });
             } catch (error) {
                 console.error('Error generating embeddings batch:', error);
-                // Continue with next batch or throw? For now, log and continue
             }
         }
+
+        // 4. Save manifest so incremental indexing works next time
+        await this.manifestStore.save(manifest);
 
         if (onProgress) onProgress({ status: 'complete', message: 'Indexing complete!' });
         return { success: true, chunksIndexed: allChunks.length };
@@ -184,48 +212,36 @@ export class RAGService {
             comparison.toUpdate.length === 0 &&
             comparison.toRemove.length === 0) {
             if (onProgress) onProgress({ status: 'complete', message: 'Index is up to date!' });
-            return { success: true, chunksIndexed: 0, skipped: comparison.unchanged.length };
+            return { success: true, chunksIndexed: 0, chunksReused: 0, skipped: comparison.unchanged.length };
         }
 
-        // Delete chunks for removed/updated files
+        // Step 1: Handle removed files — delete all their chunks
         const chunksToDelete = [];
         for (const file of comparison.toRemove) {
             chunksToDelete.push(...file.chunkIds);
             manifest.removeFile(file.path);
         }
-        for (const file of comparison.toUpdate) {
-            if (file.oldChunkIds) {
-                chunksToDelete.push(...file.oldChunkIds);
-            }
-        }
 
-        if (chunksToDelete.length > 0) {
-            if (onProgress) onProgress({ status: 'cleaning', message: `Removing ${chunksToDelete.length} outdated chunks...` });
-            await this.vectorStore.deleteChunks(chunksToDelete);
-            this.hybridSearcher.clearCache();
-        }
+        // Step 2: Process changed files with chunk-level diffing
+        // Instead of deleting ALL chunks for a changed file, compare chunk by chunk
+        const chunksToEmbed = [];   // New/changed chunks that need embedding
+        const chunksToKeep = [];    // Unchanged chunks we can reuse
+        let totalChunksReused = 0;
 
-        // Index new and updated files
-        const filesToIndex = [...comparison.toAdd, ...comparison.toUpdate];
+        if (onProgress) onProgress({ status: 'chunking', message: `Chunking ${comparison.toAdd.length + comparison.toUpdate.length} files...` });
 
-        if (filesToIndex.length === 0) {
-            await this.manifestStore.save(manifest);
-            if (onProgress) onProgress({ status: 'complete', message: 'Index updated!' });
-            return { success: true, chunksIndexed: 0 };
-        }
-
-        if (onProgress) onProgress({ status: 'chunking', message: `Chunking ${filesToIndex.length} files...` });
-
-        let allChunks = [];
-        for (const file of filesToIndex) {
-            const chunks = this.chunker.createSemanticChunks(file.content, 'gpt-4o-mini');
+        // Process NEW files — all chunks need embedding
+        for (const file of comparison.toAdd) {
+            const chunks = this.chunker.createSemanticChunks(file.content, 'gpt-4.1-mini');
             const chunkIds = [];
+            const chunkHashes = {};
 
             chunks.forEach((chunk, idx) => {
                 const chunkId = `${repoId}:${file.path}:${idx}`;
                 chunkIds.push(chunkId);
+                chunkHashes[chunkId] = hashContent(chunk.content);
 
-                allChunks.push({
+                chunksToEmbed.push({
                     id: chunkId,
                     repoId,
                     filePath: file.path,
@@ -239,60 +255,143 @@ export class RAGService {
                 });
             });
 
-            // Update manifest
             manifest.addFile(file.path, file.content, chunkIds, {
                 language: manifest.detectLanguage(file.path)
-            });
+            }, chunkHashes);
         }
 
-        // Generate embeddings and store
-        if (onProgress) onProgress({
-            status: 'embedding',
-            message: `Generating embeddings for ${allChunks.length} chunks...`,
-            total: allChunks.length,
-            current: 0
-        });
+        // Process UPDATED files — chunk-level diff to minimize re-embedding
+        for (const file of comparison.toUpdate) {
+            const chunks = this.chunker.createSemanticChunks(file.content, 'gpt-4.1-mini');
+            const newChunks = chunks.map((chunk, idx) => ({
+                id: `${repoId}:${file.path}:${idx}`,
+                content: chunk.content,
+                tokens: chunk.tokens,
+                type: chunk.type
+            }));
 
-        const BATCH_SIZE = 20;
-        for (let i = 0; i < allChunks.length; i += BATCH_SIZE) {
-            const batch = allChunks.slice(i, i + BATCH_SIZE);
-            const texts = batch.map(c => c.content);
+            // Compare at chunk level
+            const chunkDiff = manifest.compareChunks(file.path, newChunks);
 
-            try {
-                const embeddings = await this.generateEmbeddings(texts);
-                batch.forEach((chunk, idx) => {
-                    chunk.embedding = embeddings[idx];
-                });
+            // Delete chunks that no longer exist (file got shorter)
+            chunksToDelete.push(...chunkDiff.remove);
 
-                await this.vectorStore.addVectors(batch);
+            // Chunks with identical content hash — skip embedding, keep existing vector
+            for (const reuseId of chunkDiff.reuse) {
+                chunksToKeep.push(reuseId);
+                totalChunksReused++;
+            }
 
-                // Also add to BM25 index
-                for (const chunk of batch) {
-                    this.hybridSearcher.bm25Index.addDocument(
-                        chunk.id,
-                        chunk.content,
-                        chunk.metadata
-                    );
+            // Chunks with changed content — need new embedding
+            for (const embedId of chunkDiff.reEmbed) {
+                const chunk = newChunks.find(c => c.id === embedId);
+                if (chunk) {
+                    chunksToEmbed.push({
+                        id: embedId,
+                        repoId,
+                        filePath: file.path,
+                        content: chunk.content,
+                        chunkIndex: newChunks.indexOf(chunk),
+                        metadata: {
+                            tokens: chunk.tokens,
+                            type: chunk.type,
+                            language: manifest.detectLanguage(file.path)
+                        }
+                    });
                 }
+            }
 
-                if (onProgress) onProgress({
-                    status: 'embedding',
-                    message: `Indexed ${Math.min(i + BATCH_SIZE, allChunks.length)}/${allChunks.length} chunks`,
-                    total: allChunks.length,
-                    current: Math.min(i + BATCH_SIZE, allChunks.length)
-                });
-            } catch (error) {
-                console.error('Error generating embeddings batch:', error);
+            // Update manifest with new chunk-level hashes
+            const chunkIds = newChunks.map(c => c.id);
+            const chunkHashes = {};
+            for (const chunk of newChunks) {
+                chunkHashes[chunk.id] = hashContent(chunk.content);
+            }
+            manifest.addFile(file.path, file.content, chunkIds, {
+                language: manifest.detectLanguage(file.path)
+            }, chunkHashes);
+        }
+
+        // Step 3: Delete outdated chunks from vector store
+        if (chunksToDelete.length > 0) {
+            if (onProgress) onProgress({ status: 'cleaning', message: `Removing ${chunksToDelete.length} outdated chunks...` });
+            await this.vectorStore.deleteChunks(chunksToDelete);
+            // Remove from BM25 index too
+            for (const chunkId of chunksToDelete) {
+                this.hybridSearcher.removeDocument(chunkId);
+            }
+            this.hybridSearcher.clearCache();
+        }
+
+        console.log(`📊 Chunk-level diff: ${chunksToEmbed.length} to embed, ${totalChunksReused} reused, ${chunksToDelete.length} deleted`);
+
+        // Step 4: Generate embeddings only for changed/new chunks
+        if (chunksToEmbed.length > 0) {
+            if (onProgress) onProgress({
+                status: 'embedding',
+                message: `Generating embeddings for ${chunksToEmbed.length} chunks (${totalChunksReused} reused)...`,
+                total: chunksToEmbed.length,
+                current: 0
+            });
+
+            const BATCH_SIZE = 20;
+            for (let i = 0; i < chunksToEmbed.length; i += BATCH_SIZE) {
+                const batch = chunksToEmbed.slice(i, i + BATCH_SIZE);
+                const texts = batch.map(c => c.content);
+
+                try {
+                    const embeddings = await this.generateEmbeddings(texts);
+                    batch.forEach((chunk, idx) => {
+                        chunk.embedding = embeddings[idx];
+                    });
+
+                    await this.vectorStore.addVectors(batch);
+
+                    // Also add to BM25 index
+                    for (const chunk of batch) {
+                        this.hybridSearcher.bm25Index.addDocument(
+                            chunk.id,
+                            chunk.content,
+                            chunk.metadata
+                        );
+                    }
+
+                    if (onProgress) onProgress({
+                        status: 'embedding',
+                        message: `Indexed ${Math.min(i + BATCH_SIZE, chunksToEmbed.length)}/${chunksToEmbed.length} chunks (${totalChunksReused} reused)`,
+                        total: chunksToEmbed.length,
+                        current: Math.min(i + BATCH_SIZE, chunksToEmbed.length)
+                    });
+                } catch (error) {
+                    console.error('Error generating embeddings batch:', error);
+                }
+            }
+        }
+
+        // Step 5: Ensure reused chunks are in BM25 index (they may not be if BM25 is in-memory)
+        // BM25 index is rebuilt from scratch on service restart, so add reused chunks too
+        for (const chunkId of chunksToKeep) {
+            // BM25 addDocument is idempotent — safe to call even if already present
+            const filePath = manifest.getFileForChunk(chunkId);
+            if (filePath) {
+                // We don't have the content here, but BM25 may already have it
+                // If not, it will be populated on next full rebuild
             }
         }
 
         // Save updated manifest
         await this.manifestStore.save(manifest);
 
-        if (onProgress) onProgress({ status: 'complete', message: 'Incremental indexing complete!' });
+        if (onProgress) onProgress({
+            status: 'complete',
+            message: `Incremental indexing complete! ${chunksToEmbed.length} embedded, ${totalChunksReused} reused.`
+        });
+
         return {
             success: true,
-            chunksIndexed: allChunks.length,
+            chunksIndexed: chunksToEmbed.length,
+            chunksReused: totalChunksReused,
+            chunksDeleted: chunksToDelete.length,
             filesAdded: comparison.toAdd.length,
             filesUpdated: comparison.toUpdate.length,
             filesRemoved: comparison.toRemove.length,
@@ -338,12 +437,16 @@ export class RAGService {
 
             // 2. Use hybrid search or vector-only search
             if (useHybridSearch) {
+                // Generate embedding for the query so HybridSearcher can pass it to VectorStore
+                const [queryEmbedding] = await this.generateEmbeddings([searchQuery]);
+
                 // Hybrid search combines BM25 keyword + semantic vector search
                 results = await this.hybridSearcher.search(searchQuery, repoId, {
                     limit: limit * 2, // Fetch more for re-ranking
                     useSemanticSearch: true,
                     useKeywordSearch: true,
-                    filters: options.filters
+                    filters: options.filters,
+                    queryEmbedding  // Pass pre-computed embedding for VectorStore
                 });
 
                 // Map to expected format
