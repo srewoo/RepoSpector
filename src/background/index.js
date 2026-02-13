@@ -57,6 +57,7 @@ import {
     buildMermaidPrompt,
     generateRepoMindmapCode
 } from '../utils/prSummaryPrompts.js';
+import { generateRepoInfo } from '../utils/repoInfoGenerator.js';
 
 class BackgroundService {
     constructor() {
@@ -511,6 +512,10 @@ class BackgroundService {
 
                 case 'GENERATE_REPO_MINDMAP':
                     await this.handleGenerateRepoMindmap(message, sendResponse);
+                    break;
+
+                case 'GENERATE_REPO_INFO':
+                    await this.handleGenerateRepoInfo(message, sendResponse);
                     break;
 
                 case 'RECORD_FINDING_ACTION':
@@ -3944,6 +3949,71 @@ Return only the complete test code with proper syntax for the detected language,
             sendResponse({ success: true, data: { mermaidCode } });
         } catch (error) {
             this.errorHandler.logError('Generate Repo Mindmap', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
+    async handleGenerateRepoInfo(message, sendResponse) {
+        try {
+            const { repoId: providedRepoId, url: providedUrl, tabId } = message.data || message.payload || {};
+
+            // Get URL from tab if not provided (popup iframe can't access tab.url without tabs permission)
+            let url = providedUrl;
+            if (!url && tabId) {
+                try {
+                    const tab = await chrome.tabs.get(tabId);
+                    url = tab?.url;
+                } catch (e) {
+                    console.warn('Could not get tab URL:', e);
+                }
+            }
+
+            // Always derive repoId from URL when available (matches indexing format)
+            let repoId = null;
+            if (url) {
+                if (url.includes('github.com')) {
+                    repoId = this.githubService.getRepoId(url);
+                } else if (url.includes('gitlab.com')) {
+                    repoId = this.gitlabService.getRepoId(url);
+                }
+            }
+            if (!repoId) {
+                repoId = providedRepoId;
+            }
+
+            if (!repoId) {
+                sendResponse({ success: false, error: 'Repository ID or URL required' });
+                return;
+            }
+
+            // Get file contents from VectorStore (indexed chunks)
+            await this.ragService.init();
+            const fileContents = await this.ragService.vectorStore.getFileContents(repoId);
+
+            if (!fileContents || fileContents.size === 0) {
+                sendResponse({ success: false, error: 'No indexed files found for this repository. Please index the repo first.' });
+                return;
+            }
+
+            // Build import dependency graph from file contents
+            const importGraphService = new ImportGraphService();
+            const files = [];
+            for (const [filePath, content] of fileContents) {
+                files.push({ filename: filePath, content });
+            }
+            const importGraph = importGraphService.buildGraph(files);
+
+            // Generate RepoInfo markdown — free & instant, no LLM
+            const repoInfoMarkdown = generateRepoInfo(fileContents, importGraph, repoId);
+
+            if (!repoInfoMarkdown) {
+                sendResponse({ success: false, error: 'Failed to generate RepoInfo.' });
+                return;
+            }
+
+            sendResponse({ success: true, data: { repoInfoMarkdown, repoId } });
+        } catch (error) {
+            this.errorHandler.logError('Generate RepoInfo', error);
             sendResponse({ success: false, error: this.getErrorMessage(error) });
         }
     }

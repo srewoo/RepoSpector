@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Bot, User, Sparkles, AlertCircle, Database, GitBranch, Clock, Network } from 'lucide-react';
+import { Send, Bot, User, Sparkles, AlertCircle, Database, GitBranch, Clock, Network, FileText, Download } from 'lucide-react';
 import { Button } from './ui/Button';
 import { Modal } from './ui/Modal';
 import { CodePreview } from './CodePreview';
@@ -512,6 +512,10 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
             // Detect mindmap request
             const isMindmapRequest = lowerPrompt.includes('mindmap') && lowerPrompt.includes('repo');
 
+            // Detect repo info request
+            const isRepoInfoRequest = lowerPrompt.includes('repo') &&
+                (lowerPrompt.includes('repoinfo') || lowerPrompt.includes('repo info'));
+
             const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
             // Route to appropriate handler
@@ -544,6 +548,39 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                     id: Date.now() + 1,
                     role: 'assistant',
                     content: 'Please index the repository first to generate a mindmap. Use the indexing feature in settings.',
+                    type: 'text'
+                };
+                setMessages(prev => [...prev, aiMessage]);
+            } else if (isRepoInfoRequest && isRepoIndexed && currentRepo) {
+                setStreamingPhase('Generating RepoInfo.md...');
+
+                const response = await sendMessage('GENERATE_REPO_INFO', {
+                    repoId: currentRepo.repoId,
+                    url: tab?.url
+                });
+
+                setStreamingPhase('');
+
+                if (response.success && response.data?.repoInfoMarkdown) {
+                    const aiMessage = {
+                        id: Date.now() + 1,
+                        role: 'assistant',
+                        content: `Here's the complete RepoInfo for **${currentRepo.repoId}**:`,
+                        type: 'repoinfo',
+                        repoInfoMarkdown: response.data.repoInfoMarkdown,
+                        repoId: response.data.repoId
+                    };
+                    setMessages(prev => [...prev, aiMessage]);
+                    conversationHistory.addMessage(aiMessage).catch(console.error);
+                } else {
+                    throw new Error(response.error || 'Failed to generate RepoInfo');
+                }
+            } else if (isRepoInfoRequest && !isRepoIndexed) {
+                setStreamingPhase('');
+                const aiMessage = {
+                    id: Date.now() + 1,
+                    role: 'assistant',
+                    content: 'Please index the repository first to generate RepoInfo.md. Use the indexing feature in settings.',
                     type: 'text'
                 };
                 setMessages(prev => [...prev, aiMessage]);
@@ -748,7 +785,7 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                         key={msg.id}
                         className={cn(
                             "flex gap-3",
-                            (msg.type === 'code' || msg.type === 'mindmap') ? "max-w-full" : "max-w-[90%]",
+                            (msg.type === 'code' || msg.type === 'mindmap' || msg.type === 'repoinfo') ? "max-w-full" : "max-w-[90%]",
                             msg.role === 'user' ? "ml-auto flex-row-reverse" : ""
                         )}
                     >
@@ -764,7 +801,7 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                             {msg.type === 'info' && <Sparkles className="w-5 h-5" />}
                         </div>
 
-                        <div className={cn("space-y-2", (msg.type === 'code' || msg.type === 'mindmap') ? "flex-1 min-w-0" : "w-full")}>
+                        <div className={cn("space-y-2", (msg.type === 'code' || msg.type === 'mindmap' || msg.type === 'repoinfo') ? "flex-1 min-w-0" : "w-full")}>
                             {msg.content && (
                                 <div className={cn(
                                     "p-3 rounded-2xl text-sm",
@@ -798,13 +835,22 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                                         </button>
                                     ))}
                                     {isRepoIndexed && (
-                                        <button
-                                            onClick={() => setInput('generate repo mindmap')}
-                                            className="px-3 py-1.5 text-xs bg-primary/10 hover:bg-primary/20 border border-primary/30 rounded-full text-primary hover:text-primary transition-colors cursor-pointer flex items-center gap-1"
-                                        >
-                                            <Network className="w-3 h-3" />
-                                            Generate repo mindmap
-                                        </button>
+                                        <>
+                                            <button
+                                                onClick={() => setInput('generate repo mindmap')}
+                                                className="px-3 py-1.5 text-xs bg-primary/10 hover:bg-primary/20 border border-primary/30 rounded-full text-primary hover:text-primary transition-colors cursor-pointer flex items-center gap-1"
+                                            >
+                                                <Network className="w-3 h-3" />
+                                                Generate repo mindmap
+                                            </button>
+                                            <button
+                                                onClick={() => setInput('generate repo info')}
+                                                className="px-3 py-1.5 text-xs bg-primary/10 hover:bg-primary/20 border border-primary/30 rounded-full text-primary hover:text-primary transition-colors cursor-pointer flex items-center gap-1"
+                                            >
+                                                <FileText className="w-3 h-3" />
+                                                Generate RepoInfo.md
+                                            </button>
+                                        </>
                                     )}
                                 </div>
                             )}
@@ -813,6 +859,44 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                             {msg.type === 'mindmap' && msg.mermaidCode && (
                                 <div className="animate-fade-in mt-2">
                                     <MermaidDiagram code={msg.mermaidCode} className="rounded-lg" />
+                                </div>
+                            )}
+
+                            {/* RepoInfo.md rendering */}
+                            {msg.type === 'repoinfo' && msg.repoInfoMarkdown && (
+                                <div className="animate-fade-in mt-2 space-y-2">
+                                    <div className="max-h-[400px] overflow-y-auto bg-background border border-border rounded-lg p-4">
+                                        <MarkdownRenderer content={msg.repoInfoMarkdown} showCopy={true} />
+                                    </div>
+                                    <div className="flex items-center gap-3">
+                                        <button
+                                            onClick={() => {
+                                                try {
+                                                    const blob = new Blob([msg.repoInfoMarkdown], { type: 'text/markdown' });
+                                                    const url = URL.createObjectURL(blob);
+                                                    const a = document.createElement('a');
+                                                    a.href = url;
+                                                    a.download = `RepoInfo-${(msg.repoId || 'repo').replace(/\//g, '-')}.md`;
+                                                    a.click();
+                                                    URL.revokeObjectURL(url);
+                                                } catch (e) {
+                                                    console.error('Download failed:', e);
+                                                }
+                                            }}
+                                            className="text-xs text-textMuted hover:text-text transition-colors flex items-center gap-1"
+                                        >
+                                            <Download className="w-3 h-3" />
+                                            Download RepoInfo.md
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                navigator.clipboard.writeText(msg.repoInfoMarkdown).catch(console.error);
+                                            }}
+                                            className="text-xs text-textMuted hover:text-text transition-colors"
+                                        >
+                                            Copy to clipboard
+                                        </button>
+                                    </div>
                                 </div>
                             )}
 
