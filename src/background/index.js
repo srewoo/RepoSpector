@@ -55,9 +55,13 @@ import {
     buildChangelogPrompt,
     MERMAID_SYSTEM_PROMPT,
     buildMermaidPrompt,
-    generateRepoMindmapCode
+    generateRepoMindmapCode,
+    REPO_MINDMAP_ENRICHMENT_SYSTEM_PROMPT,
+    buildRepoMindmapEnrichmentPrompt,
+    buildImportSummary
 } from '../utils/prSummaryPrompts.js';
-import { generateRepoInfo } from '../utils/repoInfoGenerator.js';
+import { generateRepoInfo, buildExtractedDataSummary, insertAfterHeader } from '../utils/repoInfoGenerator.js';
+import { REPO_INFO_ENRICHMENT_SYSTEM_PROMPT, buildRepoInfoEnrichmentPrompt } from '../utils/repoInfoPrompts.js';
 
 class BackgroundService {
     constructor() {
@@ -3946,7 +3950,32 @@ Return only the complete test code with proper syntax for the detected language,
                 return;
             }
 
-            sendResponse({ success: true, data: { mermaidCode } });
+            // LLM enrichment pass (optional — only if API key is configured)
+            let finalMermaidCode = mermaidCode;
+            try {
+                const settings = await this.getSettings();
+                if (settings.apiKey) {
+                    const importSummary = buildImportSummary(importGraph, filePaths);
+                    const response = await this.llmService.streamChat(
+                        [
+                            { role: 'system', content: REPO_MINDMAP_ENRICHMENT_SYSTEM_PROMPT },
+                            { role: 'user', content: buildRepoMindmapEnrichmentPrompt(repoId, filePaths, importSummary) }
+                        ],
+                        { provider: settings.provider, model: settings.model, apiKey: settings.apiKey, stream: false }
+                    );
+                    let llmMermaid = (response.content || response).trim();
+                    llmMermaid = llmMermaid.replace(/^```(?:mermaid)?\n?/, '').replace(/\n?```$/, '').trim();
+                    llmMermaid = this.sanitizeMermaidCode(llmMermaid);
+                    // Validate: must start with 'flowchart' or 'graph'
+                    if (/^(flowchart|graph)\s/i.test(llmMermaid)) {
+                        finalMermaidCode = llmMermaid;
+                    }
+                }
+            } catch (e) {
+                console.warn('LLM mindmap enrichment failed, using code-based output:', e.message);
+            }
+
+            sendResponse({ success: true, data: { mermaidCode: finalMermaidCode } });
         } catch (error) {
             this.errorHandler.logError('Generate Repo Mindmap', error);
             sendResponse({ success: false, error: this.getErrorMessage(error) });
@@ -4011,7 +4040,29 @@ Return only the complete test code with proper syntax for the detected language,
                 return;
             }
 
-            sendResponse({ success: true, data: { repoInfoMarkdown, repoId } });
+            // LLM enrichment pass (optional — only if API key is configured)
+            let finalMarkdown = repoInfoMarkdown;
+            try {
+                const settings = await this.getSettings();
+                if (settings.apiKey) {
+                    const extractedSummary = buildExtractedDataSummary(fileContents, importGraph, repoId);
+                    const response = await this.llmService.streamChat(
+                        [
+                            { role: 'system', content: REPO_INFO_ENRICHMENT_SYSTEM_PROMPT },
+                            { role: 'user', content: buildRepoInfoEnrichmentPrompt(repoId, extractedSummary) }
+                        ],
+                        { provider: settings.provider, model: settings.model, apiKey: settings.apiKey, stream: false }
+                    );
+                    const enrichedSections = (response.content || response).trim();
+                    if (enrichedSections) {
+                        finalMarkdown = insertAfterHeader(repoInfoMarkdown, enrichedSections);
+                    }
+                }
+            } catch (e) {
+                console.warn('LLM RepoInfo enrichment failed, using pattern-matched output only:', e.message);
+            }
+
+            sendResponse({ success: true, data: { repoInfoMarkdown: finalMarkdown, repoId } });
         } catch (error) {
             this.errorHandler.logError('Generate RepoInfo', error);
             sendResponse({ success: false, error: this.getErrorMessage(error) });

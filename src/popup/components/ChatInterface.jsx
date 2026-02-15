@@ -814,7 +814,7 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                                     {msg.role === 'assistant' ? (
                                         <MarkdownRenderer
                                             content={msg.content}
-                                            showCopy={msg.type !== 'code' && msg.type !== 'welcome'}
+                                            showCopy={msg.type !== 'code' && msg.type !== 'welcome' && msg.type !== 'repoinfo'}
                                         />
                                     ) : (
                                         msg.content

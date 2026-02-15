@@ -65,7 +65,13 @@ List 2-4 areas that reviewers should focus on, with file references.
 - Lines added/removed
 - Risk level (Low/Medium/High based on change scope and static analysis)
 
-Keep the entire summary under 300 words.`;
+## P0 Test Cases
+List 3-5 high-level P0 (critical-path) test scenarios that must pass before this PR is safe to merge.
+Each test case should be one sentence, focusing on the core functionality affected by the changes.
+Format as a checklist:
+- [ ] Test case description
+
+Keep the entire summary under 400 words.`;
 
     return prompt;
 }
@@ -105,6 +111,10 @@ A brief 2-3 sentence overview of what this PR does and why.
 
 ## Testing
 - How these changes were tested or should be tested
+
+## P0 Test Cases
+- [ ] List 3-5 critical-path test scenarios that must pass before this PR is safe to merge
+- [ ] Each test case should be one sentence focusing on the core functionality affected by the changes
 
 ## Checklist
 - [ ] Code follows project conventions
@@ -370,4 +380,68 @@ export function categorizeFiles(files) {
     }
 
     return categories;
+}
+
+// ── Repo Mindmap LLM Enrichment ─────────────────────────────────────────────
+
+export const REPO_MINDMAP_ENRICHMENT_SYSTEM_PROMPT = `You are a software architecture diagram expert. Generate a Mermaid flowchart that visualizes a repository's architecture with domain-meaningful groupings and annotated relationships. Output ONLY valid Mermaid syntax — no markdown code fences, no explanations.`;
+
+/**
+ * Build prompt for LLM-enriched repo mindmap
+ */
+export function buildRepoMindmapEnrichmentPrompt(repoId, filePaths, importSummary) {
+    const repoName = repoId.split('/').pop() || repoId;
+
+    return `Generate a Mermaid flowchart for the repository **${repoName}**.
+
+### File Structure
+${filePaths.slice(0, 40).join('\n')}
+${filePaths.length > 40 ? `\n...and ${filePaths.length - 40} more files` : ''}
+
+### Import Dependencies
+${importSummary}
+
+### Rules
+- Use \`flowchart LR\` (left-to-right) syntax
+- Group files into subgraphs by **domain concern** (e.g., "Authentication", "Data Layer", "API Routes"), NOT just directory names
+- Add edge labels for key relationships (e.g., \`-->|"data flow"|\`, \`-->|"events"|\`)
+- Highlight entry points and hub files with different node shapes (\`((...))\` for entry, \`[...]\` for standard)
+- Use styling: \`classDef hub fill:#6366f1,stroke:#818cf8,color:#fff,font-weight:bold\`
+- Max 25 nodes — prioritize the most connected/important files
+- Output ONLY the Mermaid code, starting with "flowchart"
+- Do NOT wrap in markdown code fences`;
+}
+
+/**
+ * Build a condensed import graph summary for LLM context.
+ * Shows the top connections without sending full file contents.
+ */
+export function buildImportSummary(importGraph, filePaths) {
+    if (!importGraph || importGraph.size === 0) return 'No import data available.';
+
+    const connections = [];
+    const connectionCount = {};
+
+    for (const [fp, data] of importGraph) {
+        if (!data?.imports) continue;
+        connectionCount[fp] = (connectionCount[fp] || 0) + data.imports.length;
+        for (const imp of data.imports) {
+            if (imp.source && (imp.source.startsWith('.') || imp.source.startsWith('src'))) {
+                connections.push(`${fp} --> ${imp.source}`);
+            }
+        }
+    }
+
+    // Top files by connection count
+    const topFiles = Object.entries(connectionCount)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 15);
+
+    let summary = `Top connected files:\n`;
+    summary += topFiles.map(([fp, count]) => `- ${fp} (${count} imports)`).join('\n');
+    summary += `\n\nKey dependency edges:\n`;
+    summary += connections.slice(0, 30).join('\n');
+    if (connections.length > 30) summary += `\n...and ${connections.length - 30} more edges`;
+
+    return summary;
 }

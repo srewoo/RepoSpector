@@ -1144,8 +1144,19 @@ function generateTestStructure(fileContents, filePaths) {
 
     const frameworks = new Set();
     let totalTests = 0;
+
+    // --- Categorize test files by type ---
+    const e2ePattern = /e2e|cypress|playwright|selenium/i;
+    const integPattern = /integration|integ/i;
+    const testTypes = { unit: [], integration: [], e2e: [] };
+
+    // Per-file data: test count and describe block names
+    const fileTestData = new Map(); // filePath -> { count, describes: string[] }
+
     for (const tf of testFiles) {
         const content = fileContents.get(tf) || '';
+
+        // Framework detection
         if (/jest|from 'jest'/.test(content)) frameworks.add('Jest');
         if (/mocha|from 'mocha'/.test(content)) frameworks.add('Mocha');
         if (/vitest|from 'vitest'/.test(content)) frameworks.add('Vitest');
@@ -1153,10 +1164,37 @@ function generateTestStructure(fileContents, filePaths) {
         if (/unittest/.test(content)) frameworks.add('unittest');
         if (/cypress/.test(content)) frameworks.add('Cypress');
         if (/playwright/.test(content)) frameworks.add('Playwright');
-        totalTests += (content.match(/\bit\s*\(/g) || []).length +
+
+        const testCount = (content.match(/\bit\s*\(/g) || []).length +
             (content.match(/\btest\s*\(/g) || []).length +
             (content.match(/\bdef\s+test_/g) || []).length;
+        totalTests += testCount;
+
+        // Extract describe block names (JS/TS) and test class names (Python)
+        const describes = [];
+        const describeRe = /describe\s*\(\s*['"`]([^'"`]+)['"`]/g;
+        let dm;
+        while ((dm = describeRe.exec(content)) !== null) {
+            describes.push(dm[1]);
+        }
+        // Python test classes
+        const pyClassRe = /class\s+(Test\w+)/g;
+        while ((dm = pyClassRe.exec(content)) !== null) {
+            describes.push(dm[1]);
+        }
+
+        fileTestData.set(tf, { count: testCount, describes });
+
+        // Categorize by type
+        if (e2ePattern.test(tf)) {
+            testTypes.e2e.push(tf);
+        } else if (integPattern.test(tf)) {
+            testTypes.integration.push(tf);
+        } else {
+            testTypes.unit.push(tf);
+        }
     }
+
     if (frameworks.size === 0) {
         for (const tf of testFiles) {
             const c = fileContents.get(tf) || '';
@@ -1164,10 +1202,63 @@ function generateTestStructure(fileContents, filePaths) {
         }
     }
 
+    // --- Build markdown ---
     let md = `## Test Structure\n\n| Metric | Value |\n|--------|-------|\n| Test Files | ${testFiles.length} |\n| Approximate Test Cases | ~${totalTests} |\n`;
     if (frameworks.size > 0) md += `| Frameworks | ${[...frameworks].join(', ')} |\n`;
     md += '\n';
 
+    // --- Test Types table ---
+    const typeEntries = [
+        ['Unit', testTypes.unit],
+        ['Integration', testTypes.integration],
+        ['E2E', testTypes.e2e],
+    ].filter(([, files]) => files.length > 0);
+
+    if (typeEntries.length > 1 || (typeEntries.length === 1 && typeEntries[0][0] !== 'Unit')) {
+        md += '### Test Types\n\n| Type | Files | Test Cases |\n|------|-------|------------|\n';
+        for (const [type, files] of typeEntries) {
+            const count = files.reduce((sum, fp) => sum + (fileTestData.get(fp)?.count || 0), 0);
+            md += `| ${type} | ${files.length} | ~${count} |\n`;
+        }
+        md += '\n';
+    }
+
+    // --- Test Coverage by Area ---
+    const areaDirs = {};
+    for (const tf of testFiles) {
+        const dir = tf.split('/').slice(0, -1).join('/') || '(root)';
+        if (!areaDirs[dir]) areaDirs[dir] = [];
+        areaDirs[dir].push(tf);
+    }
+
+    const areaEntries = Object.entries(areaDirs)
+        .map(([dir, files]) => {
+            const totalCount = files.reduce((sum, fp) => sum + (fileTestData.get(fp)?.count || 0), 0);
+            const allDescribes = files.flatMap(fp => {
+                const data = fileTestData.get(fp);
+                if (data?.describes?.length > 0) return data.describes;
+                // Fallback: derive subject from filename (e.g., Foo.test.js → Foo)
+                const name = fp.split('/').pop().replace(/\.(test|spec|e2e|integration)\.[^.]+$/, '');
+                return name ? [name] : [];
+            });
+            return { dir, files, totalCount, describes: [...new Set(allDescribes)] };
+        })
+        .filter(a => a.describes.length > 0)
+        .sort((a, b) => b.totalCount - a.totalCount);
+
+    if (areaEntries.length > 0) {
+        md += '### Test Coverage by Area\n\n';
+        for (const { dir, files, totalCount, describes } of areaEntries) {
+            md += `**\`${dir}/\`** (${files.length} test file${files.length > 1 ? 's' : ''}, ~${totalCount} tests)\n`;
+            for (const desc of describes.slice(0, 8)) {
+                md += `- ${desc}\n`;
+            }
+            if (describes.length > 8) md += `- ...and ${describes.length - 8} more\n`;
+            md += '\n';
+        }
+    }
+
+    // --- Test Files by Directory (existing) ---
     const testDirs = {};
     for (const tf of testFiles) {
         const dir = tf.split('/').slice(0, -1).join('/') || '(root)';
@@ -1284,4 +1375,118 @@ function resolveImportTarget(source, fromFile, fileSet) {
         if (fileSet.has(slashPath + ext)) return [slashPath + ext];
     }
     return [];
+}
+
+// ── LLM Enrichment Helpers ──────────────────────────────────────────────────
+
+/**
+ * Build a condensed summary of extracted repo data for LLM context.
+ * Keeps token count low (~500-800 tokens) while providing enough signal
+ * for the LLM to generate meaningful narrative sections.
+ */
+export function buildExtractedDataSummary(fileContents, importGraph, repoId) {
+    const filePaths = [...fileContents.keys()].sort();
+    const totalFiles = filePaths.length;
+
+    // Language distribution
+    let totalLines = 0;
+    const langCount = {};
+    for (const fp of filePaths) {
+        const lang = langFromPath(fp);
+        if (lang) langCount[lang] = (langCount[lang] || 0) + 1;
+        totalLines += countLines(fileContents.get(fp));
+    }
+    const topLangs = Object.entries(langCount).sort((a, b) => b[1] - a[1]).slice(0, 5);
+
+    // Architecture layers
+    const layerPatterns = [
+        { layer: 'Frontend/UI', re: /components?|views?|pages?|layouts?|popup|ui|frontend|templates?/i },
+        { layer: 'Backend/API', re: /routes?|controllers?|api|handlers?|endpoints?|server|backend|middleware/i },
+        { layer: 'Services', re: /services?|providers?|managers?|workers?/i },
+        { layer: 'Models/Data', re: /models?|entities|types?|schemas?/i },
+        { layer: 'Events', re: /events?|consumers?|producers?|callbacks?|listeners?/i },
+        { layer: 'Utils', re: /utils?|helpers?|lib|common|shared|tools?/i },
+        { layer: 'Tests', re: /tests?|specs?|__tests__|e2e/i },
+        { layer: 'Config', re: /config|\.github|docker|scripts?|deploy|ci/i },
+    ];
+    const layerCounts = {};
+    for (const fp of filePaths) {
+        const parts = fp.toLowerCase().split('/');
+        for (const { layer, re } of layerPatterns) {
+            if (parts.some(p => re.test(p))) {
+                layerCounts[layer] = (layerCounts[layer] || 0) + 1;
+                break;
+            }
+        }
+    }
+
+    // Hub files (most connected)
+    const connectionCount = {};
+    if (importGraph) {
+        for (const [fp, data] of importGraph) {
+            if (!data?.imports) continue;
+            for (const imp of data.imports) {
+                connectionCount[fp] = (connectionCount[fp] || 0) + 1;
+            }
+        }
+    }
+    const hubFiles = Object.entries(connectionCount)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 8)
+        .map(([fp, count]) => `${fp} (${count} connections)`);
+
+    // Test files
+    const testFiles = filePaths.filter(fp => /\.(test|spec|e2e|integration)\.[^.]+$|__tests__|test\//i.test(fp));
+
+    // API routes count
+    let apiRouteCount = 0;
+    for (const [, content] of fileContents) {
+        if (!content) continue;
+        apiRouteCount += (content.match(/\.(get|post|put|delete|patch)\s*\(\s*['"]/gi) || []).length;
+        apiRouteCount += (content.match(/@(?:app|router)\.(get|post|put|delete|patch)\s*\(/gi) || []).length;
+    }
+
+    // Entry points
+    const entryPoints = filePaths.filter(fp => {
+        const name = fp.split('/').pop().toLowerCase();
+        return /\.(js|ts|py|java|go)$/.test(fp) && /^(index|main|app|server|start|entry|manage|wsgi)\./i.test(name);
+    }).slice(0, 8);
+
+    // Top-level directories
+    const topDirs = [...new Set(filePaths.map(fp => fp.split('/')[0]))].sort().slice(0, 15);
+
+    // Build summary text
+    let summary = `Repository: ${repoId}
+Files: ${totalFiles} | Lines: ~${totalLines.toLocaleString()}
+Languages: ${topLangs.map(([l, c]) => `${l} (${c})`).join(', ')}
+
+Top-level directories: ${topDirs.join(', ')}
+
+Architecture layers:
+${Object.entries(layerCounts).map(([layer, count]) => `- ${layer}: ${count} files`).join('\n')}
+
+Entry points: ${entryPoints.length > 0 ? entryPoints.join(', ') : 'none detected'}
+API endpoints: ~${apiRouteCount}
+Test files: ${testFiles.length} of ${totalFiles} total files`;
+
+    if (hubFiles.length > 0) {
+        summary += `\n\nHub files (most imports/connections):\n${hubFiles.map(h => `- ${h}`).join('\n')}`;
+    }
+
+    return summary;
+}
+
+/**
+ * Insert LLM-enriched sections after the header in the RepoInfo markdown.
+ * Splits on the first --- separator and inserts the enrichment there.
+ */
+export function insertAfterHeader(repoInfoMarkdown, enrichedSections) {
+    const separatorIndex = repoInfoMarkdown.indexOf('\n\n---\n\n');
+    if (separatorIndex === -1) {
+        // No separator found — prepend after first line
+        return repoInfoMarkdown + '\n\n---\n\n' + enrichedSections;
+    }
+    const header = repoInfoMarkdown.slice(0, separatorIndex);
+    const rest = repoInfoMarkdown.slice(separatorIndex);
+    return header + '\n\n---\n\n' + enrichedSections + rest;
 }
