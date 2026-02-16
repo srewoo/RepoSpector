@@ -69,6 +69,7 @@ class BackgroundService {
         this.processingQueue = [];
         this.heartbeatInterval = null;
         this.activeTabs = new Map(); // Track active processing tabs
+        this.prScoreCache = new Map(); // Cache PR scores for consistency
 
         // Initialize services
         try {
@@ -3192,6 +3193,11 @@ Return only the complete test code with proper syntax for the detected language,
 
             console.log('📋 Analyzing PR with static analysis:', prUrl);
 
+            // Clear cached scores if force refresh is requested
+            if (options.forceRefresh) {
+                this.prScoreCache.delete(prUrl);
+            }
+
             // Update tokens for PR service
             await this.updatePRServiceTokens();
 
@@ -3235,6 +3241,16 @@ Return only the complete test code with proper syntax for the detected language,
             });
 
             console.log(`📊 Static analysis found ${staticAnalysisResult.totalFindings} issues`);
+
+            // Compute deterministic scores and cache them for consistency
+            const reviewEffort = this.pullRequestService.estimateReviewEffort(prData);
+            const riskScore = staticAnalysisResult.riskScore;
+
+            // Cache scores by PR URL so repeated analyses return the same values
+            if (!this.prScoreCache.has(prUrl)) {
+                this.prScoreCache.set(prUrl, { reviewEffort, riskScore });
+            }
+            const cachedScores = this.prScoreCache.get(prUrl);
 
             // Get RAG context if repo is indexed
             let ragContext = null;
@@ -3332,11 +3348,11 @@ Return only the complete test code with proper syntax for the detected language,
                     staticAnalysis: {
                         findings: staticAnalysisResult.findings,
                         summary: staticAnalysisResult.summary,
-                        riskScore: staticAnalysisResult.riskScore,
+                        riskScore: cachedScores.riskScore,
                         recommendation: staticAnalysisResult.recommendation
                     },
                     prSummary: this.pullRequestService.generatePRSummary(prData),
-                    reviewEffort: this.pullRequestService.estimateReviewEffort(prData),
+                    reviewEffort: cachedScores.reviewEffort,
                     prData: {
                         title: prData.title,
                         state: prData.state,
@@ -3850,18 +3866,62 @@ Return only the complete test code with proper syntax for the detected language,
     }
 
     /**
-     * Sanitize LLM-generated Mermaid code to fix common syntax issues
+     * Sanitize LLM-generated Mermaid code to fix common syntax issues.
+     * Handles nested brackets, unquoted parentheses/braces in labels, etc.
      */
     sanitizeMermaidCode(code) {
-        // Fix node labels with nested brackets: A[text [inner]] → A["text inner"]
-        // Process line by line
+        // Detect diagram type to apply appropriate sanitization
+        const firstLine = code.trim().split('\n')[0].trim().toLowerCase();
+        const isSequenceDiagram = firstLine.startsWith('sequencediagram');
+
+        if (isSequenceDiagram) {
+            // For sequence diagrams: minimal sanitization, just fix common LLM issues
+            return code.split('\n').map(line => {
+                const trimmed = line.trim();
+                // Skip empty, comments, and keywords
+                if (!trimmed || trimmed.startsWith('%%') || trimmed === 'end' ||
+                    trimmed === 'sequenceDiagram' ||
+                    /^(participant|actor|activate|deactivate|Note\s|alt|else|opt|loop|par|and|rect|critical|break)\s*/i.test(trimmed)) {
+                    return line;
+                }
+                // Fix <br> tags that some LLMs add (Mermaid prefers \\n in sequence diagrams)
+                return line.replace(/<br\s*\/?>/gi, '\\n');
+            }).join('\n');
+        }
+
+        // Flowchart sanitization
         return code.split('\n').map(line => {
-            // Match node definitions: ID[label] or ID(label) etc.
-            // Fix lines where brackets appear inside labels
-            return line.replace(/(\w+)\[([^\]]*)\[([^\]]*)\]([^\]]*)\]/g, (_, id, pre, inner, post) => {
-                const label = `${pre}${inner}${post}`.replace(/[\[\]]/g, '').trim();
-                return `${id}["${label}"]`;
-            });
+            const trimmed = line.trim();
+            // Skip non-node lines
+            if (!trimmed || trimmed.startsWith('%%') || trimmed === 'end' ||
+                trimmed.startsWith('class ') || trimmed.startsWith('classDef ') ||
+                trimmed.startsWith('style ') || trimmed.startsWith('linkStyle ') ||
+                /^(flowchart|graph|subgraph)\s/.test(trimmed)) {
+                return line;
+            }
+
+            // Strip quotes from edge labels: -->|"text"| → -->|text|
+            line = line.replace(/(\|)\s*"([^"]*?)"\s*(\|)/g, '$1$2$3');
+
+            // Skip edge-only lines (e.g. "A --> B")
+            if (/^\s*\w+\s*(-->|---|-\.->|==>|-.->|--)\s*\w+/.test(line) && !/[\[({\"]/.test(line)) {
+                return line;
+            }
+
+            // Fix node definitions where labels contain Mermaid-special characters.
+            const indent = line.match(/^(\s*)/)[1];
+            return line.replace(
+                /(\b[A-Za-z_]\w*)\s*([\[({])(\({0,2})(.*?)(\){0,2})([\])}])/g,
+                (match, id, open, extraOpen, label, extraClose, close) => {
+                    if (label.startsWith('"') && label.endsWith('"')) return match;
+                    const fullLabel = `${extraOpen}${label}${extraClose}`;
+                    if (/[()[\]{}<>|#&]/.test(fullLabel)) {
+                        const cleanLabel = fullLabel.replace(/[()[\]{}<>|]/g, ' ').replace(/\s+/g, ' ').trim();
+                        return `${id}${open}"${cleanLabel}"${close}`;
+                    }
+                    return match;
+                }
+            );
         }).join('\n');
     }
 
@@ -3966,14 +4026,19 @@ Return only the complete test code with proper syntax for the detected language,
                     let llmMermaid = (response.content || response).trim();
                     llmMermaid = llmMermaid.replace(/^```(?:mermaid)?\n?/, '').replace(/\n?```$/, '').trim();
                     llmMermaid = this.sanitizeMermaidCode(llmMermaid);
-                    // Validate: must start with 'flowchart' or 'graph'
-                    if (/^(flowchart|graph)\s/i.test(llmMermaid)) {
+                    // Validate: must start with 'flowchart' or 'graph' and have reasonable content
+                    if (/^(flowchart|graph)\s/i.test(llmMermaid) && llmMermaid.split('\n').length >= 3) {
                         finalMermaidCode = llmMermaid;
+                    } else {
+                        console.warn('LLM mindmap output invalid, using code-based output');
                     }
                 }
             } catch (e) {
                 console.warn('LLM mindmap enrichment failed, using code-based output:', e.message);
             }
+
+            // Always sanitize the final output regardless of source
+            finalMermaidCode = this.sanitizeMermaidCode(finalMermaidCode);
 
             sendResponse({ success: true, data: { mermaidCode: finalMermaidCode } });
         } catch (error) {

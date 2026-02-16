@@ -19,7 +19,8 @@ import {
     FileText,
     GitBranch,
     BookOpen,
-    Copy
+    Copy,
+    Download
 } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent } from './ui/Card';
 import { Button } from './ui/Button';
@@ -52,7 +53,8 @@ export function PRReviewInterface({
     const [generatedDescription, setGeneratedDescription] = useState(null);
     const [generatedChangelog, setGeneratedChangelog] = useState(null);
     const [generatedMermaid, setGeneratedMermaid] = useState(null);
-    const [generating, setGenerating] = useState(null); // 'description' | 'changelog' | 'mermaid' | null
+    const [generatedRepoInfo, setGeneratedRepoInfo] = useState(null);
+    const [generating, setGenerating] = useState(null); // 'description' | 'changelog' | 'mermaid' | 'repoinfo' | null
 
     const { analysis, staticAnalysis, reviewEffort } = analysisResult || {};
     const staticFindings = staticAnalysisResult?.findings || staticAnalysis?.findings || [];
@@ -494,6 +496,27 @@ export function PRReviewInterface({
         }
     }, [prUrl, generating]);
 
+    const handleGenerateRepoInfo = useCallback(async () => {
+        if (!prUrl || generating) return;
+        setGenerating('repoinfo');
+        try {
+            const response = await chrome.runtime.sendMessage({
+                type: 'GENERATE_REPO_INFO',
+                data: { url: prUrl }
+            });
+            if (response.success && response.data?.repoInfoMarkdown) {
+                setGeneratedRepoInfo({
+                    markdown: response.data.repoInfoMarkdown,
+                    repoId: response.data.repoId
+                });
+            }
+        } catch (err) {
+            console.error('Failed to generate RepoInfo:', err);
+        } finally {
+            setGenerating(null);
+        }
+    }, [prUrl, generating]);
+
     const handleCopyToClipboard = async (text) => {
         await navigator.clipboard.writeText(text);
     };
@@ -554,19 +577,33 @@ export function PRReviewInterface({
             {/* PR Header */}
             <Card className="p-4">
                 <div className="flex items-start gap-3">
-                    <div className="p-2 rounded-lg bg-primary/10">
+                    <div className="p-2 rounded-lg bg-primary/10 shrink-0">
                         <GitPullRequest className="w-5 h-5 text-primary" />
                     </div>
 
                     <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                            <h2 className="text-lg font-medium text-text truncate">
-                                {prData?.title || 'Pull Request'}
-                            </h2>
-                            {getVerdictBadge()}
+                        <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                                <h2 className="text-lg font-medium text-text truncate">
+                                    {prData?.title || 'Pull Request'}
+                                </h2>
+                                <div className="flex items-center gap-2 flex-wrap mt-1">
+                                    {getVerdictBadge()}
+                                </div>
+                            </div>
+                            {prUrl && (
+                                <a
+                                    href={prUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="p-2 hover:bg-surface rounded-lg transition-colors shrink-0"
+                                >
+                                    <ExternalLink className="w-4 h-4 text-textMuted" />
+                                </a>
+                            )}
                         </div>
 
-                        <div className="flex items-center gap-3 mt-1 text-xs text-textMuted">
+                        <div className="flex items-center gap-3 mt-2 text-xs text-textMuted">
                             {prData?.author && (
                                 <span className="flex items-center gap-1">
                                     <User className="w-3 h-3" />
@@ -587,34 +624,26 @@ export function PRReviewInterface({
                                 </span>
                             )}
                         </div>
-                    </div>
 
-                    <div className="flex items-center gap-2">
-                        {reviewEffort && (
-                            <div className="text-right" title={reviewEffort.reasons?.join(', ')}>
-                                <div className="text-lg font-bold text-primary">
-                                    {reviewEffort.score}/5
-                                </div>
-                                <div className="text-xs text-textMuted">~{reviewEffort.estimatedMinutes}m</div>
+                        {(reviewEffort || riskScore) && (
+                            <div className="flex items-center gap-3 mt-3">
+                                {reviewEffort && (
+                                    <div className="text-center px-3 py-1.5 rounded-lg bg-primary/5 border border-primary/10" title={`Review Complexity: ${reviewEffort.label || ''}\nEstimated review time: ~${reviewEffort.estimatedMinutes} minutes\n${reviewEffort.reasons?.join('\n') || ''}`}>
+                                        <div className="text-sm font-bold text-primary leading-tight">
+                                            {reviewEffort.score}/5
+                                        </div>
+                                        <div className="text-[10px] text-textMuted leading-tight mt-0.5">Complexity · ~{reviewEffort.estimatedMinutes}m</div>
+                                    </div>
+                                )}
+                                {riskScore && (
+                                    <div className="text-center px-3 py-1.5 rounded-lg bg-surface border border-border" title={`Code Health Score: ${riskScore.score}/100\nRisk Level: ${riskScore.level || 'unknown'}\n${riskScore.description || ''}\n\n100 = No issues, 0 = Critical risk`}>
+                                        <div className={cn('text-sm font-bold leading-tight', getRiskColor())}>
+                                            {riskScore.score}/100
+                                        </div>
+                                        <div className="text-[10px] text-textMuted leading-tight mt-0.5">Health</div>
+                                    </div>
+                                )}
                             </div>
-                        )}
-                        {riskScore && (
-                            <div className="text-right">
-                                <div className={cn('text-lg font-bold', getRiskColor())}>
-                                    {riskScore.score}
-                                </div>
-                                <div className="text-xs text-textMuted">Risk Score</div>
-                            </div>
-                        )}
-                        {prUrl && (
-                            <a
-                                href={prUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="p-2 hover:bg-surface rounded-lg transition-colors"
-                            >
-                                <ExternalLink className="w-4 h-4 text-textMuted" />
-                            </a>
                         )}
                     </div>
                 </div>
@@ -729,7 +758,7 @@ export function PRReviewInterface({
                                     className="text-xs"
                                 >
                                     {generating === 'mermaid' ? <RefreshCw className="w-3 h-3 mr-1 animate-spin" /> : <GitBranch className="w-3 h-3 mr-1" />}
-                                    Diagram
+                                    Sequence Diagram
                                 </Button>
                                 <Button
                                     variant="outline" size="sm"
@@ -739,6 +768,15 @@ export function PRReviewInterface({
                                 >
                                     {generating === 'changelog' ? <RefreshCw className="w-3 h-3 mr-1 animate-spin" /> : <BookOpen className="w-3 h-3 mr-1" />}
                                     Changelog
+                                </Button>
+                                <Button
+                                    variant="outline" size="sm"
+                                    onClick={handleGenerateRepoInfo}
+                                    disabled={!!generating}
+                                    className="text-xs"
+                                >
+                                    {generating === 'repoinfo' ? <RefreshCw className="w-3 h-3 mr-1 animate-spin" /> : <FileText className="w-3 h-3 mr-1" />}
+                                    RepoInfo.md
                                 </Button>
                             </div>
                         </Card>
@@ -765,12 +803,12 @@ export function PRReviewInterface({
                             </Card>
                         )}
 
-                        {/* Generated Mermaid Diagram */}
+                        {/* Generated Sequence Diagram */}
                         {generatedMermaid && (
                             <Card>
                                 <CardHeader className="pb-2">
                                     <div className="flex items-center justify-between">
-                                        <CardTitle className="text-sm">Architecture Diagram</CardTitle>
+                                        <CardTitle className="text-sm">Sequence Diagram</CardTitle>
                                         <Button variant="ghost" size="sm" onClick={() => handleCopyToClipboard('```mermaid\n' + generatedMermaid + '\n```')} className="h-7 px-2 text-xs">
                                             <Copy className="w-3 h-3 mr-1" /> Copy
                                         </Button>
@@ -795,6 +833,45 @@ export function PRReviewInterface({
                                 </CardHeader>
                                 <CardContent>
                                     <MarkdownRenderer content={generatedChangelog} />
+                                </CardContent>
+                            </Card>
+                        )}
+
+                        {/* Generated RepoInfo.md */}
+                        {generatedRepoInfo && (
+                            <Card>
+                                <CardHeader className="pb-2">
+                                    <div className="flex items-center justify-between">
+                                        <CardTitle className="text-sm">RepoInfo.md</CardTitle>
+                                        <div className="flex gap-1">
+                                            <Button variant="ghost" size="sm" onClick={() => handleCopyToClipboard(generatedRepoInfo.markdown)} className="h-7 px-2 text-xs">
+                                                <Copy className="w-3 h-3 mr-1" /> Copy
+                                            </Button>
+                                            <button
+                                                onClick={() => {
+                                                    try {
+                                                        const blob = new Blob([generatedRepoInfo.markdown], { type: 'text/markdown' });
+                                                        const url = URL.createObjectURL(blob);
+                                                        const a = document.createElement('a');
+                                                        a.href = url;
+                                                        a.download = `RepoInfo-${(generatedRepoInfo.repoId || 'repo').replace(/\//g, '-')}.md`;
+                                                        a.click();
+                                                        URL.revokeObjectURL(url);
+                                                    } catch (e) {
+                                                        console.error('Download failed:', e);
+                                                    }
+                                                }}
+                                                className="h-7 px-2 text-xs text-textMuted hover:text-text transition-colors flex items-center gap-1"
+                                            >
+                                                <Download className="w-3 h-3" /> Download
+                                            </button>
+                                        </div>
+                                    </div>
+                                </CardHeader>
+                                <CardContent>
+                                    <div className="max-h-[400px] overflow-y-auto">
+                                        <MarkdownRenderer content={generatedRepoInfo.markdown} />
+                                    </div>
                                 </CardContent>
                             </Card>
                         )}

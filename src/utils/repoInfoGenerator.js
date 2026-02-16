@@ -1481,12 +1481,17 @@ Test files: ${testFiles.length} of ${totalFiles} total files`;
  * Splits on the first --- separator and inserts the enrichment there.
  */
 export function insertAfterHeader(repoInfoMarkdown, enrichedSections) {
-    const separatorIndex = repoInfoMarkdown.indexOf('\n\n---\n\n');
+    // Update header to reflect AI enrichment
+    let markdown = repoInfoMarkdown.replace(
+        /> All information is extracted from indexed source code — no AI was used to generate this document\./,
+        '> Factual data is extracted from indexed source code. AI-generated insights are included below.'
+    );
+
+    const separatorIndex = markdown.indexOf('\n\n---\n\n');
     if (separatorIndex === -1) {
-        // No separator found — prepend after first line
-        return repoInfoMarkdown + '\n\n---\n\n' + enrichedSections;
+        return markdown + '\n\n---\n\n' + enrichedSections;
     }
-    const header = repoInfoMarkdown.slice(0, separatorIndex);
-    const rest = repoInfoMarkdown.slice(separatorIndex);
+    const header = markdown.slice(0, separatorIndex);
+    const rest = markdown.slice(separatorIndex);
     return header + '\n\n---\n\n' + enrichedSections + rest;
 }

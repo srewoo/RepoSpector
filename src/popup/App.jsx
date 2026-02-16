@@ -10,7 +10,7 @@ import { ToastProvider } from './components/ui/Toast';
 import { Button } from './components/ui/Button';
 import { Card, CardContent } from './components/ui/Card';
 import { PRReviewInterface } from './components/PRReviewInterface';
-import { Sparkles, Code2, FileCode, GitPullRequest, RefreshCw, AlertCircle } from 'lucide-react';
+import { Sparkles, Code2, FileCode, GitPullRequest, RefreshCw, AlertCircle, Github, ExternalLink } from 'lucide-react';
 
 function AppContent() {
     const [activeTab, setActiveTab] = useState('home');
@@ -27,6 +27,7 @@ function AppContent() {
     const [prLoading, setPrLoading] = useState(false);
     const [prError, setPrError] = useState(null);
     const [isOnPRPage, setIsOnPRPage] = useState(false);
+    const [isOnGitPage, setIsOnGitPage] = useState(null); // null = loading, true/false = detected
 
     // Load indexed repo count on mount
     useEffect(() => {
@@ -56,12 +57,16 @@ function AppContent() {
         return () => chrome.runtime.onMessage.removeListener(listener);
     }, []);
 
-    // Detect if on a PR page
+    // Detect if on a git platform page and/or PR page
     useEffect(() => {
-        const checkPRPage = async () => {
+        const checkPage = async () => {
             try {
                 const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
                 if (tab?.url) {
+                    // Check if on any supported git platform
+                    const gitPlatformPattern = /github\.com|gitlab\.com|bitbucket\.org|dev\.azure\.com|visualstudio\.com|sourceforge\.net|codeberg\.org|gitea\.(io|com)|git\.sr\.ht|pagure\.io/i;
+                    setIsOnGitPage(gitPlatformPattern.test(tab.url));
+
                     // Flexible PR/MR detection patterns
                     const isPRPage =
                         // GitHub-style: any domain with /owner/repo/pull/number
@@ -78,13 +83,16 @@ function AppContent() {
                         setIsOnPRPage(false);
                         setPrUrl(null);
                     }
+                } else {
+                    setIsOnGitPage(false);
                 }
             } catch (error) {
-                console.error('Failed to check PR page:', error);
+                console.error('Failed to check page:', error);
+                setIsOnGitPage(false);
             }
         };
 
-        checkPRPage();
+        checkPage();
     }, [activeTab]);
 
     // Analyze PR
@@ -240,6 +248,41 @@ function AppContent() {
                 );
             case 'home':
             default:
+                // Show prompt to open a git page when not on one
+                if (isOnGitPage === false) {
+                    return (
+                        <div className="space-y-6 animate-fade-in">
+                            <div className="text-center space-y-3 py-8">
+                                <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-primary/20 to-secondary/20 border border-border mb-2 shadow-inner">
+                                    <Github className="w-8 h-8 text-primary" />
+                                </div>
+                                <h2 className="text-xl font-bold text-text">
+                                    Open a Git Page
+                                </h2>
+                                <p className="text-sm text-textMuted max-w-[300px] mx-auto leading-relaxed">
+                                    Navigate to a repository on GitHub, GitLab, Bitbucket, or any supported git platform to start using RepoSpector.
+                                </p>
+                            </div>
+
+                            <div className="bg-surfaceHighlight/30 border border-border rounded-xl p-4 space-y-3">
+                                <h3 className="text-sm font-semibold text-text">Supported platforms:</h3>
+                                <ul className="space-y-1.5 text-xs text-textMuted">
+                                    <li className="flex items-center gap-2"><ExternalLink className="w-3 h-3 text-primary" /> GitHub</li>
+                                    <li className="flex items-center gap-2"><ExternalLink className="w-3 h-3 text-primary" /> GitLab</li>
+                                    <li className="flex items-center gap-2"><ExternalLink className="w-3 h-3 text-primary" /> Bitbucket</li>
+                                    <li className="flex items-center gap-2"><ExternalLink className="w-3 h-3 text-primary" /> Azure DevOps, Codeberg, Gitea, SourceForge</li>
+                                </ul>
+                            </div>
+
+                            <div className="text-center">
+                                <p className="text-xs text-textMuted">
+                                    Use the <span className="text-primary font-medium">Settings</span> tab to configure your API key
+                                </p>
+                            </div>
+                        </div>
+                    );
+                }
+
                 return (
                     <div className="space-y-8 animate-fade-in">
                         <div className="text-center space-y-2 py-6">
@@ -247,10 +290,10 @@ function AppContent() {
                                 <Sparkles className="w-8 h-8 text-primary animate-pulse-slow" />
                             </div>
                             <h2 className="text-2xl font-bold text-text">
-                                Ready to verify?
+                                Welcome to RepoSpector
                             </h2>
                             <p className="text-textMuted max-w-[280px] mx-auto">
-                                Navigate to any code file and let AI generate comprehensive test cases for you.
+                                AI-powered code review, test generation, and repository analysis — all from your browser.
                             </p>
                         </div>
 
@@ -263,54 +306,22 @@ function AppContent() {
                             <ol className="space-y-2 text-xs text-textMuted">
                                 <li className="flex gap-2">
                                     <span className="text-primary font-semibold shrink-0">1.</span>
-                                    <span><span className="text-text font-medium">Configure LLM:</span> Go to Settings tab to add your API key and select a model</span>
+                                    <span><span className="text-text font-medium">Set up:</span> Add your API key and select a model in Settings</span>
                                 </li>
                                 <li className="flex gap-2">
                                     <span className="text-secondary font-semibold shrink-0">2.</span>
-                                    <span><span className="text-text font-medium">Index repos:</span> Use the Repos tab to index your repositories for deep context</span>
+                                    <span><span className="text-text font-medium">Index:</span> Index repositories via the Repos tab for deeper analysis</span>
                                 </li>
                                 <li className="flex gap-2">
                                     <span className="text-primary font-semibold shrink-0">3.</span>
-                                    <span><span className="text-text font-medium">Generate tests:</span> Choose test type below or chat with Copilot</span>
+                                    <span><span className="text-text font-medium">Review:</span> Open a PR to get AI code review, or use Chat for test generation and questions</span>
                                 </li>
                             </ol>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-4">
-                            <Card
-                                className="group hover:border-primary/50 transition-colors cursor-pointer glass-hover gradient-border"
-                                onClick={() => handleGenerateTests('unit')}
-                            >
-                                <CardContent className="p-4 flex flex-col items-center text-center space-y-3">
-                                    <div className="p-2 rounded-lg bg-primary/10 group-hover:bg-primary/20 transition-colors">
-                                        <Code2 className="w-5 h-5 text-primary" />
-                                    </div>
-                                    <div>
-                                        <h3 className="font-semibold text-sm">Unit Tests</h3>
-                                        <p className="text-xs text-textMuted mt-1">Single functions</p>
-                                    </div>
-                                </CardContent>
-                            </Card>
-
-                            <Card
-                                className="group hover:border-secondary/50 transition-colors cursor-pointer glass-hover gradient-border"
-                                onClick={() => handleGenerateTests('integration')}
-                            >
-                                <CardContent className="p-4 flex flex-col items-center text-center space-y-3">
-                                    <div className="p-2 rounded-lg bg-secondary/10 group-hover:bg-secondary/20 transition-colors">
-                                        <FileCode className="w-5 h-5 text-secondary" />
-                                    </div>
-                                    <div>
-                                        <h3 className="font-semibold text-sm">Integration</h3>
-                                        <p className="text-xs text-textMuted mt-1">Full flows</p>
-                                    </div>
-                                </CardContent>
-                            </Card>
-                        </div>
-
                         <div className="text-center pt-2">
                             <p className="text-xs text-textMuted">
-                                Or use the <span className="text-primary font-medium">Chat tab</span> for general questions
+                                Use the <span className="text-primary font-medium">Chat tab</span> for general questions
                             </p>
                         </div>
                     </div>

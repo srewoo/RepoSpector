@@ -725,31 +725,6 @@ pre::-webkit-scrollbar-thumb:hover {
 
 /* Gradient border animation */
 
-.gradient-border {
-  position: relative;
-  background: var(--color-surface);
-}
-
-.gradient-border::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  padding: 1px;
-  background: linear-gradient(135deg, var(--color-primary), var(--color-secondary));
-  -webkit-mask:
-      linear-gradient(#fff 0 0) content-box,
-      linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  opacity: 0;
-  transition: opacity 0.3s ease;
-}
-
-.gradient-border:hover::before {
-  opacity: 1;
-}
-
 .sr-only {
   position: absolute;
   width: 1px;
@@ -1224,6 +1199,10 @@ pre::-webkit-scrollbar-thumb:hover {
 
 .max-w-\[280px\] {
   max-width: 280px;
+}
+
+.max-w-\[300px\] {
+  max-width: 300px;
 }
 
 .max-w-\[80\%\] {
@@ -2102,6 +2081,10 @@ pre::-webkit-scrollbar-thumb:hover {
 
 .leading-relaxed {
   line-height: 1.625;
+}
+
+.leading-tight {
+  line-height: 1.25;
 }
 
 .tracking-tight {

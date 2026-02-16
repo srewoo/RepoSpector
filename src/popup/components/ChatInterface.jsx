@@ -43,6 +43,8 @@ function formatRelativeTime(timestamp) {
 export function ChatInterface({ autoGenerateType = null, onBack = null, instanceId = 'popup' }) {
     const [currentRepo, setCurrentRepo] = useState(null);
     const [isRepoIndexed, setIsRepoIndexed] = useState(false);
+    const [isMainRepoPage, setIsMainRepoPage] = useState(false);
+    const [isPRPage, setIsPRPage] = useState(false);
     // Format message content with custom styling for headers
     const formatMessageContent = (content) => {
         if (!content) return null;
@@ -260,13 +262,62 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                 const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
                 if (tab && tab.url) {
                     const url = new URL(tab.url);
-                    if (url.hostname.includes('github.com') || url.hostname.includes('gitlab.com')) {
+                    // Detect platform from hostname
+                    const host = url.hostname;
+                    const isGitPlatform = /github\.com|gitlab\.com|gitlab\.|bitbucket\.org|dev\.azure\.com|visualstudio\.com|sourceforge\.net|codeberg\.org|gitea\.|git\.sr\.ht|pagure\.io/i.test(host);
+
+                    if (isGitPlatform) {
                         const pathParts = url.pathname.split('/').filter(Boolean);
                         if (pathParts.length >= 2) {
-                            const repoId = `${pathParts[0]}/${pathParts[1]}`;
-                            const platform = url.hostname.includes('gitlab') ? 'gitlab' : 'github';
+                            // Detect platform type
+                            let platform = 'github';
+                            if (host.includes('gitlab')) platform = 'gitlab';
+                            else if (host.includes('bitbucket')) platform = 'bitbucket';
+                            else if (host.includes('azure') || host.includes('visualstudio')) platform = 'azure';
+                            else if (host.includes('codeberg') || host.includes('gitea')) platform = 'gitea';
+
+                            // For GitLab with nested groups, repoId is everything before /-/
+                            let repoId;
+                            if (platform === 'gitlab') {
+                                const dashIdx = pathParts.indexOf('-');
+                                repoId = dashIdx > 0 ? pathParts.slice(0, dashIdx).join('/') : pathParts.slice(0, Math.min(pathParts.length, 3)).join('/');
+                            } else {
+                                repoId = `${pathParts[0]}/${pathParts[1]}`;
+                            }
 
                             setCurrentRepo({ repoId, platform });
+
+                            // Detect page type from URL
+                            const fullPath = url.pathname;
+
+                            // PR/MR page detection (works across all platforms)
+                            const isPR = /\/pull\/\d+/.test(fullPath) ||
+                                /\/merge_requests\/\d+/.test(fullPath) ||
+                                /\/pull-requests\/\d+/.test(fullPath);
+                            setIsPRPage(isPR);
+
+                            // Main repo page detection
+                            let isMainPage = false;
+                            if (platform === 'gitlab') {
+                                // GitLab sub-pages use /-/ prefix (e.g. /-/merge_requests, /-/tree, /-/blob)
+                                const dashIdx = pathParts.indexOf('-');
+                                if (dashIdx === -1) {
+                                    isMainPage = true;
+                                } else {
+                                    const afterDash = pathParts.slice(dashIdx + 1);
+                                    isMainPage = afterDash.length === 0 ||
+                                        (afterDash[0] === 'tree' && afterDash.length <= 2);
+                                }
+                            } else if (platform === 'bitbucket') {
+                                const subPath = pathParts.slice(2);
+                                isMainPage = subPath.length === 0 ||
+                                    (subPath[0] === 'src' && subPath.length <= 2);
+                            } else {
+                                const subPath = pathParts.slice(2);
+                                isMainPage = subPath.length === 0 ||
+                                    (subPath[0] === 'tree' && subPath.length <= 2);
+                            }
+                            setIsMainRepoPage(isMainPage);
 
                             await conversationHistory.setCodeContext({
                                 filePath: pathParts.slice(2).join('/'),
@@ -516,6 +567,9 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
             const isRepoInfoRequest = lowerPrompt.includes('repo') &&
                 (lowerPrompt.includes('repoinfo') || lowerPrompt.includes('repo info'));
 
+            // Detect sequence diagram request
+            const isSequenceDiagramRequest = lowerPrompt.includes('sequence') && lowerPrompt.includes('diagram');
+
             const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
             // Route to appropriate handler
@@ -584,6 +638,33 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                     type: 'text'
                 };
                 setMessages(prev => [...prev, aiMessage]);
+            } else if (isSequenceDiagramRequest) {
+                // Sequence diagram generation (for PR/diff pages)
+                const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                const prUrl = tab?.url;
+                if (!prUrl) throw new Error('Could not detect current page URL');
+
+                setStreamingPhase('Generating sequence diagram...');
+
+                const response = await sendMessage('GENERATE_MERMAID_DIAGRAM', {
+                    prUrl
+                });
+
+                setStreamingPhase('');
+
+                if (response.success && response.data?.mermaidCode) {
+                    const aiMessage = {
+                        id: Date.now() + 1,
+                        role: 'assistant',
+                        content: 'Here\'s the sequence diagram for this PR:',
+                        type: 'mindmap',
+                        mermaidCode: response.data.mermaidCode
+                    };
+                    setMessages(prev => [...prev, aiMessage]);
+                    conversationHistory.addMessage(aiMessage).catch(console.error);
+                } else {
+                    throw new Error(response.error || 'Failed to generate sequence diagram');
+                }
             } else if (isTestGeneration) {
                 // Update phase for test generation
                 setStreamingPhase('🤖 Sending code to AI for test generation...');
@@ -834,7 +915,8 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                                             {s.icon} {s.label}
                                         </button>
                                     ))}
-                                    {isRepoIndexed && (
+                                    {/* Main repo page: mindmap + RepoInfo */}
+                                    {isMainRepoPage && (
                                         <>
                                             <button
                                                 onClick={() => setInput('generate repo mindmap')}
@@ -842,6 +924,25 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                                             >
                                                 <Network className="w-3 h-3" />
                                                 Generate repo mindmap
+                                            </button>
+                                            <button
+                                                onClick={() => setInput('generate repo info')}
+                                                className="px-3 py-1.5 text-xs bg-primary/10 hover:bg-primary/20 border border-primary/30 rounded-full text-primary hover:text-primary transition-colors cursor-pointer flex items-center gap-1"
+                                            >
+                                                <FileText className="w-3 h-3" />
+                                                Generate RepoInfo.md
+                                            </button>
+                                        </>
+                                    )}
+                                    {/* PR/diff page: sequence diagram + RepoInfo */}
+                                    {isPRPage && (
+                                        <>
+                                            <button
+                                                onClick={() => setInput('generate sequence diagram')}
+                                                className="px-3 py-1.5 text-xs bg-primary/10 hover:bg-primary/20 border border-primary/30 rounded-full text-primary hover:text-primary transition-colors cursor-pointer flex items-center gap-1"
+                                            >
+                                                <GitBranch className="w-3 h-3" />
+                                                Generate sequence diagram
                                             </button>
                                             <button
                                                 onClick={() => setInput('generate repo info')}
@@ -887,14 +988,6 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                                         >
                                             <Download className="w-3 h-3" />
                                             Download RepoInfo.md
-                                        </button>
-                                        <button
-                                            onClick={() => {
-                                                navigator.clipboard.writeText(msg.repoInfoMarkdown).catch(console.error);
-                                            }}
-                                            className="text-xs text-textMuted hover:text-text transition-colors"
-                                        >
-                                            Copy to clipboard
                                         </button>
                                     </div>
                                 </div>

@@ -159,28 +159,56 @@ Generate a changelog entry using this format:
 Only include relevant sections. Be concise and user-facing (not developer-internal). Use today's date.`;
 }
 
-export const MERMAID_SYSTEM_PROMPT = `You are a diagram expert. Generate a Mermaid diagram that visualizes the architecture or flow of changes in a PR. Output ONLY valid Mermaid syntax, no markdown code fences.`;
+export const MERMAID_SYSTEM_PROMPT = `You are a software architecture diagram expert. Analyze PR code changes and generate a Mermaid sequence diagram that shows the runtime interaction flow between services, components, and systems affected by the PR. Output ONLY valid Mermaid syntax, no markdown code fences.`;
 
 /**
- * Build prompt for Mermaid diagram generation
+ * Build prompt for Mermaid sequence diagram generation
  */
 export function buildMermaidPrompt(prData) {
-    const files = (prData.files || []).map(f => f.filename).slice(0, 30).join('\n- ');
+    const files = (prData.files || []).map(f => f.filename).slice(0, 30);
+    const fileList = files.map(f => `- ${f}`).join('\n');
+    const commitMessages = (prData.commits || []).map(c => `- ${c.message}`).join('\n');
 
-    return `Generate a Mermaid flowchart or graph diagram showing the key architectural changes in this PR:
+    // Include truncated patches for key files so LLM can infer interactions
+    const patches = (prData.files || [])
+        .filter(f => f.patch && f.patch.length > 0)
+        .slice(0, 15)
+        .map(f => {
+            const patch = f.patch.length > 600 ? f.patch.slice(0, 600) + '\n... (truncated)' : f.patch;
+            return `### ${f.filename} (${f.status})\n\`\`\`\n${patch}\n\`\`\``;
+        })
+        .join('\n\n');
+
+    return `Generate a Mermaid **sequence diagram** showing the runtime interaction flow for this PR:
 
 **Title**: ${prData.title || 'Untitled'}
-**Files Changed**:
-- ${files}
+**Description**: ${(prData.description || 'No description').slice(0, 500)}
+**Branch**: ${prData.branches?.source || '?'} → ${prData.branches?.target || '?'}
+**Stats**: +${prData.stats?.additions || 0} / -${prData.stats?.deletions || 0} across ${prData.stats?.changedFiles || files.length} files
 
-Rules:
-- Use flowchart TD (top-down) or LR (left-right) syntax
-- Group related files into subgraphs by directory/module
-- Show relationships between changed components
-- Highlight new files with a different style
-- Keep it readable (max 20 nodes)
-- Output ONLY the Mermaid code, starting with "flowchart" or "graph"
-- Do NOT wrap in markdown code fences`;
+### Commits
+${commitMessages || 'No commit messages'}
+
+### Files Changed
+${fileList}
+
+### Code Changes (Diffs)
+${patches || 'No patches available'}
+
+### Rules
+- Use \`sequenceDiagram\` syntax
+- Identify the key actors: services, classes, APIs, databases, queues, external systems touched by this PR
+- Show the actual interaction flow: method calls, API requests, data reads/writes, event publishing
+- Use appropriate arrow types: ->> for sync calls, -->> for async/response, -) for events/fire-and-forget
+- Add meaningful labels on arrows describing what happens (e.g., "Read metadata from S3", "Publish to topic")
+- Use \`alt\`/\`else\` blocks for conditional logic paths (success/failure, found/not found)
+- Use \`Note over\` for important processing steps or validations
+- Use \`activate\`/\`deactivate\` to show when a participant is actively processing
+- Keep it focused: max 8 participants, max 25 interactions
+- Participant names should be short service/component names (not full file paths)
+- Output ONLY the Mermaid code, starting with "sequenceDiagram"
+- Do NOT wrap in markdown code fences
+- Do NOT use special characters like < > { } in participant names or labels — use plain text only`;
 }
 
 /**
@@ -196,7 +224,7 @@ export function generateRepoMindmapCode(filePaths, repoId, importGraph) {
     if (!filePaths || filePaths.length === 0) return null;
 
     const MAX_FILES = 30;
-    const safe = (s) => s.replace(/"/g, "'").replace(/[<>]/g, '').replace(/&/g, 'and');
+    const safe = (s) => s.replace(/"/g, "'").replace(/[<>()[\]{}|#&]/g, '').replace(/&/g, 'and');
     const fileSet = new Set(filePaths);
 
     // --- Resolve import sources to actual repo file paths ---
@@ -404,7 +432,7 @@ ${importSummary}
 ### Rules
 - Use \`flowchart LR\` (left-to-right) syntax
 - Group files into subgraphs by **domain concern** (e.g., "Authentication", "Data Layer", "API Routes"), NOT just directory names
-- Add edge labels for key relationships (e.g., \`-->|"data flow"|\`, \`-->|"events"|\`)
+- Add edge labels for key relationships (e.g., \`-->|data flow|\`, \`-->|events|\`) — do NOT put quotes inside pipe delimiters
 - Highlight entry points and hub files with different node shapes (\`((...))\` for entry, \`[...]\` for standard)
 - Use styling: \`classDef hub fill:#6366f1,stroke:#818cf8,color:#fff,font-weight:bold\`
 - Max 25 nodes — prioritize the most connected/important files

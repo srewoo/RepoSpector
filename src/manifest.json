@@ -22,7 +22,8 @@
         }
     },
     "background": {
-        "service_worker": "assets/background.js"
+        "service_worker": "assets/background.js",
+        "type": "module"
     },
     "content_scripts": [
         {
@@ -55,7 +56,9 @@
         {
             "resources": [
                 "assets/*",
-                "src/popup/*"
+                "src/popup/*",
+                "offscreen.html",
+                "offscreen/*"
             ],
             "matches": [
                 "<all_urls>"

@@ -52,6 +52,7 @@ export function Settings({ onClose }) {
     const [apiKey, setApiKey] = useState('');
     const [provider, setProvider] = useState(LLM_PROVIDERS.OPENAI);
     const [model, setModel] = useState('openai:gpt-4.1-mini');
+    const [settingsLoaded, setSettingsLoaded] = useState(false);
     const [showKey, setShowKey] = useState(false);
     const [isLoading, setIsLoading] = useState(false);
     const [isSaved, setIsSaved] = useState(false);
@@ -124,21 +125,24 @@ export function Settings({ onClose }) {
             } catch (error) {
                 console.error('Failed to load settings:', error);
                 setError('Failed to load settings. Please try refreshing.');
+            } finally {
+                setSettingsLoaded(true);
             }
         };
 
         loadSettings();
     }, []);
 
-    // Update model when provider changes
+    // Update model when provider changes (only after settings are loaded, not during initial load)
     useEffect(() => {
+        if (!settingsLoaded) return;
         const modelsForProvider = AVAILABLE_MODELS[provider];
         if (modelsForProvider && modelsForProvider.length > 0) {
             // Select the recommended model or the first one
             const recommended = modelsForProvider.find(m => m.recommended);
             setModel(recommended ? recommended.id : modelsForProvider[0].id);
         }
-    }, [provider]);
+    }, [provider, settingsLoaded]);
 
     const handleSave = async () => {
         setIsLoading(true);

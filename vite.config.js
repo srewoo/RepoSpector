@@ -1,5 +1,5 @@
 
-import { defineConfig } from 'vite';
+import { defineConfig, build as viteBuild } from 'vite';
 import react from '@vitejs/plugin-react';
 import { resolve } from 'path';
 import fs from 'fs';
@@ -27,8 +27,86 @@ const copyAssets = () => {
     };
 };
 
+// Build content script separately as IIFE (content scripts can't use ES modules)
+// Build offscreen document separately (needs its own HTML entry + bundled JS)
+const buildSecondaryEntries = () => {
+    return {
+        name: 'build-secondary-entries',
+        async closeBundle() {
+            // 1. Content script as IIFE (no ES module imports allowed)
+            await viteBuild({
+                configFile: false,
+                resolve: {
+                    alias: {
+                        '@': resolve(__dirname, 'src'),
+                    },
+                },
+                build: {
+                    rollupOptions: {
+                        input: resolve(__dirname, 'src/content/index.js'),
+                        output: {
+                            entryFileNames: 'assets/content.js',
+                            format: 'iife',
+                        },
+                    },
+                    outDir: resolve(__dirname, 'dist'),
+                    emptyOutDir: false,
+                    sourcemap: false,
+                    minify: 'terser',
+                    terserOptions: {
+                        compress: { drop_console: false },
+                    },
+                },
+            });
+
+            // 2. Offscreen document (HTML + ES module for Transformers.js)
+            await viteBuild({
+                configFile: false,
+                resolve: {
+                    alias: {
+                        '@': resolve(__dirname, 'src'),
+                    },
+                },
+                build: {
+                    rollupOptions: {
+                        input: resolve(__dirname, 'src/offscreen.html'),
+                        output: {
+                            entryFileNames: 'offscreen/[name].js',
+                            chunkFileNames: 'offscreen/chunk-[name]-[hash].js',
+                            assetFileNames: 'offscreen/[name].[ext]',
+                            format: 'es',
+                        },
+                    },
+                    outDir: resolve(__dirname, 'dist'),
+                    emptyOutDir: false,
+                    sourcemap: false,
+                    minify: 'terser',
+                    terserOptions: {
+                        compress: { drop_console: false },
+                    },
+                },
+            });
+
+            // Move offscreen.html from dist/src/ to dist/ root (service expects it at extension root)
+            const builtHtml = resolve(__dirname, 'dist/src/offscreen.html');
+            const destHtml = resolve(__dirname, 'dist/offscreen.html');
+            if (fs.existsSync(builtHtml)) {
+                fs.copyFileSync(builtHtml, destHtml);
+                fs.rmSync(resolve(__dirname, 'dist/src/offscreen.html'));
+                // Clean up empty dist/src if only offscreen.html was there
+                try {
+                    const remaining = fs.readdirSync(resolve(__dirname, 'dist/src'));
+                    if (remaining.length === 0 || (remaining.length === 1 && remaining[0] === 'popup')) {
+                        // Keep dist/src/popup but nothing else needed
+                    }
+                } catch (e) { /* ignore */ }
+            }
+        }
+    };
+};
+
 export default defineConfig(({ mode }) => ({
-    plugins: [react(), copyAssets()],
+    plugins: [react(), copyAssets(), buildSecondaryEntries()],
     resolve: {
         alias: {
             '@': resolve(__dirname, 'src'),
@@ -39,7 +117,6 @@ export default defineConfig(({ mode }) => ({
             input: {
                 popup: resolve(__dirname, 'src/popup/index.html'),
                 background: resolve(__dirname, 'src/background/index.js'),
-                content: resolve(__dirname, 'src/content/index.js'),
             },
             output: {
                 entryFileNames: 'assets/[name].js',
