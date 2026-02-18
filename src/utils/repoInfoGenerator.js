@@ -337,7 +337,7 @@ function generateArchitectureOverview(filePaths, importGraph, fileContents) {
         const isCode = /\.(js|ts|jsx|tsx|py|java|go|rb|rs)$/.test(fp);
         const isEntry = /^(index|main|app|server|start|entry|manage|wsgi|asgi|__init__)\./i.test(name);
         return isCode && (noImporters && isEntry);
-    }).slice(0, 15);
+    }).slice(0, 30);
 
     if (entryPoints.length) {
         md += '### Entry Points\n\n';
@@ -351,7 +351,7 @@ function generateArchitectureOverview(filePaths, importGraph, fileContents) {
 }
 
 function generateDirectoryStructure(filePaths) {
-    const MAX_DEPTH = 5;
+    const MAX_DEPTH = 8;
     const COLLAPSE_THRESHOLD = 25;
     const tree = {};
     for (const fp of filePaths) {
@@ -432,7 +432,7 @@ function generateKeyClassesAndFunctions(fileContents, filePaths) {
             while ((mm = methodRe.exec(afterClass)) !== null) {
                 if (mm.index > 0 && afterClass.slice(0, mm.index).split('\n').pop().trim() === '') continue;
                 methods.push(mm[1]);
-                if (methods.length >= 15) break;
+                if (methods.length >= 30) break;
             }
             // Get docstring
             const docMatch = afterClass.match(/class\s+\w+[^:]*:\s*\n\s*(?:"""|''')([\s\S]*?)(?:"""|''')/);
@@ -453,7 +453,7 @@ function generateKeyClassesAndFunctions(fileContents, filePaths) {
             while ((mm = methodRe.exec(afterClass)) !== null) {
                 if (mm[1] !== className && mm[1] !== 'constructor' && !mm[1].startsWith('_'))
                     methods.push(mm[1]);
-                if (methods.length >= 15) break;
+                if (methods.length >= 30) break;
             }
             classes.push({ name: className, bases, methods, doc: null });
         }
@@ -475,7 +475,7 @@ function generateKeyClassesAndFunctions(fileContents, filePaths) {
         }
 
         if (classes.length > 0 || standaloneFunctions.length > 3) {
-            fileClasses.push({ filePath: fp, classes, functions: standaloneFunctions.slice(0, 20) });
+            fileClasses.push({ filePath: fp, classes, functions: standaloneFunctions.slice(0, 30) });
         }
     }
 
@@ -485,7 +485,7 @@ function generateKeyClassesAndFunctions(fileContents, filePaths) {
     let shown = 0;
 
     for (const { filePath, classes, functions } of fileClasses) {
-        if (shown >= 40) { md += `\n*...and ${fileClasses.length - 40} more files with classes/functions*\n`; break; }
+        if (shown >= 200) { md += `\n*...and ${fileClasses.length - 200} more files with classes/functions*\n`; break; }
 
         md += `### \`${filePath}\`\n\n`;
 
@@ -501,11 +501,11 @@ function generateKeyClassesAndFunctions(fileContents, filePaths) {
 
         if (functions.length > 0) {
             md += '**Functions:**\n';
-            for (const fn of functions.slice(0, 12)) {
+            for (const fn of functions.slice(0, 25)) {
                 const params = fn.params.length ? fn.params.join(', ') : '';
                 md += `- \`${fn.name}(${params})\`\n`;
             }
-            if (functions.length > 12) md += `- ...and ${functions.length - 12} more\n`;
+            if (functions.length > 25) md += `- ...and ${functions.length - 25} more\n`;
             md += '\n';
         }
 
@@ -634,7 +634,7 @@ function generateEventSystem(fileContents, filePaths) {
     if (events.eventClasses.length > 0) {
         md += `### Event Classes & Schemas (${events.eventClasses.length})\n\n`;
         md += '| Class | Inherits | File |\n|-------|----------|------|\n';
-        for (const ec of events.eventClasses.slice(0, 50)) {
+        for (const ec of events.eventClasses.slice(0, 150)) {
             md += `| \`${ec.name}\` | ${safeMd(ec.bases) || '—'} | \`${ec.filePath}\` |\n`;
         }
         md += '\n';
@@ -642,7 +642,7 @@ function generateEventSystem(fileContents, filePaths) {
 
     if (events.callbacks.length > 0) {
         md += `### Event Callbacks & Handlers (${events.callbacks.length})\n\n`;
-        for (const cb of events.callbacks.slice(0, 30)) {
+        for (const cb of events.callbacks.slice(0, 80)) {
             md += `- \`${cb.name}()\` in \`${cb.filePath}\`\n`;
         }
     }
@@ -701,7 +701,7 @@ function generateDBSchemas(fileContents, filePaths) {
                     /Document/.test(bases) ? 'MongoEngine' :
                     /Model/.test(bases) ? 'ORM Model' : 'Data Model';
 
-                models.push({ name, bases, framework, filePath, fields: fields.slice(0, 25) });
+                models.push({ name, bases, framework, filePath, fields: fields.slice(0, 50) });
             }
         }
 
@@ -812,10 +812,10 @@ function generateExternalServices(fileContents, filePaths) {
 
     if (urlPatterns.size > 0) {
         md += `### Service Endpoints & Hosts (${urlPatterns.size})\n\n`;
-        for (const p of [...urlPatterns].sort().slice(0, 40)) {
+        for (const p of [...urlPatterns].sort().slice(0, 100)) {
             md += `- \`${p}\`\n`;
         }
-        if (urlPatterns.size > 40) md += `- ...and ${urlPatterns.size - 40} more\n`;
+        if (urlPatterns.size > 100) md += `- ...and ${urlPatterns.size - 100} more\n`;
         md += '\n';
     }
 
@@ -910,7 +910,7 @@ function generateDependencies(fileContents, filePaths) {
 
             const pyEcosystem = { 'flask': 'Web Framework', 'django': 'Web Framework', 'fastapi': 'Web Framework', 'sqlalchemy': 'ORM', 'celery': 'Task Queue', 'redis': 'Cache/DB', 'kafka': 'Messaging', 'requests': 'HTTP Client', 'boto3': 'AWS SDK', 'pymongo': 'MongoDB', 'pydantic': 'Validation', 'marshmallow': 'Serialization', 'numpy': 'Scientific', 'pandas': 'Data Analysis', 'pytest': 'Testing', 'aiohttp': 'Async HTTP', 'confluent_kafka': 'Messaging' };
 
-            for (const [mod, count] of sorted.slice(0, 40)) {
+            for (const [mod, count] of sorted.slice(0, 100)) {
                 const ecosystem = pyEcosystem[mod.toLowerCase()] || '3rd party';
                 md += `| \`${mod}\` | ${count} | ${ecosystem} |\n`;
             }
@@ -937,7 +937,7 @@ function generateDependencies(fileContents, filePaths) {
 
 function generateFileDependencyGraph(importGraph, filePaths) {
     if (!importGraph || importGraph.size === 0) return null;
-    const MAX_FILES = 50;
+    const MAX_FILES = 200;
     const fileSet = new Set(filePaths);
     const importedBy = new Map();
     const connectionCount = {};
@@ -976,8 +976,8 @@ function generateFileDependencyGraph(importGraph, filePaths) {
         const importers = [...new Set(importedBy.get(fp) || [])];
 
         md += `**\`${fp}\`**\n`;
-        if (imports.length > 0) md += `  - imports: ${imports.slice(0, 8).map(i => `\`${i}\``).join(', ')}${imports.length > 8 ? ` +${imports.length - 8} more` : ''}\n`;
-        if (importers.length > 0) md += `  - imported by: ${importers.slice(0, 8).map(i => `\`${i}\``).join(', ')}${importers.length > 8 ? ` +${importers.length - 8} more` : ''}\n`;
+        if (imports.length > 0) md += `  - imports: ${imports.slice(0, 15).map(i => `\`${i}\``).join(', ')}${imports.length > 15 ? ` +${imports.length - 15} more` : ''}\n`;
+        if (importers.length > 0) md += `  - imported by: ${importers.slice(0, 15).map(i => `\`${i}\``).join(', ')}${importers.length > 15 ? ` +${importers.length - 15} more` : ''}\n`;
         md += '\n';
     }
     return md.trim();
@@ -1332,7 +1332,7 @@ function generateConfiguration(fileContents, filePaths) {
 }
 
 function generateFileIndex(filePaths, importGraph, fileContents) {
-    const MAX_FILES = 200;
+    const MAX_FILES = 1000;
     let md = '## File Index\n\n';
     if (filePaths.length > MAX_FILES) md += `> Showing ${MAX_FILES} of ${filePaths.length} files\n\n`;
 

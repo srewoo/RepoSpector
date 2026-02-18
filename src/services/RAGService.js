@@ -172,6 +172,9 @@ export class RAGService {
         // 4. Save manifest so incremental indexing works next time
         await this.manifestStore.save(manifest);
 
+        // 5. Persist BM25 index to IndexedDB for fast startup
+        await this.hybridSearcher.saveBM25ToStorage(repoId);
+
         if (onProgress) onProgress({ status: 'complete', message: 'Indexing complete!' });
         return { success: true, chunksIndexed: allChunks.length };
     }
@@ -382,6 +385,9 @@ export class RAGService {
         // Save updated manifest
         await this.manifestStore.save(manifest);
 
+        // Persist BM25 index to IndexedDB for fast startup
+        await this.hybridSearcher.saveBM25ToStorage(repoId);
+
         if (onProgress) onProgress({
             status: 'complete',
             message: `Incremental indexing complete! ${chunksToEmbed.length} embedded, ${totalChunksReused} reused.`
@@ -408,7 +414,7 @@ export class RAGService {
      * @param {number} limit
      * @param {Object} options - Search options
      */
-    async retrieveContext(repoId, query, limit = 10, options = {}) {
+    async retrieveContext(repoId, query, limit = 20, options = {}) {
         await this.init();
 
         const {
@@ -897,7 +903,7 @@ export class RAGService {
      * @param {number} limit - Max results
      * @param {Object} options - Options including includeDocumentation flag
      */
-    async retrieveContextWithDocs(repoId, query, limit = 10, options = {}) {
+    async retrieveContextWithDocs(repoId, query, limit = 20, options = {}) {
         const {
             includeDocumentation = true,
             documentationFirst = false,  // If true, prepend docs to context

@@ -90,7 +90,8 @@ export class GitLabService {
             'bin'
         ];
 
-        this.maxFiles = 500;
+        // No hard file cap — extension/directory filters and MAX_FILE_SIZE
+        // are the natural limits. All matching code files get indexed.
     }
 
     /**
@@ -210,38 +211,55 @@ export class GitLabService {
         console.log('📡 Fetching tree for:', { projectPath, branch, encoded });
 
         try {
-            const response = await fetch(
-                `${this.baseUrl}/projects/${encoded}/repository/tree?recursive=true&ref=${branch}&per_page=1000`,
-                { headers }
-            );
+            // Paginate to fetch ALL tree entries (GitLab caps per_page at 100 for tree)
+            const allItems = [];
+            let page = 1;
+            const maxPages = 50; // Safety limit: 50 pages × 100 = 5,000 entries
 
-            if (!response.ok) {
-                // Try to get detailed error message
-                let errorMessage = `GitLab API error (${response.status}): ${response.statusText}`;
-                try {
-                    const errorData = await response.json();
-                    if (errorData.message) {
-                        errorMessage = `GitLab API error: ${errorData.message}`;
-                    } else if (errorData.error) {
-                        errorMessage = `GitLab API error: ${errorData.error}`;
+            while (page <= maxPages) {
+                const response = await fetch(
+                    `${this.baseUrl}/projects/${encoded}/repository/tree?recursive=true&ref=${branch}&per_page=100&page=${page}`,
+                    { headers }
+                );
+
+                if (!response.ok) {
+                    // Try to get detailed error message
+                    let errorMessage = `GitLab API error (${response.status}): ${response.statusText}`;
+                    try {
+                        const errorData = await response.json();
+                        if (errorData.message) {
+                            errorMessage = `GitLab API error: ${errorData.message}`;
+                        } else if (errorData.error) {
+                            errorMessage = `GitLab API error: ${errorData.error}`;
+                        }
+                    } catch (e) {
+                        // If JSON parsing fails, use status text
                     }
-                } catch (e) {
-                    // If JSON parsing fails, use status text
+
+                    // Add helpful context to error
+                    if (response.status === 401) {
+                        errorMessage += '\n\n💡 Tip: This might be a private repository. Add your GitLab token in Settings.';
+                    } else if (response.status === 404) {
+                        errorMessage += '\n\n💡 Tip: Repository not found. Check the URL or add GitLab token for private repos.';
+                    } else if (response.status === 403) {
+                        errorMessage += '\n\n💡 Tip: Access forbidden. Your GitLab token might not have the required permissions (read_api, read_repository).';
+                    }
+
+                    throw new Error(errorMessage);
                 }
 
-                // Add helpful context to error
-                if (response.status === 401) {
-                    errorMessage += '\n\n💡 Tip: This might be a private repository. Add your GitLab token in Settings.';
-                } else if (response.status === 404) {
-                    errorMessage += '\n\n💡 Tip: Repository not found. Check the URL or add GitLab token for private repos.';
-                } else if (response.status === 403) {
-                    errorMessage += '\n\n💡 Tip: Access forbidden. Your GitLab token might not have the required permissions (read_api, read_repository).';
-                }
+                const data = await response.json();
+                if (!Array.isArray(data) || data.length === 0) break;
+                allItems.push(...data);
 
-                throw new Error(errorMessage);
+                // Check for next page
+                const nextPage = response.headers.get('X-Next-Page');
+                if (!nextPage || nextPage === '') break;
+                page = parseInt(nextPage, 10);
             }
 
-            return await response.json();
+            console.log(`📂 Fetched ${allItems.length} tree entries across ${page} page(s)`);
+            return allItems;
         } catch (error) {
             console.error('Error fetching repo tree:', error);
             throw error;
@@ -276,8 +294,7 @@ export class GitLabService {
 
                 // Then check inclusion list (explicit allow)
                 return this.codeExtensions.includes(ext);
-            })
-            .slice(0, this.maxFiles); // Limit number of files
+            });
     }
 
     /**

@@ -749,6 +749,10 @@ pre::-webkit-scrollbar-thumb:hover {
   visibility: visible;
 }
 
+.collapse {
+  visibility: collapse;
+}
+
 .static {
   position: static;
 }

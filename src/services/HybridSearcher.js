@@ -6,6 +6,7 @@
  */
 
 import { BM25Index } from './BM25Index.js';
+import { BM25Store } from './BM25Store.js';
 
 /**
  * Default configuration
@@ -48,6 +49,10 @@ export class HybridSearcher {
         this.searchCache = new Map();
         this.cacheMaxSize = 100;
         this.cacheTTL = 5 * 60 * 1000; // 5 minutes
+
+        // BM25 persistence
+        this.bm25Store = new BM25Store();
+        this.bm25LoadedRepos = new Set(); // Track which repos have been loaded from storage
     }
 
     /**
@@ -87,6 +92,11 @@ export class HybridSearcher {
             boostFactors = {},
             queryEmbedding = null  // Pre-computed embedding vector for semantic search
         } = options;
+
+        // Auto-load persisted BM25 index if current index is empty
+        if (useKeywordSearch && repoId && this.bm25Index.getStats().totalDocuments === 0 && !this.bm25LoadedRepos.has(repoId)) {
+            await this.loadBM25FromStorage(repoId);
+        }
 
         // Check cache
         const cacheKey = this.getCacheKey(query, repoId, options);
@@ -406,6 +416,39 @@ export class HybridSearcher {
      */
     importBM25Index(json) {
         this.bm25Index = BM25Index.fromJSON(json);
+    }
+
+    /**
+     * Persist BM25 index for a repo to IndexedDB
+     */
+    async saveBM25ToStorage(repoId) {
+        try {
+            await this.bm25Store.save(repoId, this.bm25Index);
+            this.bm25LoadedRepos.add(repoId);
+            console.log(`BM25 index saved for ${repoId} (${this.bm25Index.getStats().totalDocuments} docs)`);
+        } catch (e) {
+            console.warn('Failed to persist BM25 index:', e);
+        }
+    }
+
+    /**
+     * Load BM25 index from IndexedDB if available
+     * @returns {boolean} true if loaded from storage
+     */
+    async loadBM25FromStorage(repoId) {
+        try {
+            const stored = await this.bm25Store.load(repoId);
+            if (stored) {
+                this.bm25Index = stored;
+                this.bm25LoadedRepos.add(repoId);
+                console.log(`BM25 index loaded from storage for ${repoId} (${stored.getStats().totalDocuments} docs)`);
+                return true;
+            }
+        } catch (e) {
+            console.warn('Failed to load BM25 index from storage:', e);
+        }
+        this.bm25LoadedRepos.add(repoId); // Mark as attempted even if failed
+        return false;
     }
 
     /**

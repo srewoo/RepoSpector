@@ -1,7 +1,10 @@
+import { HNSWIndex } from './HNSWIndex.js';
+
 /**
  * VectorStore service for storing and retrieving embeddings using IndexedDB
  *
  * Performance optimizations:
+ * - HNSW approximate nearest neighbor search (O(log n) vs O(n))
  * - Minimum score filtering to skip irrelevant results
  * - Early termination when results are good enough
  * - Batched operations for large datasets
@@ -22,6 +25,9 @@ export class VectorStore {
         // Query cache for repeated searches
         this.queryCache = new Map();
         this.lastCacheClean = Date.now();
+
+        // HNSW indices per repo (built lazily on first search)
+        this.hnswIndices = new Map(); // repoId -> HNSWIndex
     }
 
     /**
@@ -60,6 +66,13 @@ export class VectorStore {
      */
     async addVectors(vectors) {
         await this.init();
+
+        // Invalidate HNSW indices for affected repos
+        const affectedRepos = new Set(vectors.map(v => v.repoId));
+        for (const repoId of affectedRepos) {
+            this.hnswIndices.delete(repoId);
+        }
+
         return new Promise((resolve, reject) => {
             const transaction = this.db.transaction([this.storeName], 'readwrite');
             const store = transaction.objectStore(this.storeName);
@@ -79,6 +92,7 @@ export class VectorStore {
      */
     async clearRepo(repoId) {
         await this.init();
+        this.hnswIndices.delete(repoId);
         return new Promise((resolve, reject) => {
             const transaction = this.db.transaction([this.storeName], 'readwrite');
             const store = transaction.objectStore(this.storeName);
@@ -284,6 +298,62 @@ export class VectorStore {
             return cached;
         }
 
+        const startTime = performance.now();
+
+        // Try HNSW search first (much faster for large indices)
+        let hnswIndex = this.hnswIndices.get(repoId);
+        if (!hnswIndex) {
+            hnswIndex = await this._buildHNSWIndex(repoId);
+            if (hnswIndex && hnswIndex.size > 0) {
+                this.hnswIndices.set(repoId, hnswIndex);
+            }
+        }
+
+        let finalResults;
+        if (hnswIndex && hnswIndex.size > 0) {
+            finalResults = await this._searchHNSW(hnswIndex, repoId, queryEmbedding, limit, minScore, deduplicate, maxChunksPerFile);
+            const elapsed = performance.now() - startTime;
+            console.log(`🔍 VectorStore (HNSW): Searched ${hnswIndex.size} vectors in ${elapsed.toFixed(1)}ms, found ${finalResults.length} relevant`);
+        } else {
+            // Fallback to linear scan
+            finalResults = await this._linearSearch(repoId, queryEmbedding, limit, minScore, deduplicate, maxChunksPerFile);
+            const elapsed = performance.now() - startTime;
+            console.log(`🔍 VectorStore (linear): Searched in ${elapsed.toFixed(1)}ms, found ${finalResults.length} relevant`);
+        }
+
+        this.setCache(cacheKey, finalResults);
+        return finalResults;
+    }
+
+    /**
+     * Search using HNSW index
+     */
+    async _searchHNSW(hnswIndex, repoId, queryEmbedding, limit, minScore, deduplicate, maxChunksPerFile) {
+        // Fetch extra candidates to account for filtering
+        const hnswResults = hnswIndex.search(queryEmbedding, limit * 3);
+
+        // Retrieve full records for HNSW results and compute exact scores
+        const scoredResults = [];
+        for (const { id, distance } of hnswResults) {
+            const score = 1 - distance; // Convert distance to similarity
+            if (score >= minScore) {
+                const record = await this._getRecord(id);
+                if (record) {
+                    scoredResults.push({ ...record, score });
+                }
+            }
+        }
+
+        scoredResults.sort((a, b) => b.score - a.score);
+        return deduplicate
+            ? this.deduplicateByFile(scoredResults, limit, maxChunksPerFile)
+            : scoredResults.slice(0, limit);
+    }
+
+    /**
+     * Linear scan fallback search
+     */
+    async _linearSearch(repoId, queryEmbedding, limit, minScore, deduplicate, maxChunksPerFile) {
         return new Promise((resolve, reject) => {
             const transaction = this.db.transaction([this.storeName], 'readonly');
             const store = transaction.objectStore(this.storeName);
@@ -292,42 +362,76 @@ export class VectorStore {
 
             request.onsuccess = () => {
                 const results = request.result;
-                const startTime = performance.now();
-
-                // Calculate similarity for each item with early filtering
                 const scoredResults = [];
                 for (const item of results) {
                     const score = this.cosineSimilarityOptimized(queryEmbedding, item.embedding);
-
-                    // Only include results above minimum relevance threshold
                     if (score >= minScore) {
-                        scoredResults.push({
-                            ...item,
-                            score
-                        });
+                        scoredResults.push({ ...item, score });
                     }
                 }
-
-                // Sort by score descending
                 scoredResults.sort((a, b) => b.score - a.score);
 
-                // Deduplicate by file path if requested
-                let finalResults;
-                if (deduplicate) {
-                    finalResults = this.deduplicateByFile(scoredResults, limit, maxChunksPerFile);
-                } else {
-                    finalResults = scoredResults.slice(0, limit);
-                }
-
-                const elapsed = performance.now() - startTime;
-                console.log(`🔍 VectorStore: Searched ${results.length} vectors in ${elapsed.toFixed(1)}ms, found ${finalResults.length} relevant (min score: ${minScore})`);
-
-                // Cache the results
-                this.setCache(cacheKey, finalResults);
+                const finalResults = deduplicate
+                    ? this.deduplicateByFile(scoredResults, limit, maxChunksPerFile)
+                    : scoredResults.slice(0, limit);
 
                 resolve(finalResults);
             };
 
+            request.onerror = (event) => reject(event.target.error);
+        });
+    }
+
+    /**
+     * Build HNSW index from all vectors for a repo
+     */
+    async _buildHNSWIndex(repoId) {
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction([this.storeName], 'readonly');
+            const store = transaction.objectStore(this.storeName);
+            const index = store.index('repoId');
+            const request = index.getAll(repoId);
+
+            request.onsuccess = () => {
+                const vectors = request.result;
+                if (!vectors || vectors.length === 0) {
+                    resolve(null);
+                    return;
+                }
+
+                const startTime = performance.now();
+                const dim = vectors[0].embedding?.length || 384;
+                const hnswIndex = new HNSWIndex({
+                    M: dim <= 384 ? 16 : 24,
+                    efConstruction: 200,
+                    efSearch: 50
+                });
+
+                for (const vec of vectors) {
+                    if (vec.embedding) {
+                        hnswIndex.insert(vec.id, vec.embedding);
+                    }
+                }
+
+                const elapsed = performance.now() - startTime;
+                console.log(`Built HNSW index for ${repoId}: ${vectors.length} vectors, dim=${dim}, took ${elapsed.toFixed(0)}ms`);
+                resolve(hnswIndex);
+            };
+
+            request.onerror = (event) => reject(event.target.error);
+        });
+    }
+
+    /**
+     * Get a single record by ID from IndexedDB
+     */
+    async _getRecord(id) {
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction([this.storeName], 'readonly');
+            const store = transaction.objectStore(this.storeName);
+            const request = store.get(id);
+
+            request.onsuccess = () => resolve(request.result || null);
             request.onerror = (event) => reject(event.target.error);
         });
     }

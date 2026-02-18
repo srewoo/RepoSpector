@@ -835,7 +835,7 @@ class BackgroundService {
                         const smartQuery = `Generate tests for:\n\n${codeContext}`;
 
                         // Fetch relevant code chunks
-                        const relevantChunks = await this.ragService.retrieveContext(repoId, smartQuery, 10);
+                        const relevantChunks = await this.ragService.retrieveContext(repoId, smartQuery, 20);
 
                         // Also fetch repository documentation for understanding project purpose
                         const repoDocumentation = await this.ragService.getRepositoryDocumentation(repoId);
@@ -1181,7 +1181,7 @@ class BackgroundService {
 
                         // Use lower minScore in RAG-only mode for broad questions
                         const ragOptions = isRagOnlyMode ? { minScore: 0.05 } : {};
-                        const relevantChunks = await this.ragService.retrieveContext(repoId, smartQuery, 10, ragOptions);
+                        const relevantChunks = await this.ragService.retrieveContext(repoId, smartQuery, 20, ragOptions);
 
                         if (relevantChunks && relevantChunks.length > 0) {
                             ragContext = {
@@ -2981,7 +2981,7 @@ Return only the complete test code with proper syntax for the detected language,
                     ragContext = await this.ragService.retrieveContext(
                         repoId,
                         prDescription,
-                        10,
+                        20,
                         { formatOutput: true, maxChunksPerFile: 4 }
                     );
 
@@ -3022,7 +3022,7 @@ Return only the complete test code with proper syntax for the detected language,
                 systemPrompt = PR_ANALYSIS_SYSTEM_PROMPT;
                 userPrompt = buildPRAnalysisPrompt(prData, {
                     focusAreas: options.focusAreas || ['security', 'bugs', 'performance', 'style'],
-                    maxFilesToReview: options.maxFiles || 20,
+                    maxFilesToReview: options.maxFiles || 40,
                     includeTestAnalysis: options.includeTestAnalysis !== false,
                     ...contextWithDocs
                 });
@@ -3364,7 +3364,7 @@ Return only the complete test code with proper syntax for the detected language,
                     ragContext = await this.ragService.retrieveContext(
                         repoId,
                         prDescription,
-                        10,
+                        20,
                         { formatOutput: true, maxChunksPerFile: 4 }
                     );
                 } catch (e) {
@@ -3395,7 +3395,7 @@ Return only the complete test code with proper syntax for the detected language,
                 systemPrompt = PR_ANALYSIS_SYSTEM_PROMPT;
                 userPrompt = buildPRAnalysisPrompt(prData, {
                     focusAreas: options.focusAreas || ['security', 'bugs', 'performance', 'style'],
-                    maxFilesToReview: options.maxFiles || 20,
+                    maxFilesToReview: options.maxFiles || 40,
                     includeTestAnalysis: options.includeTestAnalysis !== false,
                     ragContext
                 });

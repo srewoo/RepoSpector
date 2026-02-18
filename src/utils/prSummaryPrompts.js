@@ -223,7 +223,6 @@ ${patches || 'No patches available'}
 export function generateRepoMindmapCode(filePaths, repoId, importGraph) {
     if (!filePaths || filePaths.length === 0) return null;
 
-    const MAX_FILES = 30;
     const safe = (s) => s.replace(/"/g, "'").replace(/[<>()[\]{}|#&]/g, '').replace(/&/g, 'and');
     const fileSet = new Set(filePaths);
 
@@ -231,11 +230,10 @@ export function generateRepoMindmapCode(filePaths, repoId, importGraph) {
     function resolveImport(source, fromFile) {
         // Skip external/stdlib imports
         if (!source.startsWith('.') && !source.startsWith('src') && !source.includes('/')) {
-            // Could be a Python dotted import like "src.events.base_event"
             const dotPath = source.replace(/\./g, '/');
             if (fileSet.has(dotPath + '.py')) return dotPath + '.py';
             if (fileSet.has(dotPath + '/__init__.py')) return dotPath + '/__init__.py';
-            return null; // external
+            return null;
         }
 
         // Relative imports (JS/TS)
@@ -248,7 +246,6 @@ export function generateRepoMindmapCode(filePaths, repoId, importGraph) {
                 else if (p !== '.' && p !== '') resolved.push(p);
             }
             const base = resolved.join('/');
-            // Try with extensions
             for (const ext of ['', '.py', '.js', '.ts', '.jsx', '.tsx', '/index.js', '/index.ts', '/__init__.py']) {
                 if (fileSet.has(base + ext)) return base + ext;
             }
@@ -283,17 +280,38 @@ export function generateRepoMindmapCode(filePaths, repoId, importGraph) {
         }
     }
 
-    // --- Select top files by connection count ---
-    const rankedFiles = filePaths
-        .slice()
-        .sort((a, b) => (connectionCount[b] || 0) - (connectionCount[a] || 0))
-        .slice(0, MAX_FILES);
+    // --- Adaptive file selection based on repo size ---
+    const totalFiles = filePaths.length;
+    const sorted = filePaths.slice().sort((a, b) => (connectionCount[b] || 0) - (connectionCount[a] || 0));
+
+    let rankedFiles;
+    const collapsedDirs = {}; // dir -> { fileCount, totalConnections }
+    const fileToCollapsedDir = {}; // filePath -> dir (for edge routing)
+
+    if (totalFiles <= 80) {
+        // Small/medium repo: show ALL files individually
+        rankedFiles = sorted;
+    } else {
+        // Large repo: show top N individually, collapse the rest into directory summary nodes
+        const topN = totalFiles <= 200 ? 60 : 40;
+        rankedFiles = sorted.slice(0, topN);
+        const selectedSet = new Set(rankedFiles);
+
+        for (const fp of sorted.slice(topN)) {
+            const parts = fp.split('/');
+            const dir = parts.length > 1 ? parts.slice(0, -1).join('/') : '(root)';
+            if (!collapsedDirs[dir]) {
+                collapsedDirs[dir] = { fileCount: 0, totalConnections: 0 };
+            }
+            collapsedDirs[dir].fileCount++;
+            collapsedDirs[dir].totalConnections += (connectionCount[fp] || 0);
+            fileToCollapsedDir[fp] = dir;
+        }
+    }
+
     const selectedSet = new Set(rankedFiles);
 
-    // Filter deps to only selected files
-    const selectedDeps = deps.filter(d => selectedSet.has(d.from) && selectedSet.has(d.to));
-
-    // --- Group files by directory ---
+    // --- Group individually-shown files by directory ---
     const dirGroups = {};
     for (const fp of rankedFiles) {
         const parts = fp.split('/');
@@ -305,11 +323,12 @@ export function generateRepoMindmapCode(filePaths, repoId, importGraph) {
     // --- Generate Mermaid flowchart ---
     const repoName = safe(repoId.split('/').pop() || repoId);
     const nodeIds = {}; // filePath -> nodeId
+    const collapsedNodeIds = {}; // dir -> nodeId (for collapsed directory nodes)
     let nid = 0;
 
     const lines = ['flowchart LR'];
 
-    // Create subgraphs for each directory
+    // Create subgraphs for each directory (individual files)
     const sortedDirs = Object.entries(dirGroups)
         .sort((a, b) => b[1].length - a[1].length);
 
@@ -322,20 +341,39 @@ export function generateRepoMindmapCode(filePaths, repoId, importGraph) {
             const id = `f${nid++}`;
             nodeIds[fp] = id;
             const fileName = safe(fp.split('/').pop());
-            const conns = connectionCount[fp] || 0;
             lines.push(`        ${id}["${fileName}"]`);
+        }
+
+        // Add collapsed directory node inside the same subgraph if it has collapsed files
+        if (collapsedDirs[dir]) {
+            const cid = `c${nid++}`;
+            collapsedNodeIds[dir] = cid;
+            lines.push(`        ${cid}["... +${collapsedDirs[dir].fileCount} more files"]`);
+            delete collapsedDirs[dir]; // handled, remove from remaining
         }
 
         lines.push('    end');
     }
 
-    // Add dependency edges
+    // Remaining collapsed directories that had NO individual files shown — create standalone nodes
+    for (const [dir, info] of Object.entries(collapsedDirs)) {
+        if (info.fileCount === 0) continue;
+        const dirLabel = safe(dir === '(root)' ? repoName : dir);
+        const sgId = `sg${nid++}`;
+        const cid = `c${nid++}`;
+        collapsedNodeIds[dir] = cid;
+        lines.push(`    subgraph ${sgId}["${dirLabel}"]`);
+        lines.push(`        ${cid}["${info.fileCount} files"]`);
+        lines.push('    end');
+    }
+
+    // Add dependency edges (route through collapsed nodes when needed)
     lines.push('');
     const addedEdges = new Set();
-    for (const { from, to } of selectedDeps) {
-        const fromId = nodeIds[from];
-        const toId = nodeIds[to];
-        if (fromId && toId) {
+    for (const { from, to } of deps) {
+        const fromId = nodeIds[from] || collapsedNodeIds[fileToCollapsedDir[from]];
+        const toId = nodeIds[to] || collapsedNodeIds[fileToCollapsedDir[to]];
+        if (fromId && toId && fromId !== toId) {
             const key = `${fromId}-${toId}`;
             if (!addedEdges.has(key)) {
                 lines.push(`    ${fromId} --> ${toId}`);
@@ -349,6 +387,7 @@ export function generateRepoMindmapCode(filePaths, repoId, importGraph) {
     lines.push('    classDef hub fill:#6366f1,stroke:#818cf8,color:#fff,font-weight:bold');
     lines.push('    classDef mid fill:#334155,stroke:#475569,color:#e2e8f0');
     lines.push('    classDef leaf fill:#1e293b,stroke:#334155,color:#94a3b8');
+    lines.push('    classDef collapsed fill:#0f172a,stroke:#334155,color:#64748b,stroke-dasharray:5 5');
 
     const hubs = [];
     const mids = [];
@@ -360,9 +399,14 @@ export function generateRepoMindmapCode(filePaths, repoId, importGraph) {
         else if (c >= 2) mids.push(id);
         else leaves.push(id);
     }
+    // Collapsed directory nodes get their own style
+    const collapsedIds = Object.values(collapsedNodeIds);
+    if (collapsedIds.length) leaves.push(...collapsedIds);
+
     if (hubs.length) lines.push(`    class ${hubs.join(',')} hub`);
     if (mids.length) lines.push(`    class ${mids.join(',')} mid`);
     if (leaves.length) lines.push(`    class ${leaves.join(',')} leaf`);
+    if (collapsedIds.length) lines.push(`    class ${collapsedIds.join(',')} collapsed`);
 
     return lines.join('\n');
 }

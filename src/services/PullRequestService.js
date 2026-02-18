@@ -14,6 +14,77 @@ export class PullRequestService {
     }
 
     /**
+     * Fetch all pages from a paginated GitHub API endpoint.
+     * Follows Link header rel="next" to iterate through pages.
+     */
+    async fetchAllPagesGitHub(url, headers, maxPages = 10) {
+        const allResults = [];
+        let nextUrl = url.includes('per_page=') ? url : `${url}${url.includes('?') ? '&' : '?'}per_page=100`;
+        let page = 0;
+
+        while (nextUrl && page < maxPages) {
+            const response = await fetch(nextUrl, { headers });
+            if (!response.ok) break;
+
+            const data = await response.json();
+            if (Array.isArray(data)) {
+                allResults.push(...data);
+                if (data.length < 100) break; // Last page
+            } else {
+                return data;
+            }
+
+            nextUrl = this.parseNextLink(response.headers.get('Link'));
+            page++;
+        }
+
+        return allResults;
+    }
+
+    /**
+     * Fetch all pages from a paginated GitLab API endpoint.
+     * Follows X-Next-Page header or Link header.
+     */
+    async fetchAllPagesGitLab(url, headers, maxPages = 10) {
+        const allResults = [];
+        let nextUrl = url.includes('per_page=') ? url : `${url}${url.includes('?') ? '&' : '?'}per_page=100`;
+        let page = 0;
+
+        while (nextUrl && page < maxPages) {
+            const response = await fetch(nextUrl, { headers });
+            if (!response.ok) break;
+
+            const data = await response.json();
+            if (Array.isArray(data)) {
+                allResults.push(...data);
+                if (data.length < 100) break; // Last page
+            } else {
+                return data;
+            }
+
+            const nextPage = response.headers.get('X-Next-Page');
+            if (nextPage && nextPage !== '') {
+                const baseUrl = nextUrl.replace(/([?&])page=\d+/, '$1').replace(/[?&]$/, '');
+                nextUrl = `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}page=${nextPage}`;
+            } else {
+                nextUrl = this.parseNextLink(response.headers.get('Link'));
+            }
+            page++;
+        }
+
+        return allResults;
+    }
+
+    /**
+     * Parse Link header to find rel="next" URL
+     */
+    parseNextLink(linkHeader) {
+        if (!linkHeader) return null;
+        const match = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
+        return match ? match[1] : null;
+    }
+
+    /**
      * Detect platform and PR info from URL
      */
     parsePullRequestUrl(url) {
@@ -87,39 +158,22 @@ export class PullRequestService {
         }
 
         try {
-            // Fetch PR details, files, and commits in parallel
-            const [prResponse, filesResponse, commitsResponse, reviewsResponse] = await Promise.all([
-                fetch(`${this.githubBaseUrl}/repos/${owner}/${repo}/pulls/${prNumber}`, { headers }),
-                fetch(`${this.githubBaseUrl}/repos/${owner}/${repo}/pulls/${prNumber}/files`, { headers }),
-                fetch(`${this.githubBaseUrl}/repos/${owner}/${repo}/pulls/${prNumber}/commits`, { headers }),
-                fetch(`${this.githubBaseUrl}/repos/${owner}/${repo}/pulls/${prNumber}/reviews`, { headers })
-            ]);
+            const base = `${this.githubBaseUrl}/repos/${owner}/${repo}/pulls/${prNumber}`;
 
-            // Check for errors
+            // Fetch PR details (single object, no pagination needed)
+            const prResponse = await fetch(base, { headers });
             if (!prResponse.ok) {
                 throw new Error(`GitHub API error: ${prResponse.status} ${prResponse.statusText}`);
             }
+            const prData = await prResponse.json();
 
-            const [prData, filesData, commitsData, reviewsData] = await Promise.all([
-                prResponse.json(),
-                filesResponse.ok ? filesResponse.json() : [],
-                commitsResponse.ok ? commitsResponse.json() : [],
-                reviewsResponse.ok ? reviewsResponse.json() : []
+            // Fetch paginated endpoints in parallel (per_page=100, follows Link headers)
+            const [filesData, commitsData, reviewsData, comments] = await Promise.all([
+                this.fetchAllPagesGitHub(`${base}/files`, headers),
+                this.fetchAllPagesGitHub(`${base}/commits`, headers),
+                this.fetchAllPagesGitHub(`${base}/reviews`, headers),
+                this.fetchAllPagesGitHub(`${base}/comments`, headers)
             ]);
-
-            // Fetch inline comments (review comments)
-            let comments = [];
-            try {
-                const commentsResponse = await fetch(
-                    `${this.githubBaseUrl}/repos/${owner}/${repo}/pulls/${prNumber}/comments`,
-                    { headers }
-                );
-                if (commentsResponse.ok) {
-                    comments = await commentsResponse.json();
-                }
-            } catch (e) {
-                console.warn('Failed to fetch PR comments:', e);
-            }
 
             return this.normalizeGitHubPR(prData, filesData, commitsData, reviewsData, comments);
         } catch (error) {
@@ -235,32 +289,27 @@ export class PullRequestService {
         }
 
         try {
-            // Fetch MR details, changes, and commits in parallel
-            const [mrResponse, changesResponse, commitsResponse, notesResponse] = await Promise.all([
-                fetch(`${this.gitlabBaseUrl}/projects/${projectId}/merge_requests/${mrNumber}`, { headers }),
-                fetch(`${this.gitlabBaseUrl}/projects/${projectId}/merge_requests/${mrNumber}/changes`, { headers }),
-                fetch(`${this.gitlabBaseUrl}/projects/${projectId}/merge_requests/${mrNumber}/commits`, { headers }),
-                fetch(`${this.gitlabBaseUrl}/projects/${projectId}/merge_requests/${mrNumber}/notes`, { headers })
-            ]);
+            const base = `${this.gitlabBaseUrl}/projects/${projectId}/merge_requests/${mrNumber}`;
 
+            // Fetch MR details (single object, no pagination)
+            const mrResponse = await fetch(base, { headers });
             if (!mrResponse.ok) {
                 throw new Error(`GitLab API error: ${mrResponse.status} ${mrResponse.statusText}`);
             }
+            const mrData = await mrResponse.json();
 
-            const [mrData, changesData, commitsData, notesData] = await Promise.all([
-                mrResponse.json(),
-                changesResponse.ok ? changesResponse.json() : { changes: [] },
-                commitsResponse.ok ? commitsResponse.json() : [],
-                notesResponse.ok ? notesResponse.json() : []
+            // Changes returns all diffs in one response (no pagination needed)
+            // Commits and notes may paginate on large MRs
+            const [changesData, commitsData, notesData] = await Promise.all([
+                fetch(`${base}/changes`, { headers }).then(r => r.ok ? r.json() : { changes: [] }),
+                this.fetchAllPagesGitLab(`${base}/commits`, headers),
+                this.fetchAllPagesGitLab(`${base}/notes`, headers)
             ]);
 
-            // Fetch approvals
+            // Fetch approvals (single response, no pagination)
             let approvals = null;
             try {
-                const approvalsResponse = await fetch(
-                    `${this.gitlabBaseUrl}/projects/${projectId}/merge_requests/${mrNumber}/approvals`,
-                    { headers }
-                );
+                const approvalsResponse = await fetch(`${base}/approvals`, { headers });
                 if (approvalsResponse.ok) {
                     approvals = await approvalsResponse.json();
                 }

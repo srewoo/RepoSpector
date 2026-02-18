@@ -90,7 +90,8 @@ export class GitHubService {
             'bin'
         ];
 
-        this.maxFiles = 500; // Limit to avoid excessive indexing
+        // No hard file cap — extension/directory filters and MAX_FILE_SIZE
+        // are the natural limits. All matching code files get indexed.
     }
 
     /**
@@ -227,8 +228,7 @@ export class GitHubService {
 
                 // Then check inclusion list (explicit allow)
                 return this.codeExtensions.includes(ext);
-            })
-            .slice(0, this.maxFiles); // Limit number of files
+            });
     }
 
     /**
