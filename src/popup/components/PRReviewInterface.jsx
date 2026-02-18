@@ -57,31 +57,56 @@ export function PRReviewInterface({
     const [generatedRepoInfo, setGeneratedRepoInfo] = useState(null);
     const [generating, setGenerating] = useState(null); // 'description' | 'changelog' | 'mermaid' | 'repoinfo' | null
 
-    const { analysis, staticAnalysis, reviewEffort } = analysisResult || {};
+    const { analysis, staticAnalysis, reviewEffort, isMultiPass, perFileFindings } = analysisResult || {};
     const staticFindings = staticAnalysisResult?.findings || staticAnalysis?.findings || [];
 
-    // Parse findings from LLM analysis text
+    // Convert multi-pass structured per-file findings to UI findings format
+    const convertMultiPassFindings = (perFileResults) => {
+        if (!perFileResults || !Array.isArray(perFileResults)) return [];
+        const findings = [];
+        for (const result of perFileResults) {
+            for (const f of (result.findings || [])) {
+                findings.push({
+                    id: `mp-${f.id || findings.length}-${Date.now()}`,
+                    file: f.file || result.file || 'Unknown',
+                    line: f.line || 0,
+                    type: f.type || f.title || 'general',
+                    severity: f.severity || 'medium',
+                    message: f.description || f.title || '',
+                    title: f.title || '',
+                    impact: f.impact || '',
+                    suggestion: f.suggestion || '',
+                    cwe: f.cwe || null,
+                    source: 'ai',
+                    confidence: f.confidence || 0.8
+                });
+            }
+        }
+        return findings;
+    };
+
+    // Parse findings from LLM analysis text (single-pass and aggregation fallback)
     const parseLLMFindings = (text) => {
         if (!text) return [];
 
         const findings = [];
 
         // Parse Critical Issues section
-        const criticalMatch = text.match(/###?\s*Critical Issues[^\n]*\n([\s\S]*?)(?=###?\s*Warnings|###?\s*Suggestions|###?\s*Security|$)/i);
+        const criticalMatch = text.match(/###?\s*Critical Issues[^\n]*\n([\s\S]*?)(?=###?\s*Warnings|###?\s*Suggestions|###?\s*Cross-File|###?\s*Security Checklist|$)/i);
         if (criticalMatch && criticalMatch[1]) {
             const issues = extractIssuesFromSection(criticalMatch[1], 'critical');
             findings.push(...issues);
         }
 
         // Parse Warnings section
-        const warningsMatch = text.match(/###?\s*Warnings[^\n]*\n([\s\S]*?)(?=###?\s*Suggestions|###?\s*Security|###?\s*Critical|$)/i);
+        const warningsMatch = text.match(/###?\s*Warnings[^\n]*\n([\s\S]*?)(?=###?\s*Suggestions|###?\s*Cross-File|###?\s*Security Checklist|###?\s*Critical|$)/i);
         if (warningsMatch && warningsMatch[1]) {
             const issues = extractIssuesFromSection(warningsMatch[1], 'high');
             findings.push(...issues);
         }
 
         // Parse Suggestions section
-        const suggestionsMatch = text.match(/###?\s*Suggestions[^\n]*\n([\s\S]*?)(?=###?\s*Security|###?\s*Critical|###?\s*Warnings|$)/i);
+        const suggestionsMatch = text.match(/###?\s*Suggestions[^\n]*\n([\s\S]*?)(?=###?\s*Cross-File|###?\s*Security|###?\s*Critical|###?\s*Warnings|###?\s*Test|###?\s*Positive|$)/i);
         if (suggestionsMatch && suggestionsMatch[1]) {
             const issues = extractIssuesFromSection(suggestionsMatch[1], 'low');
             findings.push(...issues);
@@ -92,25 +117,43 @@ export function PRReviewInterface({
 
     const extractIssuesFromSection = (sectionText, defaultSeverity) => {
         const issues = [];
-
-        // Try to parse structured format (File:, Line:, Issue:, etc.)
-        const structuredPattern = /File:\s*([^\n]+)\s*\n\s*Line:\s*(\d+)[^\n]*\n\s*Type:\s*([^\n]+)\s*\n\s*Severity:\s*([^\n]+)\s*\n\s*Issue:\s*([^\n]+)/gi;
         let match;
+
+        // Pattern 1: Structured format without bullets (File:, Line:, Type:, Severity:, Issue:)
+        const structuredPattern = /File:\s*([^\n]+)\s*\n\s*Line:\s*(\d+)[^\n]*\n\s*Type:\s*([^\n]+)\s*\n\s*Severity:\s*([^\n]+)\s*\n\s*Issue:\s*([^\n]+)/gi;
 
         while ((match = structuredPattern.exec(sectionText)) !== null) {
             issues.push({
                 id: `llm-${issues.length}-${Date.now()}`,
-                file: match[1].trim(),
+                file: match[1].replace(/\*\*/g, '').trim(),
                 line: parseInt(match[2], 10),
-                type: match[3].trim(),
+                type: match[3].replace(/\*\*/g, '').trim(),
                 severity: mapSeverity(match[4].trim()),
-                message: match[5].trim(),
+                message: match[5].replace(/\*\*/g, '').trim(),
                 source: 'ai',
                 confidence: 0.85
             });
         }
 
-        // If no structured issues found, try to extract numbered items
+        // Pattern 2: Bullet-point structured format from multi-pass aggregation
+        // Matches: - **File**: path\n- **Line**: 42\n- **Type**: ...\n...
+        if (issues.length === 0) {
+            const bulletPattern = /-\s*\*?\*?File\*?\*?:\s*([^\n]+)\s*\n\s*-\s*\*?\*?Line\*?\*?:\s*(\d+)[^\n]*\n\s*-\s*\*?\*?Type\*?\*?:\s*([^\n]+)\s*\n\s*-\s*\*?\*?Severity\*?\*?:\s*([^\n]+)\s*\n(?:\s*-\s*\*?\*?CWE\*?\*?:\s*[^\n]*\n)?(?:\s*-\s*\*?\*?Confidence\*?\*?:\s*[^\n]*\n)?\s*-\s*\*?\*?Issue\*?\*?:\s*([^\n]+)/gi;
+            while ((match = bulletPattern.exec(sectionText)) !== null) {
+                issues.push({
+                    id: `llm-${issues.length}-${Date.now()}`,
+                    file: match[1].replace(/\*\*/g, '').trim(),
+                    line: parseInt(match[2], 10),
+                    type: match[3].replace(/\*\*/g, '').trim(),
+                    severity: mapSeverity(match[4].trim()),
+                    message: match[5].replace(/\*\*/g, '').trim(),
+                    source: 'ai',
+                    confidence: 0.85
+                });
+            }
+        }
+
+        // Pattern 3: Numbered items (1. **Title**: description)
         if (issues.length === 0) {
             const numberedPattern = /^\s*\d+\.\s*\*?\*?([^*\n:]+)\*?\*?:?\s*([^\n]+)/gm;
             while ((match = numberedPattern.exec(sectionText)) !== null) {
@@ -131,11 +174,34 @@ export function PRReviewInterface({
             }
         }
 
+        // Pattern 4: Simple bullet items (- **Title**: description or - Title: description)
+        if (issues.length === 0) {
+            const bulletItemPattern = /^\s*[-*]\s+\*?\*?([^*\n:]+)\*?\*?:\s*([^\n]+)/gm;
+            while ((match = bulletItemPattern.exec(sectionText)) !== null) {
+                const title = match[1].trim();
+                const desc = match[2].trim();
+                // Skip metadata fields that look like findings
+                if (/^(file|line|type|severity|issue|impact|fix|cwe|confidence|cross-file)$/i.test(title)) continue;
+                if (title && desc && desc.length > 10) {
+                    issues.push({
+                        id: `llm-${issues.length}-${Date.now()}`,
+                        file: 'Unknown',
+                        line: 0,
+                        type: title,
+                        severity: defaultSeverity,
+                        message: desc,
+                        source: 'ai',
+                        confidence: 0.7
+                    });
+                }
+            }
+        }
+
         return issues;
     };
 
     const mapSeverity = (severityText) => {
-        const text = severityText.toLowerCase();
+        const text = (severityText || '').toLowerCase().replace(/\*\*/g, '');
         if (text.includes('critical')) return 'critical';
         if (text.includes('high')) return 'high';
         if (text.includes('medium')) return 'medium';
@@ -143,7 +209,9 @@ export function PRReviewInterface({
         return 'medium';
     };
 
-    const llmFindings = parseLLMFindings(analysis);
+    // Use structured per-file findings when available (multi-pass), fall back to text parsing
+    const multiPassFindings = isMultiPass ? convertMultiPassFindings(perFileFindings) : [];
+    const llmFindings = multiPassFindings.length > 0 ? multiPassFindings : parseLLMFindings(analysis);
     const findings = [...staticFindings, ...llmFindings];
 
     // Determine verdict based on findings severity

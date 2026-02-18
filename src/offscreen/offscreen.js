@@ -3,7 +3,11 @@
  * This allows local embeddings to work with Manifest V3 service workers
  */
 
-import { pipeline } from '@xenova/transformers';
+import { pipeline, env } from '@xenova/transformers';
+
+// Configure Transformers.js for Chrome extension environment
+// Disable multi-threading to avoid blob: URL CSP violations from ONNX runtime workers
+env.backends.onnx.wasm.numThreads = 1;
 
 class OffscreenEmbeddingWorker {
     constructor() {

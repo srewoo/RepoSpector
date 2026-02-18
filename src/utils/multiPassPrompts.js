@@ -262,46 +262,74 @@ export function getLanguageRules(language) {
 
 // ─── System Prompts ───
 
-export const PER_FILE_REVIEW_SYSTEM_PROMPT = `You are RepoSpector, an AI code reviewer analyzing a single file change within a Pull Request. You review with the precision of a senior engineer — finding real bugs, security issues, and quality problems while avoiding false positives.
+export const PER_FILE_REVIEW_SYSTEM_PROMPT = `You are RepoSpector, a senior staff engineer performing a per-file code review. Your reputation depends on catching REAL bugs that would break production — not on listing generic suggestions.
 
-## Output Rules
-- Respond with ONLY a valid JSON object. No markdown outside the JSON, no explanatory text.
-- Every finding MUST reference a specific line number from the diff.
-- Assign confidence scores honestly: 0.9+ only for certain issues, 0.5-0.7 for likely issues, below 0.5 for suspicions.
-- If the file looks clean, return an empty findings array — do NOT fabricate issues.
-- Focus exclusively on the CHANGED lines (+ lines in the diff), but use unchanged context lines to understand intent.
+## Your Review Process (MANDATORY — follow these steps IN ORDER)
 
-## Review Priorities (in order)
-1. Security vulnerabilities with exploitable impact
-2. Bugs that will cause runtime failures or incorrect behavior
-3. Behavioral changes that silently alter existing functionality
-4. Deprecated API usage that should be modernized
-5. Performance regressions or anti-patterns
-6. Code quality and maintainability issues
+### Step 1: Read the diff line by line
+Before producing ANY output, mentally walk through every "+" line in the diff. For each changed line, ask:
+- What function is being called? Is it on the deprecated list for this language?
+- What data flows into this line? Can it be null/empty/wrong type?
+- Does this line change existing behavior? (e.g., a filter condition widened, a constant replaced, a default value changed)
+- Is this API being used correctly? (e.g., logger.exception only works inside except blocks)
+- Does the variable/function name match what it actually does?
 
-## Bug Detection Checklist (apply to EVERY changed function/method)
-- NULL/UNDEFINED: Can any variable be null/undefined when accessed? Check every .property chain and function argument.
-- OFF-BY-ONE: Are loop boundaries correct? Are array indices within bounds? Is <= vs < correct?
-- RACE CONDITIONS: Can concurrent calls cause data corruption? Are shared resources protected?
-- ERROR PATHS: What happens when this code fails? Is the error caught? Is cleanup done? Are resources released?
-- EDGE CASES: Empty arrays, empty strings, zero values, negative numbers, very large inputs, unicode characters.
-- TYPE COERCION: Are comparisons type-safe? Could implicit conversion produce wrong results?
-- STATE MUTATION: Does this modify shared state? Could callers be surprised by side effects?
-- RESOURCE LEAKS: Are file handles, connections, timers, and event listeners properly cleaned up?
-- BACKWARDS COMPATIBILITY: Does this change break any existing callers or API contracts?`;
+### Step 2: Cross-reference against the Language-Specific Checks
+The user prompt includes a "Language-Specific Checks" section with deprecated APIs, security patterns, and common bugs for this language. You MUST check EVERY function call in the diff against those lists. If a deprecated API is called, report it.
 
-export const AGGREGATION_SYSTEM_PROMPT = `You are RepoSpector performing the final synthesis of a multi-pass Pull Request review. You received structured per-file findings from individual file reviews. Your job is to:
+### Step 3: Produce findings
+Report every real issue found in Steps 1-2. Each finding MUST have:
+- A specific line number from the diff
+- A concrete description of what is wrong
+- A specific fix (not "consider using X" but "replace X with Y")
 
-1. DEDUPLICATE: Merge findings that describe the same underlying issue across files. Keep the highest severity and confidence.
-2. CROSS-REFERENCE: Identify cross-file issues that individual reviews missed:
+## What Goes In Findings vs TestCoverage
+- **findings array**: ACTUAL CODE DEFECTS — deprecated APIs, bugs, security issues, behavioral changes, incorrect API usage, naming inconsistencies. These are problems IN the code being reviewed.
+- **testCoverage field**: Missing test scenarios. NEVER put "missing tests" in findings.
+
+## Severity Guide
+- **critical**: Will cause data loss, security breach, or crash in production
+- **high**: Bug that produces wrong results, deprecated API with known replacement, behavioral change that breaks callers
+- **medium**: Code quality issue that could cause future bugs, performance anti-pattern
+- **low**: Style issue, minor naming inconsistency
+
+## Example Finding (this is what a GOOD finding looks like)
+\`\`\`json
+{
+  "id": "F1",
+  "file": "services/user_service.py",
+  "line": 47,
+  "severity": "high",
+  "type": "deprecated",
+  "cwe": null,
+  "title": "datetime.utcfromtimestamp() is deprecated since Python 3.12",
+  "description": "Line 47 calls datetime.utcfromtimestamp(ts) which returns a naive UTC datetime. This is deprecated and will be removed. It also causes timezone bugs when compared with timezone-aware datetimes.",
+  "impact": "Will emit DeprecationWarning in Python 3.12+ and break in future Python versions. Timezone-naive comparison bugs possible.",
+  "suggestion": "Replace with: datetime.fromtimestamp(ts, tz=timezone.utc)",
+  "confidence": 0.95
+}
+\`\`\`
+
+## Output Format
+Respond with ONLY a valid JSON object. No markdown, no explanation text outside the JSON.
+Assign confidence honestly: 0.9+ for certain issues, 0.6-0.8 for likely issues, below 0.5 for uncertain.
+Focus on CHANGED lines (+ lines), but use context lines to understand intent.
+If the code is genuinely clean with no issues, return an empty findings array — but this should be RARE. Most real-world diffs have at least one issue.`;
+
+export const AGGREGATION_SYSTEM_PROMPT = `You are RepoSpector performing the final synthesis of a multi-pass Pull Request review. You received structured per-file findings from individual file reviews.
+
+## Your Job
+1. PRESERVE ALL CODE DEFECTS: Every finding from per-file reviews that describes a real code issue (deprecated API, bug, security, behavioral change, incorrect API usage) MUST appear in your output. Do NOT drop or minimize per-file findings.
+2. DEDUPLICATE: If the exact same issue appears in multiple files, merge them (keep highest severity/confidence). But different issues in different files are NOT duplicates.
+3. CROSS-REFERENCE: Find issues the per-file reviews missed:
    - Interface contract violations (signature changed in one file, callers not updated)
-   - Inconsistent patterns (error handling done differently across files)
-   - Missing test files for changed source files
+   - Inconsistent patterns across files (error handling, naming conventions)
    - Configuration changes that affect other changed files
-3. ELEVATE OR DEMOTE: Adjust severity based on cross-file context (a "medium" finding may become "high" if it affects multiple files)
-4. SYNTHESIZE: Produce the final review in the exact markdown format specified.
+4. ELEVATE severity when cross-file context makes an issue worse (e.g., a deprecated API used in multiple files → elevate to high)
+5. FORMAT the output in the exact markdown structure specified.
 
-Be thorough but precise. Every finding must be actionable.`;
+## Critical Rule
+If per-file reviews found N total findings with severity >= medium, your output MUST contain at least N findings in the Critical/Warnings sections (after deduplication). Do NOT silently drop findings or convert code defects into suggestions.`;
 
 // ─── Prompt Builders ───
 
@@ -330,19 +358,11 @@ export function buildPRContextSummary(prData) {
 export function buildPerFileReviewPrompt(unit, context = {}) {
     const { prContext, focusAreas = [], ragChunks, staticFindings, languageRules } = context;
 
-    // Build file diffs section
-    const fileDiffs = unit.files.map(f => `### File: ${f.filename} (${f.status || 'modified'})
-**Language**: ${f.language || 'unknown'} | **Changes**: +${f.additions || 0} -${f.deletions || 0}
-
-\`\`\`diff
-${f.patch || 'No patch available'}
-\`\`\``).join('\n\n');
-
     const primaryLang = unit.files[0]?.language || 'unknown';
+    const rules = languageRules || getLanguageRules(primaryLang);
 
-    let prompt = `## Per-File Code Review
-
-### PR Context
+    // ── Section 1: PR Context (brief) ──
+    let prompt = `## PR Context
 - **Title**: ${prContext?.title || 'Unknown'}
 - **Purpose**: ${prContext?.purpose || 'No description'}
 - **Branch**: \`${prContext?.sourceBranch || '?'}\` → \`${prContext?.targetBranch || '?'}\`
@@ -350,21 +370,42 @@ ${f.patch || 'No patch available'}
 
 ---
 
-## Files Under Review
-
-${fileDiffs}
 `;
 
-    // Inject static analysis findings for these files
+    // ── Section 2: Language rules FIRST (so LLM reads rules before the diff) ──
+    prompt += `## Language-Specific Checks for ${primaryLang} — APPLY THESE TO EVERY LINE IN THE DIFF\n\n`;
+    if (rules.deprecated?.length) {
+        prompt += `### Deprecated APIs (flag EVERY occurrence):\n`;
+        for (const d of rules.deprecated) prompt += `- ${d}\n`;
+    }
+    if (rules.securityChecks?.length) {
+        prompt += `\n### Security Patterns (flag if found):\n`;
+        for (const s of rules.securityChecks) prompt += `- ${s}\n`;
+    }
+    if (rules.patterns?.length) {
+        prompt += `\n### Common Bugs (flag if found):\n`;
+        for (const p of rules.patterns) prompt += `- ${p}\n`;
+    }
+    if (rules.performanceChecks?.length) {
+        prompt += `\n### Performance Anti-patterns:\n`;
+        for (const p of rules.performanceChecks) prompt += `- ${p}\n`;
+    }
+
+    // Focus areas
+    if (focusAreas.length > 0) {
+        prompt += `\n**Additional Focus**: ${focusAreas.join(', ')}\n`;
+    }
+
+    // ── Section 3: Static analysis findings (if any) ──
     if (staticFindings && staticFindings.length > 0) {
         prompt += `\n---\n\n## Pre-detected Static Analysis Findings\n`;
         for (const f of staticFindings.slice(0, 10)) {
             prompt += `- **${(f.severity || 'info').toUpperCase()}** [${f.ruleId || f.category || 'rule'}] ${f.filePath || ''}:${f.line || '?'} — ${f.message}\n`;
         }
-        prompt += `\nValidate these findings and find any issues the static analyzers missed.\n`;
+        prompt += `\nValidate these AND find issues the static analyzers missed.\n`;
     }
 
-    // Inject per-file RAG context
+    // ── Section 4: RAG context ──
     if (ragChunks && ragChunks.length > 0) {
         prompt += `\n---\n\n## Related Repository Code (for understanding context)\n`;
         for (const chunk of ragChunks.slice(0, 3)) {
@@ -374,27 +415,27 @@ ${fileDiffs}
         }
     }
 
-    // Language-specific rules
-    const rules = languageRules || getLanguageRules(primaryLang);
-    prompt += `\n---\n\n## Language-Specific Checks (${primaryLang})\n`;
-    if (rules.deprecated?.length) prompt += `**Deprecated APIs**: ${rules.deprecated.slice(0, 5).join('; ')}\n`;
-    if (rules.securityChecks?.length) prompt += `**Security Patterns**: ${rules.securityChecks.slice(0, 5).join('; ')}\n`;
-    if (rules.performanceChecks?.length) prompt += `**Performance Anti-patterns**: ${rules.performanceChecks.slice(0, 4).join('; ')}\n`;
-    if (rules.patterns?.length) prompt += `**Common Bugs**: ${rules.patterns.slice(0, 4).join('; ')}\n`;
+    // ── Section 5: The diff (LAST — so LLM applies rules while reading it) ──
+    prompt += `\n---\n\n## Files Under Review — APPLY ALL CHECKS ABOVE TO EVERY + LINE\n\n`;
 
-    // Focus areas
-    if (focusAreas.length > 0) {
-        prompt += `\n**Review Focus**: ${focusAreas.join(', ')}\n`;
+    for (const f of unit.files) {
+        prompt += `### File: ${f.filename} (${f.status || 'modified'})
+**Language**: ${f.language || 'unknown'} | **Changes**: +${f.additions || 0} -${f.deletions || 0}
+
+\`\`\`diff
+${f.patch || 'No patch available'}
+\`\`\`
+
+`;
     }
 
-    // Required output format
+    // ── Section 6: Required output ──
     const fileNames = unit.files.map(f => `"${f.filename}"`).join(' or ');
-    prompt += `
----
+    prompt += `---
 
-## Required Response Format
+## Required Response — JSON ONLY
 
-Respond with ONLY a JSON object (no markdown fences, no text outside JSON):
+Respond with ONLY a JSON object. No markdown fences. No text before or after.
 
 {
   "file": ${fileNames.includes(' or ') ? '"primary_filename"' : fileNames},
@@ -407,26 +448,30 @@ Respond with ONLY a JSON object (no markdown fences, no text outside JSON):
       "file": "filename_where_issue_is",
       "line": 42,
       "severity": "critical | high | medium | low",
-      "type": "security | bug | performance | style | deprecated | testing",
+      "type": "security | bug | performance | style | deprecated",
       "cwe": "CWE-ID or null",
-      "title": "Concise issue title (under 100 chars)",
-      "description": "What is wrong and why",
+      "title": "Concise title (under 100 chars)",
+      "description": "What is wrong and why — reference the specific code on this line",
       "impact": "What could go wrong in production",
-      "suggestion": "Specific code fix or recommendation",
+      "suggestion": "Replace X with Y (be specific, not vague)",
       "confidence": 0.85
     }
   ],
-  "positives": ["Good patterns observed in this file"],
+  "positives": ["Good patterns observed"],
   "testCoverage": {
     "hasTests": false,
-    "missingTests": ["Concrete test scenario: e.g. 'Test login() with expired token returns 401'"]
+    "missingTests": ["Test scenario descriptions go HERE, not in findings"]
   },
   "criticalTestCases": [
-    "Specific test case tied to a finding: e.g. 'Verify SQL query in getUser() is parameterized (F1)'"
+    "Specific test tied to finding: e.g. 'Verify F1 fix: call fromtimestamp(tz=timezone.utc)'"
   ]
 }
 
-Be thorough. Report EVERY real issue. Reference exact line numbers from the diff.`;
+IMPORTANT REMINDERS:
+- Check every function call against the deprecated list above. Each deprecated call = one finding.
+- If a filter/query/condition changed, report what behavior changed and whether it's intentional.
+- "missing tests" go in testCoverage, NEVER in findings.
+- Every finding needs a specific line number and a concrete fix.`;
 
     return prompt;
 }
