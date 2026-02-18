@@ -408,12 +408,12 @@ export class RAGService {
      * @param {number} limit
      * @param {Object} options - Search options
      */
-    async retrieveContext(repoId, query, limit = 5, options = {}) {
+    async retrieveContext(repoId, query, limit = 10, options = {}) {
         await this.init();
 
         const {
             minScore = 0.3,           // Minimum relevance score
-            maxChunksPerFile = 2,     // Prevent one file from dominating
+            maxChunksPerFile = 4,     // Prevent one file from dominating
             formatOutput = false,     // Return formatted string vs raw chunks
             useHybridSearch = this.enableHybridSearch,
             useQueryExpansion = this.enableQueryExpansion,
@@ -824,7 +824,9 @@ export class RAGService {
                         // Check if it matches documentation patterns
                         const isDocFile = docPatterns.some(pattern =>
                             filePath.endsWith(pattern) || fileName === pattern
-                        ) || filePath.includes('/docs/') || filePath.includes('/documentation/');
+                        ) || filePath.includes('/docs/') || filePath.includes('/documentation/')
+                          || fileName.endsWith('.md') || fileName.endsWith('.rst')
+                          || fileName === 'quickstart' || fileName.includes('getting-started');
 
                         if (isDocFile) {
                             docChunks.push(chunk);
@@ -849,8 +851,8 @@ export class RAGService {
                         return (a.chunkIndex || 0) - (b.chunkIndex || 0);
                     });
 
-                    // Limit to reasonable size (first 5 chunks of docs)
-                    const limitedChunks = docChunks.slice(0, 5);
+                    // Limit to reasonable size
+                    const limitedChunks = docChunks.slice(0, 10);
                     const sources = [...new Set(limitedChunks.map(c => c.filePath))];
 
                     if (limitedChunks.length > 0) {
@@ -895,7 +897,7 @@ export class RAGService {
      * @param {number} limit - Max results
      * @param {Object} options - Options including includeDocumentation flag
      */
-    async retrieveContextWithDocs(repoId, query, limit = 5, options = {}) {
+    async retrieveContextWithDocs(repoId, query, limit = 10, options = {}) {
         const {
             includeDocumentation = true,
             documentationFirst = false,  // If true, prepend docs to context

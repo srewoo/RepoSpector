@@ -589,7 +589,8 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                         role: 'assistant',
                         content: `Here's the mindmap for **${currentRepo.repoId}**:`,
                         type: 'mindmap',
-                        mermaidCode: response.data.mermaidCode
+                        mermaidCode: response.data.mermaidCode,
+                        fallbackCode: response.data.fallbackCode || null
                     };
                     setMessages(prev => [...prev, aiMessage]);
                     conversationHistory.addMessage(aiMessage).catch(console.error);
@@ -767,6 +768,21 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                     // Always clear streaming phase on successful response
                     setStreamingPhase('');
 
+                    // Show truncation warning if context was cut
+                    const truncation = response.metadata?.truncation;
+                    if (truncation && (truncation.codeTruncated || truncation.ragTruncated)) {
+                        const parts = [];
+                        if (truncation.codeTruncated) parts.push('code file');
+                        if (truncation.ragTruncated) parts.push('repository context');
+                        const warningMessage = {
+                            id: Date.now(),
+                            role: 'system',
+                            content: `Note: ${parts.join(' and ')} was truncated to fit token limits. The response may be based on partial context.`,
+                            type: 'warning'
+                        };
+                        setMessages(prev => [...prev, warningMessage]);
+                    }
+
                     // Only create final message if streaming didn't already handle it
                     // If streamingMessageId exists, streaming already created the message
                     if (!streamingMessageId && response.response && response.response.trim()) {
@@ -815,7 +831,7 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                 suggestions.push('Make sure the key is valid and has sufficient credits.');
             } else if (errMsg.includes('No code found') || errMsg.includes('extract')) {
                 errorContent = '📄 Could not extract code from this page';
-                suggestions.push('Make sure you\'re on a GitHub or GitLab code file.');
+                suggestions.push('Navigate to a specific code file, or index the repository to ask questions from any page.');
                 suggestions.push('Try refreshing the page and reopening the extension.');
             } else if (errMsg.includes('rate limit') || errMsg.includes('429')) {
                 errorContent = '🚦 Rate limit exceeded';
@@ -874,12 +890,14 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                             "w-8 h-8 rounded-full flex items-center justify-center shrink-0",
                             msg.role === 'assistant' ? "bg-primary/20 text-primary" : "bg-surfaceHighlight text-text",
                             msg.type === 'error' && "bg-error/20 text-error",
-                            msg.type === 'info' && "bg-blue-500/20 text-blue-400"
+                            msg.type === 'info' && "bg-blue-500/20 text-blue-400",
+                            msg.type === 'warning' && "bg-amber-500/20 text-amber-400"
                         )}>
                             {msg.role === 'assistant' && <Bot className="w-5 h-5" />}
                             {msg.role === 'user' && <User className="w-5 h-5" />}
                             {msg.type === 'error' && <AlertCircle className="w-5 h-5" />}
                             {msg.type === 'info' && <Sparkles className="w-5 h-5" />}
+                            {msg.type === 'warning' && <AlertCircle className="w-5 h-5" />}
                         </div>
 
                         <div className={cn("space-y-2", (msg.type === 'code' || msg.type === 'mindmap' || msg.type === 'repoinfo') ? "flex-1 min-w-0" : "w-full")}>
@@ -890,7 +908,8 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                                         ? "bg-surfaceHighlight/50 rounded-tl-none"
                                         : "bg-primary text-white rounded-tr-none whitespace-pre-line",
                                     msg.type === 'error' && "bg-error/10 text-error border border-error/20",
-                                    msg.type === 'info' && "bg-blue-500/10 text-blue-300 border border-blue-500/20"
+                                    msg.type === 'info' && "bg-blue-500/10 text-blue-300 border border-blue-500/20",
+                                    msg.type === 'warning' && "bg-amber-500/10 text-amber-300 border border-amber-500/20"
                                 )}>
                                     {msg.role === 'assistant' ? (
                                         <MarkdownRenderer
@@ -959,7 +978,7 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                             {/* Mermaid mindmap rendering */}
                             {msg.type === 'mindmap' && msg.mermaidCode && (
                                 <div className="animate-fade-in mt-2">
-                                    <MermaidDiagram code={msg.mermaidCode} className="rounded-lg" />
+                                    <MermaidDiagram code={msg.mermaidCode} fallbackCode={msg.fallbackCode} className="rounded-lg" />
                                 </div>
                             )}
 

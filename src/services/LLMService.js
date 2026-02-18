@@ -8,6 +8,42 @@ import { LLM_PROVIDERS, API_ENDPOINTS, MODELS } from '../utils/constants.js';
 export class LLMService {
     constructor() {
         this.activeRequests = new Map();
+        this.maxRetries = 3;
+        this.baseDelay = 1000; // 1 second
+    }
+
+    /**
+     * Check if an error is retryable (transient)
+     */
+    isRetryableError(error) {
+        const msg = (error.message || '').toLowerCase();
+        // Retry on rate limits, server errors, and network failures
+        if (/429|rate.?limit|too many requests/i.test(msg)) return true;
+        if (/5\d{2}|502|503|504|internal server|bad gateway|service unavailable|gateway timeout/i.test(msg)) return true;
+        if (/network|fetch|timeout|econnreset|econnrefused|socket/i.test(msg)) return true;
+        return false;
+    }
+
+    /**
+     * Execute a function with exponential backoff retry
+     */
+    async withRetry(fn, context = 'LLM call') {
+        let lastError;
+        for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+            try {
+                return await fn();
+            } catch (error) {
+                lastError = error;
+                if (attempt < this.maxRetries && this.isRetryableError(error)) {
+                    const delay = this.baseDelay * Math.pow(2, attempt) + Math.random() * 500;
+                    console.warn(`⚠️ ${context} failed (attempt ${attempt + 1}/${this.maxRetries + 1}): ${error.message}. Retrying in ${Math.round(delay)}ms...`);
+                    await new Promise(r => setTimeout(r, delay));
+                } else {
+                    throw error;
+                }
+            }
+        }
+        throw lastError;
     }
 
     /**
@@ -84,6 +120,22 @@ export class LLMService {
             model: modelId
         };
 
+        // Skip retry for streaming requests (can't replay partial chunks)
+        if (options.streaming) {
+            return this._dispatchToProvider(provider, normalizedRequest, apiKey, options);
+        }
+
+        // Wrap non-streaming calls with retry logic
+        return this.withRetry(
+            () => this._dispatchToProvider(provider, normalizedRequest, apiKey, options),
+            `${provider}:${modelId}`
+        );
+    }
+
+    /**
+     * Dispatch request to the appropriate provider
+     */
+    _dispatchToProvider(provider, normalizedRequest, apiKey, options) {
         switch (provider) {
             case LLM_PROVIDERS.OPENAI:
                 return this.callOpenAI(normalizedRequest, apiKey, options);

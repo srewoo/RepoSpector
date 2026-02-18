@@ -93,14 +93,38 @@ function sanitizeMermaidCode(code) {
     return code.split('\n').map(line => {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('%%') || trimmed === 'end' ||
-            trimmed.startsWith('class ') || trimmed.startsWith('classDef ') ||
+            trimmed.startsWith('classDef ') ||
             trimmed.startsWith('style ') || trimmed.startsWith('linkStyle ') ||
             /^(flowchart|graph|subgraph)\s/.test(trimmed)) {
             return line;
         }
 
+        // Fix class statements: "class A, B, C hub" → "class A,B,C hub"
+        if (trimmed.startsWith('class ')) {
+            return line.replace(/class\s+([\w,\s]+)\s+(\w+)\s*$/, (match, ids, className) => {
+                const cleanIds = ids.replace(/\s+/g, '').replace(/,+/g, ',').replace(/^,|,$/g, '');
+                return `class ${cleanIds} ${className}`;
+            });
+        }
+
+        // Convert sequence-diagram arrows to flowchart arrows
+        line = line.replace(/-->>/, '-->');
+        line = line.replace(/->>/, '-->');
+
+        // Remove ::: class shortcuts (e.g. "A:::hub --> B")
+        line = line.replace(/:::\w+/g, '');
+
         // Strip quotes from edge labels: -->|"text"| → -->|text|
         line = line.replace(/(\|)\s*"([^"]*?)"\s*(\|)/g, '$1$2$3');
+
+        // Sanitize edge labels: remove special chars like / < > from inside |...|
+        line = line.replace(/\|([^|]*)\|/g, (match, label) => {
+            const clean = label.replace(/[/<>\\[\]{}()#&]/g, ' ').replace(/\s+/g, ' ').trim();
+            return `|${clean}|`;
+        });
+
+        // Fix unmatched pipe in edge labels (e.g. "A -->|label B" missing closing pipe)
+        line = line.replace(/(-->|---|-\.->|==>)\|([^|]*?)(\s+\w+\s*$)/, '$1|$2|$3');
 
         if (/^\s*\w+\s*(-->|---|-\.->|==>|-.->|--)\s*\w+/.test(line) && !/[\[({"']/.test(line)) {
             return line;
@@ -120,11 +144,12 @@ function sanitizeMermaidCode(code) {
     }).join('\n');
 }
 
-export function MermaidDiagram({ code, className = '' }) {
+export function MermaidDiagram({ code, fallbackCode, className = '' }) {
     const containerRef = useRef(null);
     const [svgContent, setSvgContent] = useState(null);
     const [error, setError] = useState(null);
     const [showCode, setShowCode] = useState(false);
+    const [usedFallback, setUsedFallback] = useState(false);
 
     useEffect(() => {
         if (!code) return;
@@ -134,19 +159,34 @@ export function MermaidDiagram({ code, className = '' }) {
         const renderDiagram = async () => {
             try {
                 setError(null);
+                setUsedFallback(false);
                 const id = `mermaid-${++renderCounter}`;
                 const sanitized = sanitizeMermaidCode(code.trim());
                 const { svg } = await mermaid.render(id, sanitized);
                 setSvgContent(svg);
             } catch (err) {
-                console.warn('Mermaid render error:', err);
+                console.warn('Mermaid render error (primary):', err);
+                // Automatic fallback to code-generated version
+                if (fallbackCode) {
+                    try {
+                        const fbId = `mermaid-${++renderCounter}`;
+                        const fbSanitized = sanitizeMermaidCode(fallbackCode.trim());
+                        const { svg } = await mermaid.render(fbId, fbSanitized);
+                        setSvgContent(svg);
+                        setUsedFallback(true);
+                        console.info('Mermaid: rendered with fallback code-generated version');
+                        return;
+                    } catch (fbErr) {
+                        console.warn('Mermaid render error (fallback):', fbErr);
+                    }
+                }
                 setError(err.message || 'Failed to render diagram');
                 setSvgContent(null);
             }
         };
 
         renderDiagram();
-    }, [code]);
+    }, [code, fallbackCode]);
 
     if (!code) return null;
 

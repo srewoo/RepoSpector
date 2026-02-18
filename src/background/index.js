@@ -814,7 +814,7 @@ class BackgroundService {
             // Calculate tokens for all context components
             const codeTokens = this.tokenManager.estimateTokens(extractedCode);
             const promptOverhead = 2000; // System prompt, instructions, formatting
-            const responseReserve = 4000; // Reserve for AI response
+            const responseReserve = this.tokenManager.getOutputLimit(modelName) || 4000; // Adaptive reserve based on model output limit
 
             // Get RAG context if Deep Context is enabled
             let ragContext = null;
@@ -835,7 +835,7 @@ class BackgroundService {
                         const smartQuery = `Generate tests for:\n\n${codeContext}`;
 
                         // Fetch relevant code chunks
-                        const relevantChunks = await this.ragService.retrieveContext(repoId, smartQuery, 5);
+                        const relevantChunks = await this.ragService.retrieveContext(repoId, smartQuery, 10);
 
                         // Also fetch repository documentation for understanding project purpose
                         const repoDocumentation = await this.ragService.getRepositoryDocumentation(repoId);
@@ -1111,12 +1111,28 @@ class BackgroundService {
                     }
                 }
             } catch (error) {
-                console.error('❌ Code extraction failed:', error);
-                throw new Error('Could not extract code from the page. Please make sure you are on a GitHub or GitLab code file and try refreshing the page.');
+                console.warn('⚠️ Code extraction failed (may be on a non-code page):', error.message);
             }
 
+            // If no code extracted, try to get context from the tab URL for RAG-only mode
             if (!extractedCode || extractedCode.trim().length === 0) {
-                throw new Error('No code found on this page. Please navigate to a code file on GitHub or GitLab.');
+                console.log('ℹ️ No code on this page — attempting RAG-only mode from tab URL');
+                try {
+                    const tab = await chrome.tabs.get(tabId);
+                    const tabUrl = tab?.url || '';
+                    const platform = tabUrl.includes('gitlab') ? 'gitlab' : tabUrl.includes('github') ? 'github' : null;
+                    if (platform && tabUrl) {
+                        extractedContext = { url: tabUrl, platform, filePath: null };
+                        extractedCode = ''; // No code from page — using repository context only
+                    }
+                } catch (e) {
+                    console.warn('Could not get tab URL:', e.message);
+                }
+
+                // If still no context at all (not on GitHub/GitLab), then fail
+                if (!extractedContext) {
+                    throw new Error('No code found on this page. Please navigate to a GitHub or GitLab repository page, or open a specific code file.');
+                }
             }
 
             // Get settings
@@ -1125,19 +1141,25 @@ class BackgroundService {
                 throw new Error('OpenAI API key not configured. Please add your API key in settings.');
             }
 
-            // Detect language
+            // Detect language (may be unknown if no code on page)
             const languageDetection = this.languageDetector.detect({
                 url: extractedContext?.url,
                 filePath: extractedContext?.filePath,
-                code: extractedCode,
+                code: extractedCode || '',
                 platform: extractedContext?.platform
             });
 
             console.log('🔍 Detected language:', languageDetection.language);
 
-            // Retrieve RAG context if available and user opted in
+            const isRagOnlyMode = !extractedCode || extractedCode.trim().length === 0;
+            if (isRagOnlyMode) {
+                console.log('📂 RAG-only mode: no code file open, will use indexed repository context');
+            }
+
+            // Retrieve RAG context — auto-enable when in RAG-only mode (no code on page)
+            const shouldUseRAG = useDeepContext || isRagOnlyMode;
             let ragContext = null;
-            if (useDeepContext && this.ragService && extractedContext?.url) {
+            if (shouldUseRAG && this.ragService && extractedContext?.url) {
                 try {
                     const repoId = this.contextAnalyzer.extractRepoIdFromUrl(
                         extractedContext.url,
@@ -1147,12 +1169,19 @@ class BackgroundService {
                     if (repoId) {
                         console.log('🔍 Retrieving RAG context for repo:', repoId, '(user enabled Deep Context)');
 
-                        // Build intelligent query combining user question with code context
-                        const codeContext = this.contextAnalyzer.buildSmartRAGQuery(extractedCode, extractedContext);
-                        const smartQuery = `User Question: ${question}\n\n${codeContext}`;
+                        // Build query — use code context if available, otherwise just the question
+                        let smartQuery;
+                        if (isRagOnlyMode) {
+                            smartQuery = question;
+                        } else {
+                            const codeContext = this.contextAnalyzer.buildSmartRAGQuery(extractedCode, extractedContext);
+                            smartQuery = `User Question: ${question}\n\n${codeContext}`;
+                        }
                         console.log('🧠 Smart query preview:', smartQuery.substring(0, 150) + '...');
 
-                        const relevantChunks = await this.ragService.retrieveContext(repoId, smartQuery, 7);
+                        // Use lower minScore in RAG-only mode for broad questions
+                        const ragOptions = isRagOnlyMode ? { minScore: 0.05 } : {};
+                        const relevantChunks = await this.ragService.retrieveContext(repoId, smartQuery, 10, ragOptions);
 
                         if (relevantChunks && relevantChunks.length > 0) {
                             ragContext = {
@@ -1161,14 +1190,75 @@ class BackgroundService {
                             };
                             console.log(`✅ Retrieved ${relevantChunks.length} relevant chunks from RAG`);
                         } else {
-                            console.log('ℹ️ No RAG context found for this repository');
+                            console.log('ℹ️ No RAG chunks from search, trying repository documentation...');
+                        }
+
+                        // In RAG-only mode, also fetch repo documentation (README, docs) as supplementary context
+                        if (isRagOnlyMode) {
+                            try {
+                                const repoDocs = await this.ragService.getRepositoryDocumentation(repoId);
+                                if (repoDocs && repoDocs.found && repoDocs.content) {
+                                    if (ragContext) {
+                                        // Append docs to existing RAG context
+                                        ragContext.chunks = ragContext.chunks + '\n\n--- Repository Documentation ---\n\n' + repoDocs.content;
+                                        ragContext.sources = [...new Set([...ragContext.sources, ...(repoDocs.sources || [])])];
+                                    } else {
+                                        // Use docs as the sole context
+                                        ragContext = {
+                                            chunks: repoDocs.content,
+                                            sources: repoDocs.sources || []
+                                        };
+                                    }
+                                    console.log(`✅ Added repository documentation from ${(repoDocs.sources || []).length} files`);
+                                }
+                            } catch (docErr) {
+                                console.warn('Repository documentation fetch failed:', docErr.message);
+                            }
                         }
                     }
                 } catch (error) {
                     console.warn('RAG retrieval failed:', error);
                 }
-            } else if (!useDeepContext) {
+            } else if (!shouldUseRAG) {
                 console.log('ℹ️ Deep Context (RAG) disabled by user - using standard context');
+            }
+
+            // In RAG-only mode, if no RAG context yet, auto-generate RepoInfo as final fallback
+            if (isRagOnlyMode && !ragContext) {
+                console.log('ℹ️ No RAG or docs found — generating RepoInfo on the fly...');
+                try {
+                    const repoId = this.contextAnalyzer.extractRepoIdFromUrl(
+                        extractedContext.url,
+                        extractedContext.platform
+                    );
+                    if (repoId) {
+                        await this.ragService.init();
+                        const fileContents = await this.ragService.vectorStore.getFileContents(repoId);
+                        if (fileContents && fileContents.size > 0) {
+                            const importGraphService = new ImportGraphService();
+                            const files = [];
+                            for (const [filePath, content] of fileContents) {
+                                files.push({ filename: filePath, content });
+                            }
+                            const importGraph = importGraphService.buildGraph(files);
+                            const repoInfoMarkdown = generateRepoInfo(fileContents, importGraph, repoId);
+                            if (repoInfoMarkdown) {
+                                ragContext = {
+                                    chunks: '--- Auto-Generated Repository Overview ---\n\n' + repoInfoMarkdown,
+                                    sources: ['[auto-generated RepoInfo]']
+                                };
+                                console.log('✅ Auto-generated RepoInfo as fallback context');
+                            }
+                        }
+                    }
+                } catch (genErr) {
+                    console.warn('RepoInfo auto-generation failed:', genErr.message);
+                }
+
+                // If still nothing, give a clear error
+                if (!ragContext) {
+                    throw new Error('No code found on this page and no indexed repository context available. Please navigate to a code file, or index this repository first.');
+                }
             }
 
             // Get model identifier
@@ -1215,7 +1305,9 @@ class BackgroundService {
                 languageDetection,
                 metadata: {
                     language: languageDetection.language,
-                    codeLength: extractedCode.length
+                    codeLength: extractedCode?.length || 0,
+                    ragOnlyMode: isRagOnlyMode,
+                    truncation: this._lastTruncationInfo || null
                 }
             });
 
@@ -1266,7 +1358,9 @@ class BackgroundService {
         let processedCode = code;
         let processedRAG = ragContext;
         const systemPromptEstimate = 500; // Estimated tokens for system prompt text
-        const budgetForHistory = 4000; // Reserve tokens for conversation history
+        const budgetForHistory = this.tokenManager.getOutputLimit(model) || 4000; // Adaptive reserve based on model output limit
+        // Track truncation for user warnings
+        this._lastTruncationInfo = { codeTruncated: false, ragTruncated: false };
 
         const fixedTokens = systemPromptEstimate + questionTokens + codeTokens + ragTokens;
 
@@ -1283,6 +1377,7 @@ class BackgroundService {
                         chunks: truncatedRAG,
                         sources: ragContext.sources || []
                     };
+                    this._lastTruncationInfo.ragTruncated = true;
                 }
             }
 
@@ -1293,6 +1388,7 @@ class BackgroundService {
             if (codeTokens > codeBudget) {
                 console.log(`⚠️ Truncating code from ${codeTokens} to ~${codeBudget} tokens`);
                 processedCode = this.tokenManager.truncateCode(code, codeBudget);
+                this._lastTruncationInfo.codeTruncated = true;
             }
         }
 
@@ -2335,14 +2431,22 @@ Return only the complete test code with proper syntax for the detected language,
                 try {
                     const decryptedKey = await this.encryptionService.decrypt(settings.apiKey);
                     this.ragService.apiKey = decryptedKey;
-                    this.githubService.token = settings.githubToken ?
-                        await this.encryptionService.decrypt(settings.githubToken) : null;
-                    this.gitlabService.token = settings.gitlabToken ?
-                        await this.encryptionService.decrypt(settings.gitlabToken) : null;
-                    console.log('RAG service API keys updated');
+                    console.log('RAG service API key updated');
                 } catch (error) {
                     console.warn('Failed to decrypt API key for RAG service:', error);
                 }
+            }
+
+            // Always update platform tokens regardless of LLM API key
+            try {
+                this.githubService.token = settings.githubToken ?
+                    await this.encryptionService.decrypt(settings.githubToken) : null;
+                this.gitlabService.token = settings.gitlabToken ?
+                    await this.encryptionService.decrypt(settings.gitlabToken) : null;
+                if (settings.githubToken) console.log('GitHub token updated');
+                if (settings.gitlabToken) console.log('GitLab token updated');
+            } catch (error) {
+                console.warn('Failed to decrypt platform tokens:', error);
             }
 
             console.log('Settings saved successfully with encryption');
@@ -2877,8 +2981,8 @@ Return only the complete test code with proper syntax for the detected language,
                     ragContext = await this.ragService.retrieveContext(
                         repoId,
                         prDescription,
-                        5,
-                        { formatOutput: true }
+                        10,
+                        { formatOutput: true, maxChunksPerFile: 4 }
                     );
 
                     // Also fetch repository documentation for understanding project context
@@ -3260,8 +3364,8 @@ Return only the complete test code with proper syntax for the detected language,
                     ragContext = await this.ragService.retrieveContext(
                         repoId,
                         prDescription,
-                        5,
-                        { formatOutput: true }
+                        10,
+                        { formatOutput: true, maxChunksPerFile: 4 }
                     );
                 } catch (e) {
                     console.warn('RAG context not available:', e.message);
@@ -3894,14 +3998,38 @@ Return only the complete test code with proper syntax for the detected language,
             const trimmed = line.trim();
             // Skip non-node lines
             if (!trimmed || trimmed.startsWith('%%') || trimmed === 'end' ||
-                trimmed.startsWith('class ') || trimmed.startsWith('classDef ') ||
+                trimmed.startsWith('classDef ') ||
                 trimmed.startsWith('style ') || trimmed.startsWith('linkStyle ') ||
                 /^(flowchart|graph|subgraph)\s/.test(trimmed)) {
                 return line;
             }
 
+            // Fix class statements: "class A, B, C hub" → "class A,B,C hub"
+            if (trimmed.startsWith('class ')) {
+                return line.replace(/class\s+([\w,\s]+)\s+(\w+)\s*$/, (match, ids, className) => {
+                    const cleanIds = ids.replace(/\s+/g, '').replace(/,+/g, ',').replace(/^,|,$/g, '');
+                    return `class ${cleanIds} ${className}`;
+                });
+            }
+
+            // Convert sequence-diagram arrows to flowchart arrows
+            line = line.replace(/-->>/, '-->');
+            line = line.replace(/->>/, '-->');
+
+            // Remove ::: class shortcuts (e.g. "A:::hub --> B")
+            line = line.replace(/:::\w+/g, '');
+
             // Strip quotes from edge labels: -->|"text"| → -->|text|
             line = line.replace(/(\|)\s*"([^"]*?)"\s*(\|)/g, '$1$2$3');
+
+            // Sanitize edge labels: remove special chars like / < > from inside |...|
+            line = line.replace(/\|([^|]*)\|/g, (match, label) => {
+                const clean = label.replace(/[/<>\\[\]{}()#&]/g, ' ').replace(/\s+/g, ' ').trim();
+                return `|${clean}|`;
+            });
+
+            // Fix unmatched pipe in edge labels (e.g. "A -->|label B" missing closing pipe)
+            line = line.replace(/(-->|---|-\.->|==>)\|([^|]*?)(\s+\w+\s*$)/, '$1|$2|$3');
 
             // Skip edge-only lines (e.g. "A --> B")
             if (/^\s*\w+\s*(-->|---|-\.->|==>|-.->|--)\s*\w+/.test(line) && !/[\[({\"]/.test(line)) {
@@ -3909,7 +4037,6 @@ Return only the complete test code with proper syntax for the detected language,
             }
 
             // Fix node definitions where labels contain Mermaid-special characters.
-            const indent = line.match(/^(\s*)/)[1];
             return line.replace(
                 /(\b[A-Za-z_]\w*)\s*([\[({])(\({0,2})(.*?)(\){0,2})([\])}])/g,
                 (match, id, open, extraOpen, label, extraClose, close) => {
@@ -4012,6 +4139,7 @@ Return only the complete test code with proper syntax for the detected language,
 
             // LLM enrichment pass (optional — only if API key is configured)
             let finalMermaidCode = mermaidCode;
+            let fallbackCode = null; // code-generated version as fallback
             try {
                 const settings = await this.getSettings();
                 if (settings.apiKey) {
@@ -4029,6 +4157,8 @@ Return only the complete test code with proper syntax for the detected language,
                     // Validate: must start with 'flowchart' or 'graph' and have reasonable content
                     if (/^(flowchart|graph)\s/i.test(llmMermaid) && llmMermaid.split('\n').length >= 3) {
                         finalMermaidCode = llmMermaid;
+                        // Keep code-generated version as fallback in case LLM output fails to render
+                        fallbackCode = this.sanitizeMermaidCode(mermaidCode);
                     } else {
                         console.warn('LLM mindmap output invalid, using code-based output');
                     }
@@ -4040,7 +4170,9 @@ Return only the complete test code with proper syntax for the detected language,
             // Always sanitize the final output regardless of source
             finalMermaidCode = this.sanitizeMermaidCode(finalMermaidCode);
 
-            sendResponse({ success: true, data: { mermaidCode: finalMermaidCode } });
+            const responseData = { mermaidCode: finalMermaidCode };
+            if (fallbackCode) responseData.fallbackCode = fallbackCode;
+            sendResponse({ success: true, data: responseData });
         } catch (error) {
             this.errorHandler.logError('Generate Repo Mindmap', error);
             sendResponse({ success: false, error: this.getErrorMessage(error) });

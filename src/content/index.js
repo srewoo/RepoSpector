@@ -90,7 +90,7 @@ class ContentExtractor {
                 const iframe = this.panel.querySelector('iframe');
                 if (iframe && iframe.contentWindow) {
                     console.log('🔄 Forwarding TEST_CHUNK to iframe:', message.requestId);
-                    iframe.contentWindow.postMessage(message, '*');
+                    iframe.contentWindow.postMessage(message, new URL(chrome.runtime.getURL('/')).origin);
                 }
             }
 

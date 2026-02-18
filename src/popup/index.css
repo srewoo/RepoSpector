@@ -1601,6 +1601,10 @@ pre::-webkit-scrollbar-thumb:hover {
   border-style: dashed;
 }
 
+.border-amber-500\/20 {
+  border-color: rgb(245 158 11 / 0.2);
+}
+
 .border-blue-500\/20 {
   border-color: rgb(59 130 246 / 0.2);
 }
@@ -1669,6 +1673,14 @@ pre::-webkit-scrollbar-thumb:hover {
 .bg-\[\#1e1e1e\] {
   --tw-bg-opacity: 1;
   background-color: rgb(30 30 30 / var(--tw-bg-opacity, 1));
+}
+
+.bg-amber-500\/10 {
+  background-color: rgb(245 158 11 / 0.1);
+}
+
+.bg-amber-500\/20 {
+  background-color: rgb(245 158 11 / 0.2);
 }
 
 .bg-background {
@@ -2093,6 +2105,11 @@ pre::-webkit-scrollbar-thumb:hover {
 
 .tracking-wider {
   letter-spacing: 0.05em;
+}
+
+.text-amber-300 {
+  --tw-text-opacity: 1;
+  color: rgb(252 211 77 / var(--tw-text-opacity, 1));
 }
 
 .text-amber-400 {

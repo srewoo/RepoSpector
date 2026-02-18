@@ -115,7 +115,7 @@ export class HybridSearcher {
                     repoId,
                     queryEmbedding,
                     expandedLimit,
-                    { filters }
+                    { filters, minScore: this.config.minScore }
                 );
             } catch (error) {
                 console.warn('Semantic search failed, falling back to keyword only:', error);

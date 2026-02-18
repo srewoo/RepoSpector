@@ -15,7 +15,7 @@ export class VectorStore {
         this.db = null;
 
         // Performance settings
-        this.MIN_RELEVANCE_SCORE = 0.3;  // Minimum similarity to include in results
+        this.MIN_RELEVANCE_SCORE = 0.1;  // Minimum similarity to include in results (low threshold; hybrid reranking handles quality)
         this.GOOD_SCORE_THRESHOLD = 0.7; // Score considered "good enough"
         this.CACHE_TTL = 60000;          // Cache TTL in ms (1 minute)
 

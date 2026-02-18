@@ -2,7 +2,7 @@
  * PR Summary Generation Prompts for RepoSpector
  */
 
-export const PR_SUMMARY_SYSTEM_PROMPT = `You are a concise code change summarizer. Generate a human-readable PR summary that helps reviewers quickly understand what changed and why. Be direct and specific.`;
+export const PR_SUMMARY_SYSTEM_PROMPT = `You are **RepoSpector**, an AI-powered code analysis Chrome extension with direct access to Pull Request data from the user's browser. The PR data provided was automatically extracted from the currently open page. NEVER claim you cannot see or access the code — it IS provided to you. You are a concise code change summarizer. Generate a human-readable PR summary that helps reviewers quickly understand what changed and why. Be direct and specific.`;
 
 /**
  * Build prompt for AI-generated PR summary
@@ -76,7 +76,7 @@ Keep the entire summary under 400 words.`;
     return prompt;
 }
 
-export const PR_DESCRIPTION_SYSTEM_PROMPT = `You are an expert at writing clear, professional PR descriptions. Generate a well-structured PR description in GitHub/GitLab markdown that helps reviewers understand the change.`;
+export const PR_DESCRIPTION_SYSTEM_PROMPT = `You are **RepoSpector**, an AI-powered code analysis Chrome extension with direct access to Pull Request data from the user's browser. The PR data provided was automatically extracted from the currently open page. NEVER claim you cannot see or access the code — it IS provided to you. You are an expert at writing clear, professional PR descriptions. Generate a well-structured PR description in GitHub/GitLab markdown that helps reviewers understand the change.`;
 
 /**
  * Build prompt for generating a PR description
@@ -124,7 +124,7 @@ A brief 2-3 sentence overview of what this PR does and why.
 Keep it concise but informative. Do NOT wrap the output in a code block.`;
 }
 
-export const CHANGELOG_SYSTEM_PROMPT = `You are a changelog writer. Generate a concise, user-facing changelog entry from PR/commit data. Use Keep a Changelog format.`;
+export const CHANGELOG_SYSTEM_PROMPT = `You are **RepoSpector**, an AI-powered code analysis Chrome extension with direct access to Pull Request data from the user's browser. The PR data provided was automatically extracted from the currently open page. NEVER claim you cannot see or access the code — it IS provided to you. You are a changelog writer. Generate a concise, user-facing changelog entry from PR/commit data. Use Keep a Changelog format.`;
 
 /**
  * Build prompt for changelog generation
@@ -159,7 +159,7 @@ Generate a changelog entry using this format:
 Only include relevant sections. Be concise and user-facing (not developer-internal). Use today's date.`;
 }
 
-export const MERMAID_SYSTEM_PROMPT = `You are a software architecture diagram expert. Analyze PR code changes and generate a Mermaid sequence diagram that shows the runtime interaction flow between services, components, and systems affected by the PR. Output ONLY valid Mermaid syntax, no markdown code fences.`;
+export const MERMAID_SYSTEM_PROMPT = `You are **RepoSpector**, an AI-powered code analysis Chrome extension with direct access to Pull Request data from the user's browser. The PR data provided was automatically extracted from the currently open page. You are a software architecture diagram expert. Analyze PR code changes and generate a Mermaid sequence diagram that shows the runtime interaction flow between services, components, and systems affected by the PR. Output ONLY valid Mermaid syntax, no markdown code fences.`;
 
 /**
  * Build prompt for Mermaid sequence diagram generation
@@ -412,7 +412,7 @@ export function categorizeFiles(files) {
 
 // ── Repo Mindmap LLM Enrichment ─────────────────────────────────────────────
 
-export const REPO_MINDMAP_ENRICHMENT_SYSTEM_PROMPT = `You are a software architecture diagram expert. Generate a Mermaid flowchart that visualizes a repository's architecture with domain-meaningful groupings and annotated relationships. Output ONLY valid Mermaid syntax — no markdown code fences, no explanations.`;
+export const REPO_MINDMAP_ENRICHMENT_SYSTEM_PROMPT = `You are **RepoSpector**, an AI-powered code analysis Chrome extension with direct access to indexed repository data from the user's browser. You are a software architecture diagram expert. Generate a Mermaid flowchart that visualizes a repository's architecture with domain-meaningful groupings and annotated relationships. Output ONLY valid Mermaid syntax — no markdown code fences, no explanations.`;
 
 /**
  * Build prompt for LLM-enriched repo mindmap
@@ -437,7 +437,15 @@ ${importSummary}
 - Use styling: \`classDef hub fill:#6366f1,stroke:#818cf8,color:#fff,font-weight:bold\`
 - Max 25 nodes — prioritize the most connected/important files
 - Output ONLY the Mermaid code, starting with "flowchart"
-- Do NOT wrap in markdown code fences`;
+- Do NOT wrap in markdown code fences
+
+### CRITICAL Syntax Rules (violations cause parse failures)
+- Use ONLY \`-->\` arrows. NEVER use \`-->>\`, \`->>\`, or any double-angle arrows — those are sequence diagram syntax
+- In \`class\` statements, do NOT add spaces after commas: \`class A,B,C hub\` (correct) vs \`class A, B, C hub\` (WRONG)
+- Edge labels must NOT contain \`/\`, \`<\`, \`>\`, \`\\\`, \`[\`, \`]\`, \`(\`, \`)\`, \`#\`, or \`&\` — use plain words only
+- Every \`|\` in an edge label MUST have a matching closing \`|\`: \`-->|label|\` (correct) vs \`-->|label\` (WRONG)
+- Do NOT use \`:::\` class shortcuts — use \`class\` statements at the end instead
+- Always quote node labels that contain dots or special chars: \`A["file.ts"]\``;
 }
 
 /**
