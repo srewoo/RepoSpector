@@ -333,7 +333,7 @@ const TEST_QUALITY_CONFIG = {
 // Advanced code analysis configuration
 const ANALYSIS_CONFIG = {
     MAX_FILE_SIZE: 1048576, // 1MB max file size for analysis
-    MAX_CONTEXT_FILES: 20, // Maximum files to include in context
+    MAX_CONTEXT_FILES: 50, // Maximum files to include in context
     AST_PARSING_TIMEOUT: 5000, // 5 seconds for AST parsing
     SEMANTIC_ANALYSIS_DEPTH: 3, // Maximum depth for semantic analysis
     FUNCTION_COMPLEXITY_THRESHOLD: 15, // Complexity threshold for prioritization
@@ -464,9 +464,9 @@ const SUPPORTED_LANGUAGES = {
 };
 
 const CONTEXT_LEVELS = {
-    MINIMAL: { name: 'Minimal', description: 'Code only', maxTokens: 1000 },
-    SMART: { name: 'Smart', description: 'Code + imports + structure', maxTokens: 2500 },
-    FULL: { name: 'Full', description: 'Complete repository context', maxTokens: 4000 }
+    MINIMAL: { name: 'Minimal', description: 'Code only', maxTokens: 4000 },
+    SMART: { name: 'Smart', description: 'Code + imports + structure', maxTokens: 8000 },
+    FULL: { name: 'Full', description: 'Complete repository context', maxTokens: 16000 }
 };
 
 const STORAGE_KEYS = {

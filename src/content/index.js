@@ -2357,13 +2357,19 @@ class FloatingPanelManager {
                 const currentTabId = tabResponse?.tabId;
                 console.log('📌 Current tab ID:', currentTabId);
 
-                // Inject tabId into the message payload if not already set
-                const enrichedMessage = { ...message };
+                // Inject tabId and isFromPopup flag into the message payload
+                // isFromPopup tells background to route streaming chunks via chrome.runtime.sendMessage
+                // (not chrome.tabs.sendMessage) so our iframe receives them
+                const enrichedMessage = { ...message, isFromPopup: true };
                 if (enrichedMessage.payload) {
                     enrichedMessage.payload = {
                         ...enrichedMessage.payload,
                         tabId: enrichedMessage.payload.tabId || currentTabId
                     };
+                    // Ensure requestId is in payload.options for streaming correlation
+                    if (message.requestId && enrichedMessage.payload.options) {
+                        enrichedMessage.payload.options.requestId = enrichedMessage.payload.options.requestId || message.requestId;
+                    }
                 } else if (enrichedMessage.data) {
                     enrichedMessage.data = {
                         ...enrichedMessage.data,

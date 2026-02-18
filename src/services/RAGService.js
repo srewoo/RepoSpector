@@ -858,7 +858,7 @@ export class RAGService {
                     });
 
                     // Limit to reasonable size
-                    const limitedChunks = docChunks.slice(0, 10);
+                    const limitedChunks = docChunks.slice(0, 25);
                     const sources = [...new Set(limitedChunks.map(c => c.filePath))];
 
                     if (limitedChunks.length > 0) {

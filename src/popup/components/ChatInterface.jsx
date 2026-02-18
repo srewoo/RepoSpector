@@ -249,7 +249,21 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
         };
 
         chrome.runtime.onMessage.addListener(handleMessage);
-        return () => chrome.runtime.onMessage.removeListener(handleMessage);
+
+        // Also listen for postMessage (for iframe popup where content script relays TEST_CHUNK via postMessage)
+        const handlePostMessage = (event) => {
+            const message = event.data;
+            if (message && message.action === 'TEST_CHUNK' && message.data) {
+                // Process the same way as chrome.runtime.onMessage
+                handleMessage(message, {});
+            }
+        };
+        window.addEventListener('message', handlePostMessage);
+
+        return () => {
+            chrome.runtime.onMessage.removeListener(handleMessage);
+            window.removeEventListener('message', handlePostMessage);
+        };
     }, []); // Empty dependency array - register listener only once
 
     // Initialize conversation history and detect current repo

@@ -275,7 +275,7 @@ export async function learnPatternsFromRAG(ragService, repoId, targetFunction) {
         const results = await ragService.retrieveContext(
             repoId,
             testQuery,
-            5,
+            15,
             {
                 includeMetadata: true,
                 formatOutput: false

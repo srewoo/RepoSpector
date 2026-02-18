@@ -616,7 +616,7 @@ You are a senior code reviewer with expertise in security, performance, and soft
 export function buildPRAnalysisPrompt(prData, options = {}) {
     const {
         focusAreas = ['security', 'bugs', 'performance', 'style'],
-        maxFilesToReview = 40,
+        maxFilesToReview = 100,
         includeTestAnalysis = true,
         ragContext = null,
         repoDocumentation = null,

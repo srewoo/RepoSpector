@@ -1,4 +1,5 @@
 import { HNSWIndex } from './HNSWIndex.js';
+import { HNSWStore } from './HNSWStore.js';
 
 /**
  * VectorStore service for storing and retrieving embeddings using IndexedDB
@@ -28,6 +29,7 @@ export class VectorStore {
 
         // HNSW indices per repo (built lazily on first search)
         this.hnswIndices = new Map(); // repoId -> HNSWIndex
+        this.hnswStore = new HNSWStore();
     }
 
     /**
@@ -67,10 +69,11 @@ export class VectorStore {
     async addVectors(vectors) {
         await this.init();
 
-        // Invalidate HNSW indices for affected repos
+        // Invalidate HNSW indices for affected repos (memory + persisted)
         const affectedRepos = new Set(vectors.map(v => v.repoId));
         for (const repoId of affectedRepos) {
             this.hnswIndices.delete(repoId);
+            this.hnswStore.delete(repoId).catch(() => {}); // Best-effort cleanup
         }
 
         return new Promise((resolve, reject) => {
@@ -93,6 +96,7 @@ export class VectorStore {
     async clearRepo(repoId) {
         await this.init();
         this.hnswIndices.delete(repoId);
+        this.hnswStore.delete(repoId).catch(() => {}); // Best-effort cleanup
         return new Promise((resolve, reject) => {
             const transaction = this.db.transaction([this.storeName], 'readwrite');
             const store = transaction.objectStore(this.storeName);
@@ -281,13 +285,13 @@ export class VectorStore {
      * @param {number} limit - Max results to return
      * @param {Object} options - Search options
      */
-    async search(repoId, queryEmbedding, limit = 5, options = {}) {
+    async search(repoId, queryEmbedding, limit = 20, options = {}) {
         await this.init();
 
         const {
             minScore = this.MIN_RELEVANCE_SCORE,
             deduplicate = true,        // Dedupe by file to avoid overlapping chunks
-            maxChunksPerFile = 2       // Max chunks from same file
+            maxChunksPerFile = 4       // Max chunks from same file
         } = options;
 
         // Check cache first
@@ -303,7 +307,21 @@ export class VectorStore {
         // Try HNSW search first (much faster for large indices)
         let hnswIndex = this.hnswIndices.get(repoId);
         if (!hnswIndex) {
-            hnswIndex = await this._buildHNSWIndex(repoId);
+            // Try loading persisted HNSW graph before rebuilding
+            try {
+                hnswIndex = await this.hnswStore.load(repoId);
+            } catch (e) {
+                console.warn('Failed to load persisted HNSW graph:', e);
+            }
+            if (!hnswIndex || hnswIndex.size === 0) {
+                hnswIndex = await this._buildHNSWIndex(repoId);
+                // Persist the newly built graph for future restarts
+                if (hnswIndex && hnswIndex.size > 0) {
+                    this.hnswStore.save(repoId, hnswIndex).catch(e =>
+                        console.warn('Failed to persist HNSW graph:', e)
+                    );
+                }
+            }
             if (hnswIndex && hnswIndex.size > 0) {
                 this.hnswIndices.set(repoId, hnswIndex);
             }

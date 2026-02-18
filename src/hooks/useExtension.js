@@ -43,10 +43,20 @@ export function useExtension() {
                 return new Promise((resolve) => {
                     const requestId = `${type}_${Date.now()}_${Math.random()}`;
 
+                    // Inject requestId into payload.options for streaming chunk correlation
+                    if (payload && payload.options) {
+                        payload.options.requestId = payload.options.requestId || requestId;
+                    } else if (payload) {
+                        payload.requestId = payload.requestId || requestId;
+                    }
+
                     const messageHandler = (event) => {
                         if (event.data.responseId === requestId) {
                             window.removeEventListener('message', messageHandler);
-                            resolve(event.data.response);
+                            const response = event.data.response || {};
+                            // Include requestId in response for consistency with non-iframe path
+                            response.requestId = requestId;
+                            resolve(response);
                         }
                     };
 

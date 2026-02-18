@@ -28,8 +28,8 @@ export class ContextAnalyzer {
         this.cache = new Map();
         // Initialize RateLimiter immediately (defined at end of file)
         this.rateLimiter = null;
-        this.MAX_CONTEXT_TOKENS = 4000; // Reserve tokens for context
-        this.MAX_FILES_TO_ANALYZE = 10; // Limit for performance
+        this.MAX_CONTEXT_TOKENS = 16000; // Reserve tokens for context
+        this.MAX_FILES_TO_ANALYZE = 25; // Limit for performance
         this.ragService = null;
 
         // Defer rate limiter initialization to avoid circular dependency
@@ -368,9 +368,9 @@ export class ContextAnalyzer {
                 if (relativeImports.length > 0 && filePath) {
                     const currentDir = filePath.substring(0, filePath.lastIndexOf('/'));
 
-                    // Fetch up to 5 most relevant imported files
+                    // Fetch up to 15 most relevant imported files
                     const filesToFetch = relativeImports
-                        .slice(0, 5)
+                        .slice(0, 15)
                         .map(imp => this.resolveImportPath(imp.path, currentDir, filePath));
 
                     context.dependencies = await this.fetchGitHubFiles(
@@ -598,7 +598,7 @@ export class ContextAnalyzer {
 
         // Return only the most important parts
         return relevantParts
-            .slice(0, 5) // Limit to 5 most relevant blocks
+            .slice(0, 15) // Limit to 15 most relevant blocks
             .map(part => part.code)
             .join('\n\n// ...\n\n');
     }
@@ -936,7 +936,7 @@ export class ContextAnalyzer {
                 const visibleFiles = Array.from(fileTreeItems)
                     .map(el => el.textContent?.trim())
                     .filter(Boolean)
-                    .slice(0, 20); // Limit to avoid too much data
+                    .slice(0, 50); // Limit to avoid too much data
 
                 context.repositoryStructure.discoveredFiles = visibleFiles;
 
@@ -1099,7 +1099,7 @@ export class ContextAnalyzer {
     async fetchGitHubFiles(owner, repo, branch, filePaths, context) {
         const fetchedFiles = [];
 
-        for (const filePath of filePaths.slice(0, 5)) { // Limit to 5 files
+        for (const filePath of filePaths.slice(0, 15)) { // Limit to 15 files
             // Ensure rate limiter is initialized
             const rateLimiter = this._ensureRateLimiter();
             if (rateLimiter && !await rateLimiter.canMakeRequest()) break;
@@ -1207,7 +1207,7 @@ export class ContextAnalyzer {
             const pattern = testFilePatterns[language] || testFilePatterns.javascript;
             const testFiles = files.filter(file =>
                 file.type === 'file' && pattern.test(file.name)
-            ).slice(0, 2); // Get up to 2 test examples
+            ).slice(0, 5); // Get up to 5 test examples
 
             if (testFiles.length === 0) return null;
 
@@ -1430,7 +1430,7 @@ export class ContextAnalyzer {
 
                     // Fetch content of important files
                     const fileContents = await Promise.all(
-                        importantFiles.slice(0, 10).map(async (file) => {
+                        importantFiles.slice(0, 25).map(async (file) => {
                             try {
                                 const fileResponse = await fetch(
                                     `https://gitlab.com/api/v4/projects/${projectId}/repository/files/${encodeURIComponent(file.path)}/raw?ref=${branch || 'main'}`,
@@ -1632,17 +1632,17 @@ export class ContextAnalyzer {
         const classes = this.extractClassNames(code);
 
         if (functions.length > 0) {
-            queryParts.push(`Functions: ${functions.slice(0, 5).join(', ')}`);
+            queryParts.push(`Functions: ${functions.slice(0, 10).join(', ')}`);
         }
         if (classes.length > 0) {
-            queryParts.push(`Classes: ${classes.slice(0, 3).join(', ')}`);
+            queryParts.push(`Classes: ${classes.slice(0, 8).join(', ')}`);
         }
 
         // 2. Extract imports (find files that import similar modules)
         const imports = context.imports || this.extractImports(code);
         if (imports && imports.length > 0) {
             // Take first 10 imports
-            const importList = imports.slice(0, 10).map(imp => {
+            const importList = imports.slice(0, 20).map(imp => {
                 if (typeof imp === 'string') return imp;
                 return imp.module || imp.name || '';
             }).filter(Boolean);
@@ -1655,7 +1655,7 @@ export class ContextAnalyzer {
         // 3. Extract key variables and constants (for finding usage patterns)
         const variables = this.extractKeyVariables(code);
         if (variables.length > 0) {
-            queryParts.push(`Key variables: ${variables.slice(0, 8).join(', ')}`);
+            queryParts.push(`Key variables: ${variables.slice(0, 15).join(', ')}`);
         }
 
         // 4. Include language and file type for better context
@@ -1676,7 +1676,7 @@ export class ContextAnalyzer {
                        !trimmed.startsWith('#');
             })
             .join('\n')
-            .substring(0, 300);
+            .substring(0, 500);
 
         queryParts.push(`Code: ${codeSnippet}`);
 

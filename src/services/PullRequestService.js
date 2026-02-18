@@ -17,7 +17,7 @@ export class PullRequestService {
      * Fetch all pages from a paginated GitHub API endpoint.
      * Follows Link header rel="next" to iterate through pages.
      */
-    async fetchAllPagesGitHub(url, headers, maxPages = 10) {
+    async fetchAllPagesGitHub(url, headers, maxPages = 30) {
         const allResults = [];
         let nextUrl = url.includes('per_page=') ? url : `${url}${url.includes('?') ? '&' : '?'}per_page=100`;
         let page = 0;
@@ -45,7 +45,7 @@ export class PullRequestService {
      * Fetch all pages from a paginated GitLab API endpoint.
      * Follows X-Next-Page header or Link header.
      */
-    async fetchAllPagesGitLab(url, headers, maxPages = 10) {
+    async fetchAllPagesGitLab(url, headers, maxPages = 30) {
         const allResults = [];
         let nextUrl = url.includes('per_page=') ? url : `${url}${url.includes('?') ? '&' : '?'}per_page=100`;
         let page = 0;
@@ -948,7 +948,7 @@ export class PullRequestService {
         }
 
         // Top findings (limit to avoid huge comments)
-        const maxFindings = options.maxFindings || 10;
+        const maxFindings = options.maxFindings || 25;
         const topFindings = findings
             .filter(f => f.severity === 'critical' || f.severity === 'high' || f.severity === 'medium')
             .slice(0, maxFindings);
@@ -977,7 +977,7 @@ export class PullRequestService {
      * Format findings as inline review comments
      */
     formatInlineComments(findings, options = {}) {
-        const maxInline = options.maxInlineComments || 15;
+        const maxInline = options.maxInlineComments || 30;
 
         return findings
             .filter(f => f.filePath && f.line && f.line > 0)
@@ -1018,7 +1018,7 @@ export class PullRequestService {
         const fixableFindings = findings.filter(f =>
             f.filePath && f.line && f.codeSnippet &&
             (f.severity === 'critical' || f.severity === 'high')
-        ).slice(0, 10); // Limit to 10 to control API costs
+        ).slice(0, 25); // Limit to control API costs
 
         for (const finding of fixableFindings) {
             try {

@@ -937,7 +937,7 @@ function generateDependencies(fileContents, filePaths) {
 
 function generateFileDependencyGraph(importGraph, filePaths) {
     if (!importGraph || importGraph.size === 0) return null;
-    const MAX_FILES = 200;
+    const MAX_FILES = 500;
     const fileSet = new Set(filePaths);
     const importedBy = new Map();
     const connectionCount = {};

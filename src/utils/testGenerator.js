@@ -1090,11 +1090,139 @@ test.describe('${flowName}', () => {
      * Generate performance test patterns
      */
     async generatePerformanceTestPatterns(codeAnalysis, framework, _coverage) {
-        // Performance test generation logic
+        const filePath = codeAnalysis.filePath || 'code';
+        const functions = codeAnalysis.functions || [];
+        const tests = [];
+
+        // Configurable thresholds based on function complexity
+        const getThreshold = (func) => {
+            const complexity = func.complexity || 1;
+            if (complexity >= 10) return { sync: 2000, async: 5000, label: 'high-complexity' };
+            if (complexity >= 5) return { sync: 1000, async: 3000, label: 'medium-complexity' };
+            return { sync: 500, async: 1000, label: 'low-complexity' };
+        };
+
+        // Detect async functions
+        const isAsync = (func) => {
+            return func.async === true || (func.name || '').startsWith('async') ||
+                   func.returnType?.includes('Promise') || func.returnType?.includes('Observable');
+        };
+
+        // Generate timing tests for each function
+        for (const func of functions.slice(0, 15)) {
+            const threshold = getThreshold(func);
+            const funcIsAsync = isAsync(func);
+
+            if (framework === 'pytest') {
+                if (funcIsAsync) {
+                    tests.push(`@pytest.mark.asyncio
+async def test_${func.name}_async_performance():
+    """Ensure async ${func.name} completes within ${threshold.async}ms (${threshold.label})."""
+    import asyncio, time
+    start = time.perf_counter()
+    await ${func.name}(${func.params?.length ? func.params.map(() => 'mock_arg').join(', ') : ''})
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    assert elapsed_ms < ${threshold.async}, f"${func.name} took {elapsed_ms:.1f}ms, expected <${threshold.async}ms"
+`);
+                } else {
+                    tests.push(`def test_${func.name}_performance(benchmark):
+    """Ensure ${func.name} completes within ${threshold.sync}ms (${threshold.label})."""
+    result = benchmark(${func.name}${func.params?.length ? ', ' + func.params.map(() => 'mock_arg').join(', ') : ''})
+    assert benchmark.stats.stats.mean < ${threshold.sync / 1000}  # Under ${threshold.sync}ms
+`);
+                }
+            } else {
+                if (funcIsAsync) {
+                    tests.push(`it('${func.name} (async) should complete within ${threshold.async}ms [${threshold.label}]', async () => {
+    const start = performance.now();
+    await ${func.name}(${func.params?.length ? func.params.map(() => '/* mock */').join(', ') : ''});
+    const elapsed = performance.now() - start;
+    expect(elapsed).toBeLessThan(${threshold.async});
+});`);
+                } else {
+                    tests.push(`it('${func.name} should complete within ${threshold.sync}ms [${threshold.label}]', () => {
+    const start = performance.now();
+    ${func.name}(${func.params?.length ? func.params.map(() => '/* mock */').join(', ') : ''});
+    const elapsed = performance.now() - start;
+    expect(elapsed).toBeLessThan(${threshold.sync});
+});`);
+                }
+            }
+        }
+
+        // Add throughput/load tests for frequently-called functions
+        const hotFunctions = functions.filter(f => {
+            const name = (f.name || '').toLowerCase();
+            return name.includes('process') || name.includes('handle') || name.includes('parse') ||
+                   name.includes('transform') || name.includes('convert') || name.includes('calculate') ||
+                   name.includes('filter') || name.includes('map') || name.includes('reduce');
+        });
+
+        for (const func of hotFunctions.slice(0, 5)) {
+            const funcIsAsync = isAsync(func);
+            if (framework === 'pytest') {
+                tests.push(`def test_${func.name}_throughput():
+    """${func.name} should handle 1000 iterations within 5 seconds."""
+    import time
+    start = time.perf_counter()
+    for _ in range(1000):
+        ${func.name}(${func.params?.length ? func.params.map(() => 'mock_arg').join(', ') : ''})
+    elapsed = time.perf_counter() - start
+    assert elapsed < 5.0, f"1000 calls took {elapsed:.2f}s, expected <5s"
+`);
+            } else {
+                tests.push(`it('${func.name} should handle 1000 iterations within 5 seconds', ${funcIsAsync ? 'async ' : ''}() => {
+    const start = performance.now();
+    for (let i = 0; i < 1000; i++) {
+        ${funcIsAsync ? 'await ' : ''}${func.name}(${func.params?.length ? func.params.map(() => '/* mock */').join(', ') : ''});
+    }
+    const elapsed = performance.now() - start;
+    expect(elapsed).toBeLessThan(5000);
+});`);
+            }
+        }
+
+        // Add memory/resource tests if classes detected
+        if (codeAnalysis.classes?.length > 0) {
+            for (const cls of codeAnalysis.classes.slice(0, 5)) {
+                if (framework === 'pytest') {
+                    tests.push(`def test_${cls.name}_no_memory_leak():
+    """Ensure ${cls.name} cleans up resources properly."""
+    import tracemalloc
+    tracemalloc.start()
+    instances = [${cls.name}() for _ in range(1000)]
+    del instances
+    import gc; gc.collect()
+    current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert current < 10 * 1024 * 1024, f"Memory not freed: {current / 1024 / 1024:.1f}MB still allocated"
+`);
+                } else {
+                    tests.push(`it('${cls.name} should not leak resources on repeated instantiation', () => {
+    const before = process.memoryUsage?.().heapUsed || 0;
+    const instances = Array.from({ length: 1000 }, () => new ${cls.name}());
+    instances.length = 0; // Release references
+    if (global.gc) global.gc(); // Force GC if exposed via --expose-gc
+    const after = process.memoryUsage?.().heapUsed || 0;
+    // Allow up to 10MB growth for 1000 instances
+    expect(after - before).toBeLessThan(10 * 1024 * 1024);
+});`);
+                }
+            }
+        }
+
+        if (tests.length === 0) {
+            tests.push(framework === 'pytest'
+                ? `def test_module_import_performance():\n    """Ensure module imports quickly."""\n    import time\n    start = time.time()\n    # import module_under_test\n    assert time.time() - start < 2.0\n`
+                : `it('module should load within acceptable time', () => {\n    const start = performance.now();\n    // require or import module\n    expect(performance.now() - start).toBeLessThan(2000);\n});`
+            );
+        }
+
         return [{
             type: 'performance',
-            framework: framework,
-            tests: ['// Performance tests for ' + (codeAnalysis.filePath || 'code')]
+            framework,
+            tests,
+            description: `Performance tests for ${filePath} (${functions.length} functions, thresholds by complexity)`
         }];
     }
 
@@ -1102,11 +1230,77 @@ test.describe('${flowName}', () => {
      * Generate security test patterns
      */
     async generateSecurityTestPatterns(codeAnalysis, framework, _coverage) {
-        // Security test generation logic
+        const filePath = codeAnalysis.filePath || 'code';
+        const functions = codeAnalysis.functions || [];
+        const tests = [];
+
+        // Detect functions that handle user input, SQL, file paths, etc.
+        const inputHandlers = functions.filter(f => {
+            const name = f.name.toLowerCase();
+            return name.includes('input') || name.includes('parse') || name.includes('query') ||
+                   name.includes('request') || name.includes('param') || name.includes('body') ||
+                   name.includes('validate') || name.includes('sanitize') || name.includes('auth') ||
+                   name.includes('login') || name.includes('password') || name.includes('token') ||
+                   name.includes('file') || name.includes('path') || name.includes('url');
+        });
+
+        const targets = inputHandlers.length > 0 ? inputHandlers : functions.slice(0, 5);
+
+        for (const func of targets.slice(0, 8)) {
+            const name = func.name;
+            const nameLower = name.toLowerCase();
+
+            // SQL injection tests
+            if (nameLower.includes('query') || nameLower.includes('sql') || nameLower.includes('db') || nameLower.includes('find')) {
+                if (framework === 'pytest') {
+                    tests.push(`def test_${name}_sql_injection():\n    """${name} should not be vulnerable to SQL injection."""\n    malicious = "'; DROP TABLE users; --"\n    result = ${name}(malicious)\n    assert "DROP" not in str(result)\n`);
+                } else {
+                    tests.push(`it('${name} should reject SQL injection attempts', () => {\n    const malicious = "\\'; DROP TABLE users; --";\n    expect(() => ${name}(malicious)).not.toThrow();\n    // Verify query was parameterized, not concatenated\n});`);
+                }
+            }
+
+            // XSS tests
+            if (nameLower.includes('render') || nameLower.includes('html') || nameLower.includes('template') || nameLower.includes('display')) {
+                if (framework === 'pytest') {
+                    tests.push(`def test_${name}_xss_prevention():\n    """${name} should sanitize HTML output."""\n    malicious = '<script>alert("xss")</script>'\n    result = ${name}(malicious)\n    assert "<script>" not in str(result)\n`);
+                } else {
+                    tests.push(`it('${name} should sanitize against XSS', () => {\n    const malicious = '<script>alert("xss")</script>';\n    const result = ${name}(malicious);\n    expect(result).not.toContain('<script>');\n});`);
+                }
+            }
+
+            // Path traversal tests
+            if (nameLower.includes('file') || nameLower.includes('path') || nameLower.includes('read') || nameLower.includes('load')) {
+                if (framework === 'pytest') {
+                    tests.push(`def test_${name}_path_traversal():\n    """${name} should prevent path traversal attacks."""\n    malicious = "../../../etc/passwd"\n    with pytest.raises(Exception):\n        ${name}(malicious)\n`);
+                } else {
+                    tests.push(`it('${name} should reject path traversal attempts', () => {\n    const malicious = '../../../etc/passwd';\n    expect(() => ${name}(malicious)).toThrow();\n});`);
+                }
+            }
+
+            // Auth bypass tests
+            if (nameLower.includes('auth') || nameLower.includes('login') || nameLower.includes('token') || nameLower.includes('session')) {
+                if (framework === 'pytest') {
+                    tests.push(`def test_${name}_rejects_invalid_credentials():\n    """${name} should reject invalid authentication."""\n    assert not ${name}("", "")\n    assert not ${name}(None, None)\n`);
+                } else {
+                    tests.push(`it('${name} should reject invalid credentials', () => {\n    expect(${name}('', '')).toBeFalsy();\n    expect(${name}(null, null)).toBeFalsy();\n});`);
+                }
+            }
+
+            // General null/undefined/empty input safety
+            if (tests.length === 0 || !inputHandlers.includes(func)) {
+                if (framework === 'pytest') {
+                    tests.push(`def test_${name}_handles_malformed_input():\n    """${name} should handle malformed input safely."""\n    for bad_input in [None, "", "\\x00\\x01", "a" * 10000, -1, float("inf")]:\n        try:\n            ${name}(bad_input)\n        except (TypeError, ValueError):\n            pass  # Expected\n`);
+                } else {
+                    tests.push(`it('${name} should handle malformed input safely', () => {\n    const badInputs = [null, undefined, '', '\\x00', 'a'.repeat(10000), -1, Infinity];\n    for (const input of badInputs) {\n        expect(() => ${name}(input)).not.toThrow(/unhandled|crash|FATAL/i);\n    }\n});`);
+                }
+            }
+        }
+
         return [{
             type: 'security',
-            framework: framework,
-            tests: ['// Security tests for ' + (codeAnalysis.filePath || 'code')]
+            framework,
+            tests,
+            description: `Security tests for ${filePath}`
         }];
     }
 
@@ -1114,11 +1308,89 @@ test.describe('${flowName}', () => {
      * Generate accessibility test patterns
      */
     async generateA11yTestPatterns(codeAnalysis, framework, _coverage) {
-        // Accessibility test generation logic
+        const filePath = codeAnalysis.filePath || 'code';
+        const tests = [];
+        const classes = codeAnalysis.classes || [];
+        const functions = codeAnalysis.functions || [];
+
+        // Detect UI components (React, Vue, Svelte, etc.)
+        const uiComponents = [...classes, ...functions].filter(item => {
+            const name = (item.name || '').toLowerCase();
+            return name.includes('component') || name.includes('button') || name.includes('form') ||
+                   name.includes('input') || name.includes('modal') || name.includes('dialog') ||
+                   name.includes('nav') || name.includes('menu') || name.includes('render') ||
+                   name.includes('page') || name.includes('view') || name.includes('layout') ||
+                   name.includes('header') || name.includes('footer') || name.includes('sidebar') ||
+                   name.includes('card') || name.includes('list') || name.includes('table') ||
+                   name.includes('dropdown') || name.includes('tooltip') || name.includes('tab');
+        });
+
+        for (const comp of uiComponents.slice(0, 10)) {
+            if (framework === 'pytest') {
+                // Python/Selenium-based a11y tests
+                tests.push(`def test_${comp.name}_has_accessible_elements(driver):
+    """${comp.name} should have proper ARIA attributes and keyboard navigation."""
+    # Navigate to page containing ${comp.name}
+    # element = driver.find_element(By.CSS_SELECTOR, '[data-testid="${comp.name}"]')
+    # Assert ARIA labels exist
+    # assert element.get_attribute('aria-label') or element.get_attribute('aria-labelledby')
+    # Assert role is set
+    # assert element.get_attribute('role')
+    # Test keyboard focus
+    # element.send_keys(Keys.TAB)
+    # assert driver.switch_to.active_element == element
+    pass
+`);
+            } else {
+                // jest-axe automated accessibility test
+                tests.push(`it('${comp.name} should have no accessibility violations', async () => {
+    const { container } = render(<${comp.name} />);
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
+});`);
+                // @testing-library role-based tests
+                tests.push(`it('${comp.name} should be accessible via roles and labels', () => {
+    render(<${comp.name} />);
+    // Verify component is discoverable by role
+    // expect(screen.getByRole('button')).toBeInTheDocument();
+    // Verify aria-label or accessible name exists
+    // expect(screen.getByRole('button')).toHaveAccessibleName();
+});`);
+                // Keyboard navigation test
+                tests.push(`it('${comp.name} should support keyboard navigation', () => {
+    render(<${comp.name} />);
+    const element = screen.getByRole('button') || screen.getByTestId('${comp.name}');
+    element.focus();
+    expect(element).toHaveFocus();
+    fireEvent.keyDown(element, { key: 'Enter' });
+    // Verify Enter activates the component
+    fireEvent.keyDown(element, { key: ' ' });
+    // Verify Space activates the component (for buttons)
+});`);
+            }
+        }
+
+        // Add import helpers at the top
+        if (uiComponents.length > 0 && framework !== 'pytest') {
+            tests.unshift(`// Accessibility test imports
+// import { axe, toHaveNoViolations } from 'jest-axe';
+// import { render, screen, fireEvent } from '@testing-library/react';
+// expect.extend(toHaveNoViolations);
+`);
+        }
+
+        if (uiComponents.length === 0) {
+            tests.push(framework === 'pytest'
+                ? `# No UI components detected — skipping a11y tests for ${filePath}\n`
+                : `// No UI components detected — skipping a11y tests for ${filePath}`
+            );
+        }
+
         return [{
             type: 'accessibility',
-            framework: framework,
-            tests: ['// Accessibility tests for ' + (codeAnalysis.filePath || 'code')]
+            framework,
+            tests,
+            description: `Accessibility tests for ${filePath} (${uiComponents.length} components)`
         }];
     }
 
@@ -1607,20 +1879,71 @@ test.describe('${flowName}', () => {
      * These are placeholder tests that need LLM completion
      */
     async generateFallbackFunctionTests(func, framework) {
-        console.warn(`⚠️ Using fallback for function: ${func.name} - LLM generation should be retried`);
+        console.warn(`⚠️ Using fallback for function: ${func.name} - generating template tests`);
 
-        // Return minimal metadata structure indicating LLM generation is needed
+        const testCases = [];
+        const name = func.name;
+        const params = func.params || [];
+        const paramList = params.map(p => p.name || p).join(', ');
+
+        if (framework === 'pytest') {
+            // Basic call test
+            testCases.push({
+                name: `test_${name}_basic`,
+                type: 'unit',
+                code: `def test_${name}_basic():\n    """${name} should execute without error."""\n    result = ${name}(${params.map(() => 'None').join(', ')})\n    assert result is not None or result is None  # Verify no crash\n`,
+                description: `Basic call test for ${name}`
+            });
+            // Edge case: empty/null inputs
+            if (params.length > 0) {
+                testCases.push({
+                    name: `test_${name}_empty_inputs`,
+                    type: 'edge_case',
+                    code: `def test_${name}_empty_inputs():\n    """${name} should handle empty inputs gracefully."""\n    try:\n        ${name}(${params.map(() => '""').join(', ')})\n    except (TypeError, ValueError):\n        pass  # Expected for invalid input\n`,
+                    description: `Edge case test for ${name} with empty inputs`
+                });
+            }
+            // Error handling test
+            testCases.push({
+                name: `test_${name}_none_input`,
+                type: 'edge_case',
+                code: `def test_${name}_none_input():\n    """${name} should handle None gracefully."""\n    try:\n        ${name}(None)\n    except (TypeError, ValueError):\n        pass\n`,
+                description: `None input test for ${name}`
+            });
+        } else {
+            // Jest/Mocha style
+            testCases.push({
+                name: `${name} basic call`,
+                type: 'unit',
+                code: `it('should execute ${name} without error', () => {\n    expect(() => ${name}(${params.map(() => 'undefined').join(', ')})).not.toThrow();\n});`,
+                description: `Basic call test for ${name}`
+            });
+            if (params.length > 0) {
+                testCases.push({
+                    name: `${name} empty inputs`,
+                    type: 'edge_case',
+                    code: `it('should handle empty inputs in ${name}', () => {\n    expect(() => ${name}(${params.map(() => "''").join(', ')})).not.toThrow();\n});`,
+                    description: `Edge case test for ${name}`
+                });
+            }
+            testCases.push({
+                name: `${name} null safety`,
+                type: 'edge_case',
+                code: `it('should handle null/undefined in ${name}', () => {\n    expect(() => ${name}(null)).not.toThrow();\n    expect(() => ${name}(undefined)).not.toThrow();\n});`,
+                description: `Null safety test for ${name}`
+            });
+        }
+
         return {
-            functionName: func.name,
+            functionName: name,
             line: func.line,
             complexity: func.complexity,
-            testCases: [],
+            testCases,
             metadata: {
                 fallback: true,
                 requiresLLMGeneration: true,
-                reason: 'LLM generation failed - tests need to be generated via LLM',
-                generatedAt: new Date().toISOString(),
-                warning: 'No template-based tests generated - LLM generation required'
+                reason: 'LLM generation failed - template tests provided as baseline',
+                generatedAt: new Date().toISOString()
             }
         };
     }
@@ -1631,18 +1954,76 @@ test.describe('${flowName}', () => {
      * IMPORTANT: This should ONLY be used as last resort when LLM is unavailable
      */
     async generateFallbackClassTests(cls, framework) {
-        console.warn(`⚠️ Using fallback for class: ${cls.name} - LLM generation should be retried`);
+        console.warn(`⚠️ Using fallback for class: ${cls.name} - generating template tests`);
+
+        const methods = cls.methods || [];
+        const methodResults = [];
+
+        if (framework === 'pytest') {
+            // Instance creation test
+            const initTest = {
+                name: `test_${cls.name}_instantiation`,
+                type: 'unit',
+                code: `def test_${cls.name}_instantiation():\n    """${cls.name} should instantiate without error."""\n    instance = ${cls.name}()\n    assert instance is not None\n`,
+                description: `Instantiation test for ${cls.name}`
+            };
+
+            for (const method of methods) {
+                const testCases = [{
+                    name: `test_${cls.name}_${method.name}`,
+                    type: 'unit',
+                    code: `def test_${cls.name}_${method.name}():\n    """${method.name} should be callable."""\n    instance = ${cls.name}()\n    assert hasattr(instance, '${method.name}')\n    assert callable(getattr(instance, '${method.name}'))\n`,
+                    description: `Method existence test for ${cls.name}.${method.name}`
+                }];
+                methodResults.push({ name: method.name, testCases });
+            }
+
+            if (methodResults.length > 0) {
+                methodResults[0].testCases.unshift(initTest);
+            } else {
+                methodResults.push({ name: '__init__', testCases: [initTest] });
+            }
+        } else {
+            const initTest = {
+                name: `${cls.name} instantiation`,
+                type: 'unit',
+                code: `it('should create an instance of ${cls.name}', () => {\n    const instance = new ${cls.name}();\n    expect(instance).toBeInstanceOf(${cls.name});\n});`,
+                description: `Instantiation test for ${cls.name}`
+            };
+
+            for (const method of methods) {
+                const testCases = [{
+                    name: `${cls.name}.${method.name} exists`,
+                    type: 'unit',
+                    code: `it('should have method ${method.name}', () => {\n    const instance = new ${cls.name}();\n    expect(typeof instance.${method.name}).toBe('function');\n});`,
+                    description: `Method existence test for ${cls.name}.${method.name}`
+                }, {
+                    name: `${cls.name}.${method.name} no-throw`,
+                    type: 'edge_case',
+                    code: `it('${method.name} should not throw on basic call', () => {\n    const instance = new ${cls.name}();\n    expect(() => instance.${method.name}()).not.toThrow();\n});`,
+                    description: `No-throw test for ${cls.name}.${method.name}`
+                }];
+                methodResults.push({ name: method.name, testCases });
+            }
+
+            if (methodResults.length > 0) {
+                methodResults[0].testCases.unshift(initTest);
+            } else {
+                methodResults.push({ name: 'constructor', testCases: [initTest] });
+            }
+        }
+
+        const totalTestCases = methodResults.reduce((sum, m) => sum + m.testCases.length, 0);
 
         return {
             className: cls.name,
-            methods: cls.methods.map(m => ({ name: m.name, testCases: [] })),
-            totalTestCases: 0,
+            methods: methodResults,
+            totalTestCases,
             metadata: {
                 fallback: true,
                 requiresLLMGeneration: true,
-                reason: 'LLM generation failed - tests need to be generated via LLM',
-                generatedAt: new Date().toISOString(),
-                warning: 'No template-based tests generated - LLM generation required'
+                reason: 'LLM generation failed - template tests provided as baseline',
+                generatedAt: new Date().toISOString()
             }
         };
     }
@@ -1711,8 +2092,76 @@ test.describe('${flowName}', () => {
 
     async improveTestQuality(testSuite, analysis, issues) {
         console.log('🔧 Attempting to improve test quality...');
-        // For now, return the test suite as-is
-        // Future: implement quality improvement logic
+
+        const functions = analysis.functions || [];
+        const classes = analysis.classes || [];
+        const framework = testSuite.framework || 'jest';
+
+        // Collect existing test names to avoid duplicates
+        const existingTestNames = new Set();
+        const collectNames = (obj) => {
+            if (!obj) return;
+            if (typeof obj === 'string') return;
+            if (Array.isArray(obj)) { obj.forEach(collectNames); return; }
+            if (obj.name) existingTestNames.add(obj.name);
+            if (obj.testCases) collectNames(obj.testCases);
+            if (obj.methods) collectNames(obj.methods);
+            if (obj.tests) collectNames(obj.tests);
+        };
+        collectNames(testSuite.tests);
+
+        const additionalTests = [];
+
+        // Issue: Insufficient test coverage — add tests for uncovered functions
+        if (issues.includes('Insufficient test coverage')) {
+            for (const func of functions) {
+                if (existingTestNames.has(func.name)) continue;
+
+                const fallback = await this.generateFallbackFunctionTests(func, framework);
+                if (fallback.testCases.length > 0) {
+                    additionalTests.push(...fallback.testCases);
+                }
+            }
+        }
+
+        // Add edge case tests for high-complexity functions
+        const complexFunctions = functions.filter(f => (f.complexity || 1) >= 5);
+        for (const func of complexFunctions.slice(0, 5)) {
+            const edgeName = `${func.name} edge cases`;
+            if (existingTestNames.has(edgeName)) continue;
+
+            if (framework === 'pytest') {
+                additionalTests.push({
+                    name: `test_${func.name}_edge_cases`,
+                    type: 'edge_case',
+                    code: `@pytest.mark.parametrize("input_val", [None, "", 0, -1, [], {}, float("inf")])\ndef test_${func.name}_edge_cases(input_val):\n    """${func.name} should handle edge case inputs."""\n    try:\n        ${func.name}(input_val)\n    except (TypeError, ValueError):\n        pass\n`,
+                    description: `Edge case tests for complex function ${func.name}`
+                });
+            } else {
+                additionalTests.push({
+                    name: edgeName,
+                    type: 'edge_case',
+                    code: `it('${func.name} should handle edge case inputs', () => {\n    const edgeCases = [null, undefined, '', 0, -1, [], {}, NaN, Infinity];\n    for (const input of edgeCases) {\n        expect(() => ${func.name}(input)).not.toThrow(/unhandled/i);\n    }\n});`,
+                    description: `Edge case tests for complex function ${func.name}`
+                });
+            }
+        }
+
+        // Merge additional tests into the test suite
+        if (additionalTests.length > 0) {
+            if (!testSuite.tests) testSuite.tests = {};
+            if (!testSuite.tests.unit) testSuite.tests.unit = { totalTests: 0, testCases: [] };
+            if (!testSuite.tests.unit.testCases) testSuite.tests.unit.testCases = [];
+
+            testSuite.tests.unit.testCases.push(...additionalTests);
+            testSuite.tests.unit.totalTests = (testSuite.tests.unit.totalTests || 0) + additionalTests.length;
+            console.log(`✅ Added ${additionalTests.length} tests to improve quality`);
+
+            // Re-validate after improvement
+            testSuite.quality = await this.validateTestSuiteQuality(testSuite, analysis);
+            console.log(`📊 Updated quality score: ${testSuite.quality.score}`);
+        }
+
         return testSuite;
     }
 

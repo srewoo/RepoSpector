@@ -131,15 +131,32 @@ export const CHANGELOG_SYSTEM_PROMPT = `You are **RepoSpector**, an AI-powered c
  */
 export function buildChangelogPrompt(prData) {
     const commitMessages = (prData.commits || []).map(c => `- ${c.message}`).join('\n');
+    const fileList = (prData.files || []).map(f => `- ${f.filename} (${f.status})`).slice(0, 30).join('\n');
+
+    // Include patches so the LLM can see actual code changes, not just commit messages
+    const patches = (prData.files || [])
+        .filter(f => f.patch && f.patch.length > 0)
+        .slice(0, 20)
+        .map(f => {
+            const patch = f.patch.length > 1000 ? f.patch.slice(0, 1000) + '\n... (truncated)' : f.patch;
+            return `### ${f.filename} (${f.status})\n\`\`\`\n${patch}\n\`\`\``;
+        })
+        .join('\n\n');
 
     return `Generate a changelog entry for:
 
 **PR Title**: ${prData.title || 'Untitled'}
-**Description**: ${prData.description || 'None'}
+**Description**: ${(prData.description || 'None').slice(0, 1000)}
 **Stats**: +${prData.stats?.additions || 0} / -${prData.stats?.deletions || 0} across ${prData.files?.length || 0} files
 
 ### Commits
 ${commitMessages || 'No commits'}
+
+### Files Changed
+${fileList}
+
+### Code Changes (Diffs)
+${patches || 'No patches available'}
 
 Generate a changelog entry using this format:
 ### [Category] - YYYY-MM-DD
@@ -156,7 +173,7 @@ Generate a changelog entry using this format:
 #### Security
 - Security improvements
 
-Only include relevant sections. Be concise and user-facing (not developer-internal). Use today's date.`;
+Only include relevant sections. Be concise and user-facing (not developer-internal). Use today's date. Base entries on the ACTUAL code changes shown above, not just commit messages.`;
 }
 
 export const MERMAID_SYSTEM_PROMPT = `You are **RepoSpector**, an AI-powered code analysis Chrome extension with direct access to Pull Request data from the user's browser. The PR data provided was automatically extracted from the currently open page. You are a software architecture diagram expert. Analyze PR code changes and generate a Mermaid sequence diagram that shows the runtime interaction flow between services, components, and systems affected by the PR. Output ONLY valid Mermaid syntax, no markdown code fences.`;
@@ -165,24 +182,37 @@ export const MERMAID_SYSTEM_PROMPT = `You are **RepoSpector**, an AI-powered cod
  * Build prompt for Mermaid sequence diagram generation
  */
 export function buildMermaidPrompt(prData) {
-    const files = (prData.files || []).map(f => f.filename).slice(0, 30);
+    const files = (prData.files || []).map(f => f.filename).slice(0, 60);
     const fileList = files.map(f => `- ${f}`).join('\n');
     const commitMessages = (prData.commits || []).map(c => `- ${c.message}`).join('\n');
 
     // Include truncated patches for key files so LLM can infer interactions
     const patches = (prData.files || [])
         .filter(f => f.patch && f.patch.length > 0)
-        .slice(0, 15)
+        .slice(0, 30)
         .map(f => {
-            const patch = f.patch.length > 600 ? f.patch.slice(0, 600) + '\n... (truncated)' : f.patch;
+            const patch = f.patch.length > 1500 ? f.patch.slice(0, 1500) + '\n... (truncated)' : f.patch;
             return `### ${f.filename} (${f.status})\n\`\`\`\n${patch}\n\`\`\``;
         })
         .join('\n\n');
 
+    // Determine diagram type
+    const diagramType = prData.diagramType || 'sequence';
+
+    if (diagramType === 'class') {
+        return buildClassDiagramPrompt(prData, files, fileList, commitMessages, patches);
+    }
+    if (diagramType === 'state') {
+        return buildStateDiagramPrompt(prData, files, fileList, commitMessages, patches);
+    }
+    if (diagramType === 'er') {
+        return buildERDiagramPrompt(prData, files, fileList, commitMessages, patches);
+    }
+
     return `Generate a Mermaid **sequence diagram** showing the runtime interaction flow for this PR:
 
 **Title**: ${prData.title || 'Untitled'}
-**Description**: ${(prData.description || 'No description').slice(0, 500)}
+**Description**: ${(prData.description || 'No description').slice(0, 1000)}
 **Branch**: ${prData.branches?.source || '?'} → ${prData.branches?.target || '?'}
 **Stats**: +${prData.stats?.additions || 0} / -${prData.stats?.deletions || 0} across ${prData.stats?.changedFiles || files.length} files
 
@@ -204,11 +234,109 @@ ${patches || 'No patches available'}
 - Use \`alt\`/\`else\` blocks for conditional logic paths (success/failure, found/not found)
 - Use \`Note over\` for important processing steps or validations
 - Use \`activate\`/\`deactivate\` to show when a participant is actively processing
-- Keep it focused: max 8 participants, max 25 interactions
+- Keep it focused: max 12 participants, max 40 interactions
 - Participant names should be short service/component names (not full file paths)
 - Output ONLY the Mermaid code, starting with "sequenceDiagram"
 - Do NOT wrap in markdown code fences
 - Do NOT use special characters like < > { } in participant names or labels — use plain text only`;
+}
+
+/**
+ * Build prompt for class diagram generation
+ */
+function buildClassDiagramPrompt(prData, files, fileList, commitMessages, patches) {
+    return `Generate a Mermaid **class diagram** showing the class/interface structure affected by this PR:
+
+**Title**: ${prData.title || 'Untitled'}
+**Description**: ${(prData.description || 'No description').slice(0, 1000)}
+**Branch**: ${prData.branches?.source || '?'} → ${prData.branches?.target || '?'}
+**Stats**: +${prData.stats?.additions || 0} / -${prData.stats?.deletions || 0} across ${prData.stats?.changedFiles || files.length} files
+
+### Commits
+${commitMessages || 'No commit messages'}
+
+### Files Changed
+${fileList}
+
+### Code Changes (Diffs)
+${patches || 'No patches available'}
+
+### Rules
+- Use \`classDiagram\` syntax
+- Show classes, interfaces, and abstract classes affected by the PR
+- Include key attributes and methods (with types and visibility: + public, - private, # protected)
+- Show relationships: inheritance (--|>), composition (*--), aggregation (o--), association (-->), implementation (..|>)
+- Use \`<<interface>>\` and \`<<abstract>>\` stereotypes where appropriate
+- Group related classes logically
+- Max 15 classes — focus on the most important ones changed in the PR
+- Output ONLY the Mermaid code, starting with "classDiagram"
+- Do NOT wrap in markdown code fences`;
+}
+
+/**
+ * Build prompt for state diagram generation
+ */
+function buildStateDiagramPrompt(prData, files, fileList, commitMessages, patches) {
+    return `Generate a Mermaid **state diagram** showing state transitions affected by this PR:
+
+**Title**: ${prData.title || 'Untitled'}
+**Description**: ${(prData.description || 'No description').slice(0, 1000)}
+**Branch**: ${prData.branches?.source || '?'} → ${prData.branches?.target || '?'}
+**Stats**: +${prData.stats?.additions || 0} / -${prData.stats?.deletions || 0} across ${prData.stats?.changedFiles || files.length} files
+
+### Commits
+${commitMessages || 'No commit messages'}
+
+### Files Changed
+${fileList}
+
+### Code Changes (Diffs)
+${patches || 'No patches available'}
+
+### Rules
+- Use \`stateDiagram-v2\` syntax
+- Identify the primary entity/object whose state changes are affected by the PR
+- Show all states with descriptive names (e.g., Idle, Loading, Error, Success)
+- Show transitions with event/action labels (e.g., "submit / validate")
+- Use \`[*]\` for start and end states
+- Use composite states (state ... { }) for nested state machines
+- Use choice pseudo-states (<<choice>>) for conditional branching
+- Use notes where they clarify non-obvious transitions
+- Max 20 states — focus on the primary workflow
+- Output ONLY the Mermaid code, starting with "stateDiagram-v2"
+- Do NOT wrap in markdown code fences`;
+}
+
+/**
+ * Build prompt for ER diagram generation
+ */
+function buildERDiagramPrompt(prData, files, fileList, commitMessages, patches) {
+    return `Generate a Mermaid **entity-relationship diagram** showing data models affected by this PR:
+
+**Title**: ${prData.title || 'Untitled'}
+**Description**: ${(prData.description || 'No description').slice(0, 1000)}
+**Branch**: ${prData.branches?.source || '?'} → ${prData.branches?.target || '?'}
+**Stats**: +${prData.stats?.additions || 0} / -${prData.stats?.deletions || 0} across ${prData.stats?.changedFiles || files.length} files
+
+### Commits
+${commitMessages || 'No commit messages'}
+
+### Files Changed
+${fileList}
+
+### Code Changes (Diffs)
+${patches || 'No patches available'}
+
+### Rules
+- Use \`erDiagram\` syntax
+- Show entities (tables/models) with their key attributes and types
+- Use proper cardinality: ||--o{ (one to many), ||--|| (one to one), }o--o{ (many to many)
+- Include primary keys (PK) and foreign keys (FK) in attribute lists
+- Label relationships with verbs (e.g., CUSTOMER ||--o{ ORDER : "places")
+- Focus on entities that are added, modified, or directly related to PR changes
+- Max 15 entities — include related entities for context
+- Output ONLY the Mermaid code, starting with "erDiagram"
+- Do NOT wrap in markdown code fences`;
 }
 
 /**

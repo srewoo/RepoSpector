@@ -379,8 +379,9 @@ class BackgroundService {
         try {
             // Determine if request came from popup or content script
             // Popup messages have no sender.tab, content script messages have sender.tab
-            const isFromPopup = !sender || !sender.tab;
-            console.log('📍 Message received:', message.type, '| From:', isFromPopup ? 'Popup' : 'Content Script');
+            // Also check message.isFromPopup flag set by content script relay for iframe popup
+            const isFromPopup = !sender || !sender.tab || message.isFromPopup === true;
+            console.log('📍 Message received:', message.type, '| From:', isFromPopup ? 'Popup' : 'Content Script', '| message.isFromPopup:', message.isFromPopup);
 
             switch (message.type) {
                 case 'GENERATE_TESTS':
@@ -517,6 +518,10 @@ class BackgroundService {
 
                 case 'GENERATE_REPO_MINDMAP':
                     await this.handleGenerateRepoMindmap(message, sendResponse);
+                    break;
+
+                case 'GENERATE_REPO_DIAGRAM':
+                    await this.handleGenerateRepoDiagram(message, sendResponse);
                     break;
 
                 case 'GENERATE_REPO_INFO':
@@ -1053,8 +1058,9 @@ class BackgroundService {
         const { tabId, question, conversationHistory, useDeepContext } = message.payload || message.data || {};
 
         // Determine if request came from popup or content script
-        const isFromPopup = !sender || !sender.tab;
-        console.log('📍 Request origin:', isFromPopup ? 'Popup' : 'Content Script');
+        // Also check message.isFromPopup flag set by content script relay for iframe popup
+        const isFromPopup = !sender || !sender.tab || message.isFromPopup === true;
+        console.log('📍 Request origin:', isFromPopup ? 'Popup' : 'Content Script', '| message.isFromPopup:', message.isFromPopup);
 
         try {
             console.log('💬 Starting code chat session...');
@@ -1284,7 +1290,7 @@ class BackgroundService {
                 model: settings.model || modelId,  // Use full model identifier for provider routing
                 messages: messages,
                 temperature: 0.3,
-                max_tokens: 2000
+                max_tokens: 4096
             }, settings.apiKey, {
                 streaming: true,
                 tabId: tabId,
@@ -1506,7 +1512,7 @@ ${CODE_REVIEW_PROMPT}`;
                         { role: 'user', content: chunkPrompt }
                     ],
                     temperature: 0.3,
-                    max_tokens: 2000
+                    max_tokens: 4096
                 }, apiKey, {
                     streaming: false,
                     requestId: `batch_${chunk.index}_${Date.now()}`
@@ -1772,7 +1778,7 @@ Format your response in a developer-friendly way with code examples where approp
             model: settings.model || modelId,  // Use full model identifier for provider routing
             messages: messages,
             temperature: 0.1,
-            max_tokens: 4000
+            max_tokens: 8192
         }, settings.apiKey, {
             streaming: true,
             tabId: options.tabId,
@@ -1848,7 +1854,7 @@ Format your response in a developer-friendly way with code examples where approp
             model: settings.model || modelId,  // Use full model identifier for provider routing
             messages: messages,
             temperature: 0.1,
-            max_tokens: 2000
+            max_tokens: 4096
         }, settings.apiKey, {
             streaming: true,
             tabId: options.tabId,
@@ -2107,7 +2113,7 @@ Return only the complete test code with proper syntax for the detected language,
             return { summaryText: '', sources: [], estimatedTokens: 0 };
         }
 
-        const maxPreviewLength = 200; // Characters per chunk preview
+        const maxPreviewLength = 500; // Characters per chunk preview
         const summaryParts = [];
         const sources = [];
 
@@ -2156,8 +2162,8 @@ Return only the complete test code with proper syntax for the detected language,
             const content = message.content || '';
 
             // Truncate very long messages to avoid token bloat
-            const truncatedContent = content.length > 1000
-                ? content.substring(0, 1000) + '... [truncated]'
+            const truncatedContent = content.length > 2000
+                ? content.substring(0, 2000) + '... [truncated]'
                 : content;
 
             formatted += `**${role}:** ${truncatedContent}\n\n`;
@@ -3022,7 +3028,7 @@ Return only the complete test code with proper syntax for the detected language,
                 systemPrompt = PR_ANALYSIS_SYSTEM_PROMPT;
                 userPrompt = buildPRAnalysisPrompt(prData, {
                     focusAreas: options.focusAreas || ['security', 'bugs', 'performance', 'style'],
-                    maxFilesToReview: options.maxFiles || 40,
+                    maxFilesToReview: options.maxFiles || 100,
                     includeTestAnalysis: options.includeTestAnalysis !== false,
                     ...contextWithDocs
                 });
@@ -3395,7 +3401,7 @@ Return only the complete test code with proper syntax for the detected language,
                 systemPrompt = PR_ANALYSIS_SYSTEM_PROMPT;
                 userPrompt = buildPRAnalysisPrompt(prData, {
                     focusAreas: options.focusAreas || ['security', 'bugs', 'performance', 'style'],
-                    maxFilesToReview: options.maxFiles || 40,
+                    maxFilesToReview: options.maxFiles || 100,
                     includeTestAnalysis: options.includeTestAnalysis !== false,
                     ragContext
                 });
@@ -3940,33 +3946,119 @@ Return only the complete test code with proper syntax for the detected language,
 
     async handleGenerateMermaidDiagram(message, sendResponse) {
         try {
-            const { prUrl } = message.data || message.payload || {};
+            const { prUrl, diagramType } = message.data || message.payload || {};
             if (!prUrl) { sendResponse({ success: false, error: 'PR URL required' }); return; }
 
             await this.updatePRServiceTokens();
             const prData = await this.pullRequestService.fetchPullRequest(prUrl);
+            if (diagramType) prData.diagramType = diagramType;
             const settings = await this.getSettings();
 
-            const prompt = buildMermaidPrompt(prData);
-            const response = await this.llmService.streamChat(
+            const MAX_RETRIES = 2;
+            let lastError = null;
+
+            for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+                const prompt = attempt === 1
+                    ? buildMermaidPrompt(prData)
+                    : `${buildMermaidPrompt(prData)}\n\nIMPORTANT: Your previous output had syntax errors:\n${lastError}\nFix these issues and output ONLY valid Mermaid syntax.`;
+
+                const response = await this.llmService.streamChat(
+                    [
+                        { role: 'system', content: MERMAID_SYSTEM_PROMPT },
+                        { role: 'user', content: prompt }
+                    ],
+                    { provider: settings.provider, model: settings.model, apiKey: settings.apiKey, stream: false }
+                );
+
+                let mermaidCode = (response.content || response).trim();
+                mermaidCode = mermaidCode.replace(/^```(?:mermaid)?\n?/, '').replace(/\n?```$/, '').trim();
+                mermaidCode = this.sanitizeMermaidCode(mermaidCode);
+
+                // Validate diagram syntax
+                const validation = this.validateMermaidSyntax(mermaidCode, diagramType || 'sequence');
+                if (validation.valid) {
+                    console.log(`✅ Mermaid diagram generated successfully (attempt ${attempt})`);
+                    sendResponse({ success: true, data: { mermaidCode } });
+                    return;
+                }
+
+                console.warn(`⚠️ Mermaid validation failed (attempt ${attempt}/${MAX_RETRIES}):`, validation.errors);
+                lastError = validation.errors.join('; ');
+            }
+
+            // Return best-effort result after retries exhausted
+            console.warn('⚠️ Returning diagram despite validation issues after retries');
+            const finalPrompt = buildMermaidPrompt(prData);
+            const finalResponse = await this.llmService.streamChat(
                 [
                     { role: 'system', content: MERMAID_SYSTEM_PROMPT },
-                    { role: 'user', content: prompt }
+                    { role: 'user', content: finalPrompt }
                 ],
                 { provider: settings.provider, model: settings.model, apiKey: settings.apiKey, stream: false }
             );
-
-            let mermaidCode = (response.content || response).trim();
-            // Strip markdown fences if present
-            mermaidCode = mermaidCode.replace(/^```(?:mermaid)?\n?/, '').replace(/\n?```$/, '').trim();
-            // Sanitize: fix nested brackets/special chars in node labels
-            mermaidCode = this.sanitizeMermaidCode(mermaidCode);
-
-            sendResponse({ success: true, data: { mermaidCode } });
+            let finalCode = (finalResponse.content || finalResponse).trim();
+            finalCode = finalCode.replace(/^```(?:mermaid)?\n?/, '').replace(/\n?```$/, '').trim();
+            finalCode = this.sanitizeMermaidCode(finalCode);
+            sendResponse({ success: true, data: { mermaidCode: finalCode, warning: 'Diagram may contain syntax issues' } });
         } catch (error) {
             this.errorHandler.logError('Generate Mermaid Diagram', error);
             sendResponse({ success: false, error: this.getErrorMessage(error) });
         }
+    }
+
+    /**
+     * Validate Mermaid diagram syntax with basic structural checks
+     */
+    validateMermaidSyntax(code, expectedType) {
+        const errors = [];
+        const lines = code.trim().split('\n');
+        if (lines.length === 0) {
+            return { valid: false, errors: ['Empty diagram'] };
+        }
+
+        const firstLine = lines[0].trim().toLowerCase();
+        const typeHeaders = {
+            sequence: 'sequencediagram',
+            class: 'classdiagram',
+            state: 'statediagram',
+            er: 'erdiagram'
+        };
+
+        // Check header matches expected type
+        const expectedHeader = typeHeaders[expectedType] || typeHeaders.sequence;
+        if (!firstLine.startsWith(expectedHeader) && !firstLine.startsWith('sequencediagram') &&
+            !firstLine.startsWith('classdiagram') && !firstLine.startsWith('statediagram') &&
+            !firstLine.startsWith('erdiagram') && !firstLine.startsWith('flowchart') &&
+            !firstLine.startsWith('graph')) {
+            errors.push(`Missing diagram header (expected ${expectedHeader}, got "${lines[0].trim()}")`);
+        }
+
+        // Check for minimum content
+        if (lines.length < 3) {
+            errors.push('Diagram too short — expected at least 3 lines');
+        }
+
+        // Check for unmatched quotes
+        const quoteCount = (code.match(/"/g) || []).length;
+        if (quoteCount % 2 !== 0) {
+            errors.push('Unmatched double quotes');
+        }
+
+        // Check for markdown fence contamination
+        if (code.includes('```')) {
+            errors.push('Contains markdown code fences');
+        }
+
+        // Check for unbalanced brackets in non-ER diagrams
+        if (expectedType !== 'er') {
+            const opens = (code.match(/[\[({]/g) || []).length;
+            const closes = (code.match(/[\])}]/g) || []).length;
+            if (Math.abs(opens - closes) > 2) {
+                errors.push(`Unbalanced brackets (${opens} opens vs ${closes} closes)`);
+            }
+        }
+
+        return { valid: errors.length === 0, errors };
     }
 
     /**
@@ -4050,6 +4142,103 @@ Return only the complete test code with proper syntax for the detected language,
                 }
             );
         }).join('\n');
+    }
+
+    /**
+     * Generate a Mermaid diagram from indexed repo code (not tied to a PR)
+     */
+    async handleGenerateRepoDiagram(message, sendResponse) {
+        try {
+            const { repoId: providedRepoId, url: providedUrl, diagramType, query } = message.data || message.payload || {};
+
+            // Resolve repoId
+            let repoId = providedRepoId;
+            if (!repoId && providedUrl) {
+                repoId = this.getRepoIdFromUrl(providedUrl);
+            }
+            if (!repoId) {
+                sendResponse({ success: false, error: 'Repository ID or URL required' });
+                return;
+            }
+
+            // Retrieve relevant code via RAG
+            const smartQuery = query || `architecture components services classes interactions ${diagramType || 'sequence'} diagram`;
+            const ragChunks = await this.ragService.retrieveContext(repoId, smartQuery, 20);
+
+            if (!ragChunks || ragChunks.length === 0) {
+                sendResponse({ success: false, error: 'No indexed code found. Please index the repository first.' });
+                return;
+            }
+
+            // Build code context from RAG chunks
+            const codeContext = ragChunks.map(chunk => {
+                const filePath = chunk.filePath || 'unknown';
+                const content = (chunk.content || chunk.text || '').substring(0, 1500);
+                return `// File: ${filePath}\n${content}`;
+            }).join('\n\n---\n\n');
+
+            const settings = await this.getSettings();
+            const type = diagramType || 'sequence';
+            const typeLabel = { sequence: 'sequence diagram', class: 'class diagram', state: 'state diagram', er: 'entity-relationship diagram' }[type] || 'sequence diagram';
+
+            const systemPrompt = `You are a software architecture diagram expert. Analyze repository code and generate a Mermaid ${typeLabel}. Output ONLY valid Mermaid syntax, no markdown code fences.`;
+
+            const typeInstructions = {
+                sequence: `- Use \`sequenceDiagram\` syntax\n- Show runtime interaction flow between services, classes, and components\n- Use ->> for sync calls, -->> for responses, -) for events\n- Max 12 participants, max 40 interactions`,
+                class: `- Use \`classDiagram\` syntax\n- Show classes with key attributes and methods\n- Show inheritance (--|>), composition (*--), association (-->)\n- Max 15 classes`,
+                state: `- Use \`stateDiagram-v2\` syntax\n- Show state transitions for the primary entity\n- Use [*] for start/end states\n- Max 20 states`,
+                er: `- Use \`erDiagram\` syntax\n- Show entities with attributes and relationships\n- Use proper cardinality: ||--o{ (one-to-many), ||--|| (one-to-one)\n- Max 15 entities`
+            };
+
+            const prompt = `Generate a Mermaid **${typeLabel}** for this repository's code:
+
+### Repository Code Context
+${codeContext}
+
+### Rules
+${typeInstructions[type] || typeInstructions.sequence}
+- Focus on the most important architectural interactions
+- Use short, descriptive names for participants/entities
+- Output ONLY the Mermaid code
+- Do NOT wrap in markdown code fences
+- Do NOT use special characters like < > { } in labels`;
+
+            const MAX_RETRIES = 2;
+            let lastError = null;
+
+            for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+                const retryPrompt = attempt === 1
+                    ? prompt
+                    : `${prompt}\n\nIMPORTANT: Your previous output had syntax errors:\n${lastError}\nFix these issues.`;
+
+                const response = await this.llmService.streamChat(
+                    [
+                        { role: 'system', content: systemPrompt },
+                        { role: 'user', content: retryPrompt }
+                    ],
+                    { provider: settings.provider, model: settings.model, apiKey: settings.apiKey, stream: false }
+                );
+
+                let mermaidCode = (response.content || response).trim();
+                mermaidCode = mermaidCode.replace(/^```(?:mermaid)?\n?/, '').replace(/\n?```$/, '').trim();
+                mermaidCode = this.sanitizeMermaidCode(mermaidCode);
+
+                const validation = this.validateMermaidSyntax(mermaidCode, type);
+                if (validation.valid) {
+                    console.log(`✅ Repo diagram generated successfully (attempt ${attempt})`);
+                    sendResponse({ success: true, data: { mermaidCode, diagramType: type } });
+                    return;
+                }
+
+                console.warn(`⚠️ Repo diagram validation failed (attempt ${attempt}):`, validation.errors);
+                lastError = validation.errors.join('; ');
+            }
+
+            sendResponse({ success: false, error: 'Failed to generate valid diagram after retries' });
+        } catch (error) {
+            this.errorHandler.logError('Generate Repo Diagram', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
     }
 
     async handleGenerateChangelog(message, sendResponse) {

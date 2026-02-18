@@ -5,8 +5,8 @@ import { encodingForModel } from 'js-tiktoken';
  * Manages conversation context and history for continuous conversations
  */
 
-const MAX_HISTORY_LENGTH = 20; // Maximum messages to keep in history
-const MAX_CONTEXT_TOKENS = 8000; // Approximate token limit for context
+const MAX_HISTORY_LENGTH = 50; // Maximum messages to keep in history
+const MAX_CONTEXT_TOKENS = 32000; // Approximate token limit for context
 const STORAGE_KEY = 'repospector_conversation_history';
 const SESSION_KEY = 'repospector_session_id';
 
