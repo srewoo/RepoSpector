@@ -26,6 +26,7 @@ function AppContent() {
     const [prSession, setPrSession] = useState(null);
     const [prLoading, setPrLoading] = useState(false);
     const [prError, setPrError] = useState(null);
+    const [prProgress, setPrProgress] = useState(null);
     const [isOnPRPage, setIsOnPRPage] = useState(false);
     const [isOnGitPage, setIsOnGitPage] = useState(null); // null = loading, true/false = detected
 
@@ -55,6 +56,17 @@ function AppContent() {
 
         chrome.runtime.onMessage.addListener(listener);
         return () => chrome.runtime.onMessage.removeListener(listener);
+    }, []);
+
+    // Listen for multi-pass PR review progress
+    useEffect(() => {
+        const progressListener = (message) => {
+            if (message.type === 'PR_REVIEW_PROGRESS') {
+                setPrProgress(message.data);
+            }
+        };
+        chrome.runtime.onMessage.addListener(progressListener);
+        return () => chrome.runtime.onMessage.removeListener(progressListener);
     }, []);
 
     // Detect if on a git platform page and/or PR page
@@ -104,8 +116,9 @@ function AppContent() {
         setPrAiSummary(null);
 
         try {
+            setPrProgress(null);
             const response = await chrome.runtime.sendMessage({
-                type: 'ANALYZE_PR_WITH_STATIC_ANALYSIS',
+                type: 'MULTI_PASS_PR_REVIEW',
                 data: {
                     prUrl,
                     options: {
@@ -122,7 +135,11 @@ function AppContent() {
                 setPrAnalysisResult({
                     analysis: response.data.analysis,
                     recommendation: response.data.staticAnalysis?.recommendation,
-                    reviewEffort: response.data.reviewEffort
+                    reviewEffort: response.data.reviewEffort,
+                    isMultiPass: response.data.isMultiPass || false,
+                    perFileFindings: response.data.perFileFindings,
+                    failedFiles: response.data.failedFiles,
+                    processingTime: response.data.processingTime
                 });
                 setPrStaticAnalysisResult(response.data.staticAnalysis);
                 setPrAiSummary(response.data.aiSummary || null);
@@ -242,6 +259,7 @@ function AppContent() {
                                 onAskQuestion={handlePRAskQuestion}
                                 onFocusArea={handlePRFocusArea}
                                 loading={prLoading}
+                                progress={prProgress}
                             />
                         )}
                     </div>

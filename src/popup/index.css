@@ -875,6 +875,11 @@ pre::-webkit-scrollbar-thumb:hover {
   margin-right: 0.25rem;
 }
 
+.mx-4 {
+  margin-left: 1rem;
+  margin-right: 1rem;
+}
+
 .mx-auto {
   margin-left: auto;
   margin-right: auto;
@@ -1231,6 +1236,10 @@ pre::-webkit-scrollbar-thumb:hover {
 
 .max-w-md {
   max-width: 28rem;
+}
+
+.max-w-sm {
+  max-width: 24rem;
 }
 
 .max-w-xs {

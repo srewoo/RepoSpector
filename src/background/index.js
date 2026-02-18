@@ -62,6 +62,7 @@ import {
 } from '../utils/prSummaryPrompts.js';
 import { generateRepoInfo, buildExtractedDataSummary, insertAfterHeader } from '../utils/repoInfoGenerator.js';
 import { REPO_INFO_ENRICHMENT_SYSTEM_PROMPT, buildRepoInfoEnrichmentPrompt } from '../utils/repoInfoPrompts.js';
+import { MultiPassReviewEngine } from '../services/MultiPassReviewEngine.js';
 
 class BackgroundService {
     constructor() {
@@ -466,6 +467,10 @@ class BackgroundService {
 
                 case 'ANALYZE_PR_WITH_STATIC_ANALYSIS':
                     await this.handleAnalyzePRWithStaticAnalysis(message, sendResponse);
+                    break;
+
+                case 'MULTI_PASS_PR_REVIEW':
+                    await this.handleMultiPassPRReview(message, sendResponse);
                     break;
 
                 case 'RUN_STATIC_ANALYSIS':
@@ -3486,6 +3491,205 @@ Return only the complete test code with proper syntax for the detected language,
                 success: false,
                 error: this.getErrorMessage(error)
             });
+        }
+    }
+
+    /**
+     * Multi-pass PR review: per-file analysis → cross-file aggregation.
+     * Falls back to single-pass for small PRs (≤5 files).
+     */
+    async handleMultiPassPRReview(message, sendResponse) {
+        try {
+            const { prUrl, options = {} } = message.data || message.payload || {};
+
+            if (!prUrl) {
+                sendResponse({ success: false, error: 'PR URL is required' });
+                return;
+            }
+
+            console.log('📋 Multi-pass PR review:', prUrl);
+            await this.updatePRServiceTokens();
+
+            // Fetch PR data
+            const prData = await this.pullRequestService.fetchPullRequest(prUrl);
+            console.log(`📊 PR fetched: ${prData.files.length} files, +${prData.stats.additions} -${prData.stats.deletions}`);
+
+            // Fallback to single-pass for small PRs
+            const FILE_THRESHOLD = options.multiPassThreshold || 3;
+            if (prData.files.length <= FILE_THRESHOLD) {
+                console.log(`📋 PR has ${prData.files.length} files (≤${FILE_THRESHOLD}), using single-pass`);
+                return this.handleAnalyzePRWithStaticAnalysis(message, sendResponse);
+            }
+
+            const settings = await this.getSettings();
+            const reviewSettings = settings.reviewSettings || {};
+            const repoId = prData.branches?.targetRepo ||
+                `${prData.author?.login || 'unknown'}/${prData.title || 'unknown'}`;
+
+            // Fetch custom config for static analysis
+            let customConfig = null;
+            try {
+                const urlMatch = prUrl.match(/(?:github\.com|gitlab\.com)\/([^/]+)\/([^/]+)/);
+                if (urlMatch) {
+                    const platform = prUrl.includes('gitlab.com') ? 'gitlab' : 'github';
+                    const owner = urlMatch[1];
+                    const repo = urlMatch[2];
+                    const token = platform === 'gitlab' ? settings.gitlabToken : settings.githubToken;
+                    customConfig = await this.customRulesService.fetchConfig(platform, owner, repo, token);
+                }
+            } catch (e) {
+                console.warn('Failed to fetch custom config:', e.message);
+            }
+
+            // Gather context in parallel
+            const [ragContext, repoDocumentation, staticResult] = await Promise.all([
+                this._fetchRAGContextForMultiPass(repoId, prData, options),
+                this._fetchRepoDocForMultiPass(repoId, options),
+                this.staticAnalysisService.analyzePullRequest(prData, {
+                    enableESLint: options.enableESLint !== false,
+                    enableSemgrep: options.enableSemgrep !== false,
+                    enableDependency: options.enableDependency !== false,
+                    severityThreshold: options.severityThreshold || reviewSettings.severityThreshold || 'all',
+                    groupRelatedFindings: options.groupRelatedFindings ?? reviewSettings.groupRelatedFindings ?? true,
+                    repoId,
+                    customConfig
+                })
+            ]);
+
+            console.log(`📊 Static analysis found ${staticResult.totalFindings} issues`);
+
+            // Cache deterministic scores
+            const reviewEffort = this.pullRequestService.estimateReviewEffort(prData);
+            if (!this.prScoreCache.has(prUrl)) {
+                this.prScoreCache.set(prUrl, { reviewEffort, riskScore: staticResult.riskScore });
+            }
+            const cachedScores = this.prScoreCache.get(prUrl);
+
+            // Progress callback
+            const onProgress = (event) => {
+                try {
+                    chrome.runtime.sendMessage({
+                        type: 'PR_REVIEW_PROGRESS',
+                        data: event
+                    }).catch(() => {});
+                } catch (e) { /* popup may be closed */ }
+            };
+
+            // Execute multi-pass review
+            const engine = new MultiPassReviewEngine({
+                llmService: this.llmService,
+                ragService: this.ragService
+            });
+
+            const result = await engine.execute(
+                prData,
+                {
+                    ragContext,
+                    repoDocumentation: repoDocumentation?.found ? repoDocumentation.content : null,
+                    staticFindings: staticResult.findings,
+                    isTestAutomationPR: this.isTestAutomationPR(prData)
+                },
+                {
+                    provider: settings.provider,
+                    model: settings.model,
+                    apiKey: settings.apiKey
+                },
+                {
+                    focusAreas: options.focusAreas || ['security', 'bugs', 'performance', 'style'],
+                    maxConcurrent: options.maxConcurrent || 3,
+                    maxFilesToReview: options.maxFiles || 50
+                },
+                onProgress
+            );
+
+            // Generate AI summary
+            let aiSummary = null;
+            try {
+                const summaryPrompt = buildPRSummaryGenerationPrompt(
+                    prData,
+                    staticResult.summary
+                );
+                const summaryResponse = await this.llmService.streamChat(
+                    [
+                        { role: 'system', content: PR_SUMMARY_SYSTEM_PROMPT },
+                        { role: 'user', content: summaryPrompt }
+                    ],
+                    {
+                        provider: settings.provider,
+                        model: settings.model,
+                        apiKey: settings.apiKey,
+                        stream: false
+                    }
+                );
+                aiSummary = summaryResponse.content || summaryResponse;
+            } catch (e) {
+                console.warn('Failed to generate PR summary:', e.message);
+            }
+
+            sendResponse({
+                success: true,
+                data: {
+                    analysis: result.analysis,
+                    aiSummary,
+                    isMultiPass: true,
+                    perFileFindings: result.perFileFindings,
+                    failedFiles: result.failedFiles,
+                    reviewUnits: result.reviewUnits,
+                    processingTime: result.processingTime,
+                    staticAnalysis: {
+                        findings: staticResult.findings,
+                        summary: staticResult.summary,
+                        riskScore: cachedScores.riskScore,
+                        recommendation: staticResult.recommendation
+                    },
+                    prSummary: this.pullRequestService.generatePRSummary(prData),
+                    reviewEffort: cachedScores.reviewEffort,
+                    prData: {
+                        title: prData.title,
+                        state: prData.state,
+                        author: prData.author,
+                        stats: prData.stats,
+                        files: prData.files.map(f => ({
+                            filename: f.filename,
+                            status: f.status,
+                            additions: f.additions,
+                            deletions: f.deletions,
+                            language: f.language
+                        })),
+                        url: prData.url
+                    },
+                    isTestAutomationPR: this.isTestAutomationPR(prData)
+                }
+            });
+        } catch (error) {
+            this.errorHandler.logError('Multi-pass PR Review', error);
+            sendResponse({
+                success: false,
+                error: this.getErrorMessage(error)
+            });
+        }
+    }
+
+    async _fetchRAGContextForMultiPass(repoId, prData, options) {
+        if (options.useRepoContext === false) return null;
+        try {
+            const prDescription = `${prData.title} ${prData.description || ''}`;
+            return await this.ragService.retrieveContext(repoId, prDescription, 20, {
+                formatOutput: false, // Keep raw chunks for per-file distribution
+                maxChunksPerFile: 4
+            });
+        } catch (e) {
+            console.warn('RAG context not available:', e.message);
+            return null;
+        }
+    }
+
+    async _fetchRepoDocForMultiPass(repoId, options) {
+        if (options.useRepoContext === false) return { found: false };
+        try {
+            return await this.ragService.getRepositoryDocumentation(repoId);
+        } catch (e) {
+            return { found: false };
         }
     }
 

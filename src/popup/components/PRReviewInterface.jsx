@@ -41,7 +41,8 @@ export function PRReviewInterface({
     onRefresh,
     onAskQuestion,
     onFocusArea,
-    loading = false
+    loading = false,
+    progress = null
 }) {
     const [activeTab, setActiveTab] = useState('summary'); // 'summary' | 'overview' | 'findings' | 'static'
     const [selectedFinding, setSelectedFinding] = useState(null);
@@ -975,12 +976,34 @@ export function PRReviewInterface({
                 )}
             </AnimatePresence>
 
-            {/* Loading overlay */}
+            {/* Loading overlay with progress */}
             {loading && (
                 <div className="fixed inset-0 bg-background/50 flex items-center justify-center z-50">
-                    <Card className="p-6 flex items-center gap-3">
+                    <Card className="p-6 flex flex-col items-center gap-3 max-w-sm w-full mx-4">
                         <RefreshCw className="w-5 h-5 animate-spin text-primary" />
-                        <span>Analyzing PR...</span>
+                        {progress && progress.phase ? (
+                            <>
+                                <span className="text-sm font-medium">
+                                    {progress.message || 'Analyzing PR...'}
+                                </span>
+                                {progress.totalUnits > 0 && (
+                                    <div className="w-full">
+                                        <div className="flex justify-between text-xs text-textMuted mb-1">
+                                            <span>File groups</span>
+                                            <span>{progress.completedUnits || 0}/{progress.totalUnits}</span>
+                                        </div>
+                                        <div className="w-full bg-surface rounded-full h-1.5">
+                                            <div
+                                                className="bg-primary rounded-full h-1.5 transition-all duration-300"
+                                                style={{ width: `${progress.percentage || 0}%` }}
+                                            />
+                                        </div>
+                                    </div>
+                                )}
+                            </>
+                        ) : (
+                            <span>Analyzing PR...</span>
+                        )}
                     </Card>
                 </div>
             )}

@@ -611,6 +611,24 @@ You are a senior code reviewer with expertise in security, performance, and soft
 - Verifying test coverage for critical paths`;
 
 /**
+ * Score a file by risk level for review prioritization.
+ * Higher scores = higher risk = reviewed first.
+ */
+export function scoreFileByRisk(file) {
+    let risk = (file.additions || 0) + (file.deletions || 0);
+    const name = (file.filename || '').toLowerCase();
+    // Security-sensitive paths get boosted
+    if (/auth|login|session|token|crypt|secret|password|credential|permission|rbac|acl/i.test(name)) risk += 500;
+    // API endpoints and middleware
+    if (/controller|route|middleware|handler|api\//i.test(name)) risk += 300;
+    // Config and infra files
+    if (/\.env|docker|ci|deploy|terraform|helm|k8s/i.test(name)) risk += 200;
+    // Tests and docs are lower priority
+    if (/test|spec|__test__|\.md$|\.txt$/i.test(name)) risk -= 200;
+    return risk;
+}
+
+/**
  * Build comprehensive PR review prompt
  */
 export function buildPRAnalysisPrompt(prData, options = {}) {
@@ -624,19 +642,9 @@ export function buildPRAnalysisPrompt(prData, options = {}) {
     } = options;
 
     // Prioritize files by risk score before truncating
-    const scoredFiles = prData.files.map(f => {
-        let risk = (f.additions || 0) + (f.deletions || 0);
-        const name = (f.filename || '').toLowerCase();
-        // Security-sensitive paths get boosted
-        if (/auth|login|session|token|crypt|secret|password|credential|permission|rbac|acl/i.test(name)) risk += 500;
-        // API endpoints and middleware
-        if (/controller|route|middleware|handler|api\//i.test(name)) risk += 300;
-        // Config and infra files
-        if (/\.env|docker|ci|deploy|terraform|helm|k8s/i.test(name)) risk += 200;
-        // Tests and docs are lower priority
-        if (/test|spec|__test__|\.md$|\.txt$/i.test(name)) risk -= 200;
-        return { ...f, _riskScore: risk };
-    }).sort((a, b) => b._riskScore - a._riskScore);
+    const scoredFiles = prData.files.map(f => ({
+        ...f, _riskScore: scoreFileByRisk(f)
+    })).sort((a, b) => b._riskScore - a._riskScore);
 
     const filesToReview = scoredFiles.slice(0, maxFilesToReview);
     const skippedCount = prData.files.length - filesToReview.length;
@@ -772,21 +780,35 @@ Look for:
    - Missing null/undefined checks
    - Wrong comparison operators
 
-2. **Race Conditions**
+2. **Behavioral Changes**
+   - Constants/lists replaced with different-scope values (e.g., a subset list replaced with all enum values)
+   - Filter criteria widened or narrowed unintentionally
+   - Default value changes that alter existing behavior
+   - Return type changes that break callers
+
+3. **Race Conditions**
    - Async operations without proper synchronization
    - Shared state mutations
    - Time-of-check to time-of-use (TOCTOU) bugs
 
-3. **Error Handling**
+4. **Error Handling**
    - Unhandled promise rejections
    - Missing try-catch blocks
    - Silent failures that could cause data loss
    - Generic error messages hiding root causes
+   - Using logger.exception outside of an except/catch block
+   - Wrong logging level (error vs warning vs exception)
 
-4. **Type Issues**
+5. **Type Issues**
    - Implicit type coercion problems
    - Null pointer dereferences
    - Array out of bounds access
+
+6. **Deprecated API Usage**
+   - Python: datetime.utcnow()/utcfromtimestamp() (use datetime.now(timezone.utc))
+   - Python: os.popen() (use subprocess), asyncio.get_event_loop() (use get_running_loop)
+   - JS: substr() (use substring), __proto__ (use Object.getPrototypeOf)
+   - General: Any stdlib/framework API marked deprecated in recent versions
 ` : ''}
 
 ${focusAreas.includes('performance') ? `
@@ -823,7 +845,12 @@ Check for:
    - Magic numbers and strings
    - Unclear variable/function names
 
-2. **Best Practices**
+2. **Naming Consistency**
+   - Function names that don't match their actual behavior (e.g., function named "get_sfdc_..." but accepts any CRM type)
+   - Parameters, variables, or functions that reference a specific vendor/platform but implementation is generic
+   - Inconsistent naming patterns between related functions
+
+3. **Best Practices**
    - DRY violations (copy-pasted code)
    - SOLID principle violations
    - Missing documentation for complex logic
@@ -896,7 +923,11 @@ IMPORTANT:
 - Reference specific line numbers from the diff
 - Provide concrete code fixes, not vague suggestions
 - If the diff is too large or complex, focus on the highest-risk files
-- Consider the context of the entire PR, not just individual files`;
+- Consider the context of the entire PR, not just individual files
+- Report EVERY finding individually — do NOT consolidate multiple issues into one
+- Even small issues matter: deprecated APIs, wrong log levels, naming inconsistencies, behavioral scope changes
+- Aim for thoroughness: a good review catches 5-15 issues across all severity levels for a typical PR
+- For each file, check: What changed? What could go wrong? What's deprecated? What's inconsistent?`;
 
     return prompt;
 }
