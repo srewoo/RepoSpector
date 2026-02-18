@@ -4,11 +4,13 @@ export class CodeChunker {
         // Token limits for different models
         this.modelLimits = {
             'gpt-4.1': 128000,
-            'gpt-4.1': 128000,
             'gpt-4.1-mini': 128000,
             'o3': 200000,
             'o3-mini': 200000,
-            'gpt-4.1-mini': 128000,
+            // Embedding-optimized: small chunks for semantic search quality
+            // all-MiniLM-L6-v2 handles 256 tokens, but we want ~500-1500 tokens per chunk
+            // for good retrieval granularity
+            'embedding': 1500,
             'default': 8000
         };
         
@@ -46,7 +48,9 @@ export class CodeChunker {
      */
     getChunkSize(model) {
         const maxTokens = this.getMaxTokensForModel(model);
-        const availableTokens = maxTokens - this.reservedTokens;
+        // For embedding model, no reserve needed — the chunk IS the content
+        const reserve = model === 'embedding' ? 0 : this.reservedTokens;
+        const availableTokens = Math.max(maxTokens - reserve, 500); // Min 500 tokens
         return Math.floor(availableTokens / this.tokensPerChar);
     }
     
@@ -54,20 +58,25 @@ export class CodeChunker {
      * Split code into semantic chunks
      */
     createSemanticChunks(code, model) {
+        // Handle empty/whitespace-only code
+        if (!code || !code.trim()) {
+            return [];
+        }
+
         const chunkSize = this.getChunkSize(model);
         const chunks = [];
-        
+
         // Try to split by major code boundaries
         const boundaries = this.findCodeBoundaries(code);
-        
+
         let currentChunk = '';
         let currentTokens = 0;
         let lastBoundaryIndex = 0;
-        
+
         for (const boundary of boundaries) {
             const segment = code.substring(lastBoundaryIndex, boundary.end);
             const segmentTokens = this.estimateTokens(segment);
-            
+
             if (currentTokens + segmentTokens > chunkSize && currentChunk) {
                 // Save current chunk
                 chunks.push({
@@ -77,7 +86,7 @@ export class CodeChunker {
                     tokens: currentTokens,
                     type: 'code'
                 });
-                
+
                 // Start new chunk with overlap
                 const overlapStart = Math.max(0, lastBoundaryIndex - this.calculateOverlapChars());
                 currentChunk = code.substring(overlapStart, boundary.end);
@@ -86,10 +95,19 @@ export class CodeChunker {
                 currentChunk += segment;
                 currentTokens += segmentTokens;
             }
-            
+
             lastBoundaryIndex = boundary.end;
         }
-        
+
+        // Capture any trailing content after the last boundary
+        if (lastBoundaryIndex < code.length) {
+            const trailing = code.substring(lastBoundaryIndex);
+            if (trailing.trim()) {
+                currentChunk += trailing;
+                currentTokens += this.estimateTokens(trailing);
+            }
+        }
+
         // Add remaining content
         if (currentChunk) {
             chunks.push({
@@ -100,7 +118,19 @@ export class CodeChunker {
                 type: 'code'
             });
         }
-        
+
+        // Safety: if we still have no chunks for non-empty code, create one
+        if (chunks.length === 0 && code.trim()) {
+            const content = code.length > chunkSize * 4 ? code.substring(0, chunkSize * 4) : code;
+            chunks.push({
+                content,
+                startIndex: 0,
+                endIndex: content.length,
+                tokens: this.estimateTokens(content),
+                type: 'code'
+            });
+        }
+
         return chunks;
     }
     

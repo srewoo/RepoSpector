@@ -99,11 +99,25 @@ export class RAGService {
         // 2. Chunk files
         if (onProgress) onProgress({ status: 'chunking', message: 'Chunking files...' });
         let allChunks = [];
+        let emptyChunkFiles = 0;
 
         for (const file of files) {
-            const chunks = this.chunker.createSemanticChunks(file.content, 'gpt-4.1-mini');
+            const chunks = this.chunker.createSemanticChunks(file.content, 'embedding');
             const chunkIds = [];
             const chunkHashes = {};
+
+            // Safety: if chunker returned 0 chunks for a non-empty file, create a single chunk
+            if (chunks.length === 0 && file.content && file.content.trim().length > 0) {
+                emptyChunkFiles++;
+                const content = file.content.length > 6000 ? file.content.substring(0, 6000) : file.content;
+                chunks.push({
+                    content,
+                    startIndex: 0,
+                    endIndex: content.length,
+                    tokens: Math.ceil(content.length * 0.25),
+                    type: 'code'
+                });
+            }
 
             chunks.forEach((chunk, idx) => {
                 const chunkId = `${repoId}:${file.path}:${idx}`;
@@ -130,43 +144,72 @@ export class RAGService {
             }, chunkHashes);
         }
 
-        // 3. Generate embeddings in batches
+        if (emptyChunkFiles > 0) {
+            console.warn(`⚠️ ${emptyChunkFiles} files produced 0 chunks from chunker, used fallback`);
+        }
+        console.log(`📊 Chunking complete: ${files.length} files → ${allChunks.length} chunks`);
+
+        // 3. Generate embeddings in batches with retry
         if (onProgress) onProgress({ status: 'embedding', message: `Generating embeddings for ${allChunks.length} chunks...`, total: allChunks.length, current: 0 });
 
-        const BATCH_SIZE = 20;
+        const BATCH_SIZE = 10; // Smaller batches for reliability with local embeddings
+        let embeddedCount = 0;
+        let failedBatches = 0;
+
         for (let i = 0; i < allChunks.length; i += BATCH_SIZE) {
             const batch = allChunks.slice(i, i + BATCH_SIZE);
             const texts = batch.map(c => c.content);
+            let success = false;
 
-            try {
-                const embeddings = await this.generateEmbeddings(texts);
+            // Retry up to 2 times on failure
+            for (let attempt = 0; attempt < 3 && !success; attempt++) {
+                try {
+                    if (attempt > 0) {
+                        console.log(`🔄 Retrying embedding batch ${Math.floor(i / BATCH_SIZE) + 1} (attempt ${attempt + 1})...`);
+                        await new Promise(r => setTimeout(r, 1000 * attempt)); // Backoff
+                    }
 
-                // Assign embeddings to chunks
-                batch.forEach((chunk, idx) => {
-                    chunk.embedding = embeddings[idx];
-                });
+                    const embeddings = await this.generateEmbeddings(texts);
 
-                // Store in vector DB
-                await this.vectorStore.addVectors(batch);
+                    // Assign embeddings to chunks
+                    batch.forEach((chunk, idx) => {
+                        chunk.embedding = embeddings[idx];
+                    });
 
-                // Also populate BM25 keyword index
-                for (const chunk of batch) {
-                    this.hybridSearcher.bm25Index.addDocument(
-                        chunk.id,
-                        chunk.content,
-                        chunk.metadata
-                    );
+                    // Store in vector DB
+                    await this.vectorStore.addVectors(batch);
+
+                    // Also populate BM25 keyword index
+                    for (const chunk of batch) {
+                        this.hybridSearcher.bm25Index.addDocument(
+                            chunk.id,
+                            chunk.content,
+                            chunk.metadata
+                        );
+                    }
+
+                    embeddedCount += batch.length;
+                    success = true;
+                } catch (error) {
+                    console.error(`❌ Embedding batch ${Math.floor(i / BATCH_SIZE) + 1} failed (attempt ${attempt + 1}):`, error.message);
                 }
-
-                if (onProgress) onProgress({
-                    status: 'embedding',
-                    message: `Indexed ${Math.min(i + BATCH_SIZE, allChunks.length)}/${allChunks.length} chunks`,
-                    total: allChunks.length,
-                    current: Math.min(i + BATCH_SIZE, allChunks.length)
-                });
-            } catch (error) {
-                console.error('Error generating embeddings batch:', error);
             }
+
+            if (!success) {
+                failedBatches++;
+                console.error(`❌ Permanently failed to embed batch ${Math.floor(i / BATCH_SIZE) + 1} (${batch.length} chunks lost)`);
+            }
+
+            if (onProgress) onProgress({
+                status: 'embedding',
+                message: `Indexed ${embeddedCount}/${allChunks.length} chunks${failedBatches > 0 ? ` (${failedBatches} batches failed)` : ''}`,
+                total: allChunks.length,
+                current: embeddedCount
+            });
+        }
+
+        if (failedBatches > 0) {
+            console.warn(`⚠️ ${failedBatches} embedding batches failed permanently. ${embeddedCount}/${allChunks.length} chunks indexed.`);
         }
 
         // 4. Save manifest so incremental indexing works next time
@@ -235,7 +278,7 @@ export class RAGService {
 
         // Process NEW files — all chunks need embedding
         for (const file of comparison.toAdd) {
-            const chunks = this.chunker.createSemanticChunks(file.content, 'gpt-4.1-mini');
+            const chunks = this.chunker.createSemanticChunks(file.content, 'embedding');
             const chunkIds = [];
             const chunkHashes = {};
 
@@ -265,7 +308,7 @@ export class RAGService {
 
         // Process UPDATED files — chunk-level diff to minimize re-embedding
         for (const file of comparison.toUpdate) {
-            const chunks = this.chunker.createSemanticChunks(file.content, 'gpt-4.1-mini');
+            const chunks = this.chunker.createSemanticChunks(file.content, 'embedding');
             const newChunks = chunks.map((chunk, idx) => ({
                 id: `${repoId}:${file.path}:${idx}`,
                 content: chunk.content,
