@@ -193,7 +193,12 @@ export class GitHubService {
             }
 
             const data = await response.json();
-            return data.tree || [];
+
+            if (data.truncated) {
+                console.warn(`⚠️ GitHub tree is TRUNCATED — repo has more than ${(data.tree || []).length} entries. Some files may not be indexed.`);
+            }
+
+            return { tree: data.tree || [], truncated: !!data.truncated };
         } catch (error) {
             console.error('Error fetching repo tree:', error);
             throw error;
@@ -283,7 +288,14 @@ export class GitHubService {
 
         // Fetch tree
         if (onProgress) onProgress({ status: 'fetching_tree', message: 'Fetching repository structure...' });
-        const tree = await this.fetchRepoTree(owner, repo, branch);
+        const { tree, truncated } = await this.fetchRepoTree(owner, repo, branch);
+
+        if (truncated && onProgress) {
+            onProgress({
+                status: 'warning',
+                message: `⚠️ Repository tree is truncated by GitHub (>${tree.length} entries). Some files may be missing from the index.`
+            });
+        }
 
         // Filter code files
         const codeFiles = this.filterCodeFiles(tree);

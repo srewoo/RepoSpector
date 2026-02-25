@@ -30,6 +30,7 @@ import { StaticAnalysisResults } from './StaticAnalysisResults';
 import { PRQuickActions } from './QuickActions';
 import { MarkdownRenderer } from './ui/MarkdownRenderer';
 import { MermaidDiagram } from './ui/MermaidDiagram';
+import { copyToClipboard } from '../utils/clipboard';
 
 export function PRReviewInterface({
     prUrl,
@@ -587,7 +588,7 @@ export function PRReviewInterface({
     }, [prUrl, generating]);
 
     const handleCopyToClipboard = async (text) => {
-        await navigator.clipboard.writeText(text);
+        await copyToClipboard(text);
     };
 
     // Close thread view

@@ -2,14 +2,17 @@ import React from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from './ui/Card';
 import { Button } from './ui/Button';
 import { Copy, Check } from 'lucide-react';
+import { copyToClipboard } from '../utils/clipboard';
 
 export function CodePreview({ code, language = 'javascript' }) {
     const [copied, setCopied] = React.useState(false);
 
-    const handleCopy = () => {
-        navigator.clipboard.writeText(code);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
+    const handleCopy = async () => {
+        const ok = await copyToClipboard(code);
+        if (ok) {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        }
     };
 
     // Format language label

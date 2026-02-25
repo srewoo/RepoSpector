@@ -63,6 +63,7 @@ import {
 import { generateRepoInfo, buildExtractedDataSummary, insertAfterHeader } from '../utils/repoInfoGenerator.js';
 import { REPO_INFO_ENRICHMENT_SYSTEM_PROMPT, buildRepoInfoEnrichmentPrompt } from '../utils/repoInfoPrompts.js';
 import { MultiPassReviewEngine } from '../services/MultiPassReviewEngine.js';
+import { CodeGraphPipeline } from '../services/CodeGraphPipeline.js';
 
 class BackgroundService {
     constructor() {
@@ -120,7 +121,10 @@ class BackgroundService {
             // Wire up RAG service to context analyzer
             this.contextAnalyzer.setRagService(this.ragService);
 
-            console.log('RepoSpector services initialized successfully (including RAG with local embeddings)');
+            // Initialize Knowledge Graph Pipeline (GitNexus-inspired)
+            this.codeGraphPipeline = new CodeGraphPipeline();
+
+            console.log('RepoSpector services initialized successfully (including RAG with local embeddings + Knowledge Graph)');
         } catch (error) {
             console.error('Failed to initialize services:', error);
         }
@@ -1270,6 +1274,49 @@ class BackgroundService {
                 if (!ragContext) {
                     throw new Error('No code found on this page and no indexed repository context available. Please navigate to a code file, or index this repository first.');
                 }
+            }
+
+            // Inject Knowledge Graph context (impact analysis, execution flows, communities)
+            let graphContext = null;
+            try {
+                const graphRepoId = this.contextAnalyzer.extractRepoIdFromUrl(
+                    extractedContext?.url,
+                    extractedContext?.platform
+                );
+
+                if (graphRepoId && this.codeGraphPipeline) {
+                    // Load graph if not already loaded for this repo
+                    if (this.codeGraphPipeline.graph.nodeCount === 0) {
+                        const hasGraph = await this.codeGraphPipeline.hasGraph(graphRepoId);
+                        if (hasGraph) {
+                            await this.codeGraphPipeline.loadGraph(graphRepoId);
+                            console.log('🧠 Knowledge graph loaded for chat context');
+                        }
+                    }
+
+                    if (this.codeGraphPipeline.graph.nodeCount > 0) {
+                        graphContext = this.codeGraphPipeline.getContextForQuestion(
+                            question,
+                            extractedCode || ''
+                        );
+                        if (graphContext) {
+                            console.log('🧠 Knowledge graph context injected into chat');
+                        }
+                    }
+                }
+            } catch (graphErr) {
+                console.warn('Knowledge graph context retrieval failed (non-fatal):', graphErr.message);
+            }
+
+            // Append graph context to RAG context
+            if (graphContext && ragContext) {
+                ragContext.chunks = ragContext.chunks + '\n\n' + graphContext;
+                ragContext.sources = [...(ragContext.sources || []), '[knowledge-graph]'];
+            } else if (graphContext && !ragContext) {
+                ragContext = {
+                    chunks: graphContext,
+                    sources: ['[knowledge-graph]']
+                };
             }
 
             // Get model identifier
@@ -2694,13 +2741,31 @@ Return only the complete test code with proper syntax for the detected language,
 
             console.log('✅ Repository indexed successfully:', result);
 
+            // Build Knowledge Graph (GitNexus-inspired: symbols, calls, communities, flows)
+            let graphStats = null;
+            try {
+                graphStats = await this.codeGraphPipeline.buildGraph(repoId, files, (progress) => {
+                    console.log('🧠 Graph:', progress.message);
+                    if (tabId) {
+                        chrome.tabs.sendMessage(tabId, {
+                            type: 'INDEX_PROGRESS',
+                            data: { status: 'graph', message: progress.message }
+                        }).catch(() => {});
+                    }
+                });
+                console.log('✅ Knowledge graph built:', graphStats);
+            } catch (graphError) {
+                console.warn('⚠️ Knowledge graph build failed (non-fatal):', graphError.message);
+            }
+
             // Determine platform
             const platform = url.includes('gitlab') ? 'gitlab' : 'github';
 
             // Save metadata for the repos view
             await this.saveRepoMetadata(repoId, url, platform, {
                 chunksIndexed: result.chunksIndexed,
-                filesProcessed: files.length
+                filesProcessed: files.length,
+                graphStats
             });
 
             // Broadcast completion to popup
@@ -2889,6 +2954,14 @@ Return only the complete test code with proper syntax for the detected language,
             // Clear from VectorStore
             await this.ragService.init();
             await this.ragService.vectorStore.clearRepo(repoId);
+
+            // Clear Knowledge Graph for this repo
+            try {
+                await this.codeGraphPipeline.deleteGraph(repoId);
+                console.log('🧠 Knowledge graph deleted for:', repoId);
+            } catch (graphErr) {
+                console.warn('Knowledge graph deletion failed (non-fatal):', graphErr.message);
+            }
 
             // Remove metadata from storage
             const result = await chrome.storage.local.get(['indexedReposMetadata']);

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Bot, User, Sparkles, AlertCircle, Database, GitBranch, Clock, Network, FileText, Download } from 'lucide-react';
+import { Send, Bot, User, Sparkles, AlertCircle, Database, GitBranch, Clock, Network, FileText, Download, Waypoints, Shield, Layers } from 'lucide-react';
 import { Button } from './ui/Button';
 import { Modal } from './ui/Modal';
 import { CodePreview } from './CodePreview';
@@ -983,6 +983,32 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                                             >
                                                 <FileText className="w-3 h-3" />
                                                 Generate RepoInfo.md
+                                            </button>
+                                        </>
+                                    )}
+                                    {/* Knowledge graph pills — visible when repo is indexed */}
+                                    {isRepoIndexed && (
+                                        <>
+                                            <button
+                                                onClick={() => setInput('Show me the codebase architecture overview')}
+                                                className="px-3 py-1.5 text-xs bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-full text-emerald-400 hover:text-emerald-300 transition-colors cursor-pointer flex items-center gap-1"
+                                            >
+                                                <Layers className="w-3 h-3" />
+                                                Architecture overview
+                                            </button>
+                                            <button
+                                                onClick={() => setInput('What is the impact of changing ')}
+                                                className="px-3 py-1.5 text-xs bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-full text-emerald-400 hover:text-emerald-300 transition-colors cursor-pointer flex items-center gap-1"
+                                            >
+                                                <Shield className="w-3 h-3" />
+                                                Impact analysis
+                                            </button>
+                                            <button
+                                                onClick={() => setInput('Trace the execution flow starting from ')}
+                                                className="px-3 py-1.5 text-xs bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-full text-emerald-400 hover:text-emerald-300 transition-colors cursor-pointer flex items-center gap-1"
+                                            >
+                                                <Waypoints className="w-3 h-3" />
+                                                Trace execution flow
                                             </button>
                                         </>
                                     )}

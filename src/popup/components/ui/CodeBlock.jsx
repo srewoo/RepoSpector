@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Copy, Check } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { copyToClipboard } from '../../utils/clipboard';
 
 // Language detection based on first line or common patterns
 function detectLanguage(code) {
@@ -127,12 +128,10 @@ export function CodeBlock({ code, language: providedLanguage, showLineNumbers = 
     const language = providedLanguage || detectLanguage(code);
 
     const handleCopy = async () => {
-        try {
-            await navigator.clipboard.writeText(code);
+        const ok = await copyToClipboard(code);
+        if (ok) {
             setCopied(true);
             setTimeout(() => setCopied(false), 2000);
-        } catch (err) {
-            console.error('Failed to copy:', err);
         }
     };
 

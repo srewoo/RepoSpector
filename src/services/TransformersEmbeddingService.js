@@ -52,6 +52,7 @@ export class TransformersEmbeddingService {
             }
 
             const transformers = await import('@xenova/transformers');
+            transformers.env.allowLocalModels = false;  // Skip local /models/ path lookups
             this.pipeline = transformers.pipeline;
 
             console.log(`Loading embedding model: ${this.modelName}...`);

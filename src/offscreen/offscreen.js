@@ -6,8 +6,8 @@
 import { pipeline, env } from '@xenova/transformers';
 
 // Configure Transformers.js for Chrome extension environment
-// Disable multi-threading to avoid blob: URL CSP violations from ONNX runtime workers
-env.backends.onnx.wasm.numThreads = 1;
+env.allowLocalModels = false;  // Skip local /models/ path lookups — go straight to HF CDN
+env.backends.onnx.wasm.numThreads = 1;  // Avoid blob: URL CSP violations from ONNX workers
 
 class OffscreenEmbeddingWorker {
     constructor() {

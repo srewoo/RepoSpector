@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { Card, CardHeader, CardContent } from './ui/Card';
 import { Button } from './ui/Button';
+import { copyToClipboard } from '../utils/clipboard';
 import { MarkdownRenderer } from './ui/MarkdownRenderer';
 
 const quickActions = [
@@ -68,9 +69,11 @@ export function FindingThread({
     };
 
     const handleCopy = async (content, id) => {
-        await navigator.clipboard.writeText(content);
-        setCopiedId(id);
-        setTimeout(() => setCopiedId(null), 2000);
+        const ok = await copyToClipboard(content);
+        if (ok) {
+            setCopiedId(id);
+            setTimeout(() => setCopiedId(null), 2000);
+        }
     };
 
     const severityColors = {

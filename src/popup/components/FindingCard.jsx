@@ -16,6 +16,7 @@ import {
     Copy,
     Check
 } from 'lucide-react';
+import { copyToClipboard } from '../utils/clipboard';
 import { Card, CardContent } from './ui/Card';
 import { Button } from './ui/Button';
 
@@ -92,9 +93,11 @@ export function FindingCard({ finding, onDismiss, onMarkResolved, compact = fals
 
     const handleCopySnippet = async () => {
         if (finding.codeSnippet) {
-            await navigator.clipboard.writeText(finding.codeSnippet);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 2000);
+            const ok = await copyToClipboard(finding.codeSnippet);
+            if (ok) {
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+            }
         }
     };
 

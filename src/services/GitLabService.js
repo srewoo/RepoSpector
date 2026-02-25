@@ -211,12 +211,11 @@ export class GitLabService {
         console.log('📡 Fetching tree for:', { projectPath, branch, encoded });
 
         try {
-            // Paginate to fetch ALL tree entries (GitLab caps per_page at 100 for tree)
             const allItems = [];
             let page = 1;
-            const maxPages = 50; // Safety limit: 50 pages × 100 = 5,000 entries
+            const MAX_PAGES = 500; // Safety limit: 500 pages × 100 = 50,000 entries
 
-            while (page <= maxPages) {
+            while (page <= MAX_PAGES) {
                 const response = await fetch(
                     `${this.baseUrl}/projects/${encoded}/repository/tree?recursive=true&ref=${branch}&per_page=100&page=${page}`,
                     { headers }
@@ -258,8 +257,13 @@ export class GitLabService {
                 page = parseInt(nextPage, 10);
             }
 
+            const truncated = page > MAX_PAGES;
+            if (truncated) {
+                console.warn(`⚠️ GitLab tree pagination hit safety limit (${MAX_PAGES} pages / ${allItems.length} entries). Some files may be missing.`);
+            }
+
             console.log(`📂 Fetched ${allItems.length} tree entries across ${page} page(s)`);
-            return allItems;
+            return { tree: allItems, truncated };
         } catch (error) {
             console.error('Error fetching repo tree:', error);
             throw error;
@@ -369,7 +373,14 @@ export class GitLabService {
 
         // Fetch tree
         if (onProgress) onProgress({ status: 'fetching_tree', message: 'Fetching repository structure...' });
-        const tree = await this.fetchRepoTree(projectPath, branch);
+        const { tree, truncated } = await this.fetchRepoTree(projectPath, branch);
+
+        if (truncated && onProgress) {
+            onProgress({
+                status: 'warning',
+                message: `⚠️ Repository tree was truncated (>${tree.length} entries). Some files may be missing from the index.`
+            });
+        }
 
         // Filter code files
         const codeFiles = this.filterCodeFiles(tree);

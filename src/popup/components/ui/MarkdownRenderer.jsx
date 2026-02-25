@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Copy, Check } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { copyToClipboard } from '../../utils/clipboard';
 
 /**
  * MarkdownRenderer - Renders markdown content with proper styling
@@ -15,43 +16,10 @@ export function MarkdownRenderer({ content, className, showCopy = true }) {
     if (!content) return null;
 
     const handleCopy = async () => {
-        try {
-            // Try modern clipboard API first
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-                await navigator.clipboard.writeText(content);
-            } else {
-                // Fallback for extension context
-                const textArea = document.createElement('textarea');
-                textArea.value = content;
-                textArea.style.position = 'fixed';
-                textArea.style.left = '-9999px';
-                textArea.style.top = '-9999px';
-                document.body.appendChild(textArea);
-                textArea.focus();
-                textArea.select();
-                document.execCommand('copy');
-                document.body.removeChild(textArea);
-            }
+        const ok = await copyToClipboard(content);
+        if (ok) {
             setCopied(true);
             setTimeout(() => setCopied(false), 2000);
-        } catch (err) {
-            // Final fallback using execCommand
-            try {
-                const textArea = document.createElement('textarea');
-                textArea.value = content;
-                textArea.style.position = 'fixed';
-                textArea.style.left = '-9999px';
-                textArea.style.top = '-9999px';
-                document.body.appendChild(textArea);
-                textArea.focus();
-                textArea.select();
-                document.execCommand('copy');
-                document.body.removeChild(textArea);
-                setCopied(true);
-                setTimeout(() => setCopied(false), 2000);
-            } catch (fallbackErr) {
-                console.error('Failed to copy:', fallbackErr);
-            }
         }
     };
 
