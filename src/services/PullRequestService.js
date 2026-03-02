@@ -744,6 +744,85 @@ export class PullRequestService {
     // ==========================================
 
     /**
+     * Fetch full file content (not just patch/diff) for a PR file
+     * This enables deeper analysis by providing complete file context
+     * @param {string} prUrl - PR URL
+     * @param {string} filePath - File path within the repo
+     * @param {string} ref - Git ref (branch/commit) to fetch from
+     * @returns {Object} { content, filePath }
+     */
+    async fetchFullFileContent(prUrl, filePath, ref = null) {
+        const prInfo = this.parsePullRequestUrl(prUrl);
+        if (!prInfo) throw new Error('Invalid PR URL');
+
+        if (prInfo.platform === 'github') {
+            const { owner, repo } = prInfo;
+            const headers = {
+                'Accept': 'application/vnd.github.v3.raw',
+                ...(this.githubToken ? { 'Authorization': `token ${this.githubToken}` } : {})
+            };
+            const url = `${this.githubBaseUrl}/repos/${owner}/${repo}/contents/${encodeURIComponent(filePath)}${ref ? `?ref=${ref}` : ''}`;
+            const response = await fetch(url, { headers });
+            if (!response.ok) throw new Error(`Failed to fetch file: ${response.status}`);
+            const content = await response.text();
+            return { content, filePath };
+        } else if (prInfo.platform === 'gitlab') {
+            const projectPath = encodeURIComponent(`${prInfo.owner}/${prInfo.repo}`);
+            const encodedPath = encodeURIComponent(filePath);
+            const headers = this.gitlabToken ? { 'PRIVATE-TOKEN': this.gitlabToken } : {};
+            const url = `https://gitlab.com/api/v4/projects/${projectPath}/repository/files/${encodedPath}/raw${ref ? `?ref=${ref}` : '?ref=main'}`;
+            const response = await fetch(url, { headers });
+            if (!response.ok) throw new Error(`Failed to fetch file: ${response.status}`);
+            const content = await response.text();
+            return { content, filePath };
+        }
+
+        throw new Error(`Unsupported platform: ${prInfo.platform}`);
+    }
+
+    /**
+     * Enhance PR files data with full file content for key files
+     * Fetches full content for modified files (not added/deleted) up to a limit
+     * @param {string} prUrl - PR URL
+     * @param {Array} files - PR files array
+     * @param {Object} options - { maxFiles, ref }
+     * @returns {Array} Enhanced files array with fullContent property
+     */
+    async enhanceFilesWithFullContent(prUrl, files, options = {}) {
+        const { maxFiles = 10, ref = null } = options;
+
+        // Prioritize modified files (most benefit from full context)
+        const modifiedFiles = files
+            .filter(f => f.status === 'modified' && !f.filename?.endsWith('.lock'))
+            .slice(0, maxFiles);
+
+        const enhanced = await Promise.allSettled(
+            modifiedFiles.map(async (file) => {
+                try {
+                    const result = await this.fetchFullFileContent(prUrl, file.filename, ref);
+                    return { filename: file.filename, fullContent: result.content };
+                } catch (err) {
+                    console.warn(`Failed to fetch full content for ${file.filename}:`, err.message);
+                    return { filename: file.filename, fullContent: null };
+                }
+            })
+        );
+
+        // Merge full content back into files array
+        const contentMap = new Map();
+        for (const result of enhanced) {
+            if (result.status === 'fulfilled' && result.value.fullContent) {
+                contentMap.set(result.value.filename, result.value.fullContent);
+            }
+        }
+
+        return files.map(f => ({
+            ...f,
+            fullContent: contentMap.get(f.filename) || null
+        }));
+    }
+
+    /**
      * Post a review to a PR (summary comment + optional inline comments)
      * @param {string} url - PR URL
      * @param {Object} options - { summary, inlineComments, event }

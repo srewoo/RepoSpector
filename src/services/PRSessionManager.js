@@ -4,6 +4,7 @@
  * Manages PR review session lifecycle with 30-day retention.
  * Tracks session state, findings, and associated threads.
  */
+import { getDatabase } from './Database.js';
 
 export class PRSessionManager {
     constructor(options = {}) {
@@ -27,34 +28,8 @@ export class PRSessionManager {
      */
     async init() {
         if (this.db) return;
-
-        return new Promise((resolve, reject) => {
-            const request = indexedDB.open(this.dbName, this.version);
-
-            request.onerror = (event) => {
-                console.error('PRSessionManager DB error:', event.target.error);
-                reject(event.target.error);
-            };
-
-            request.onsuccess = (event) => {
-                this.db = event.target.result;
-                console.log('📋 PRSessionManager initialized');
-                resolve();
-            };
-
-            request.onupgradeneeded = (event) => {
-                const db = event.target.result;
-
-                if (!db.objectStoreNames.contains(this.storeName)) {
-                    const store = db.createObjectStore(this.storeName, { keyPath: 'sessionId' });
-                    store.createIndex('prUrl', 'prUrl', { unique: false });
-                    store.createIndex('repoId', 'repoId', { unique: false });
-                    store.createIndex('createdAt', 'createdAt', { unique: false });
-                    store.createIndex('updatedAt', 'updatedAt', { unique: false });
-                    console.log('📋 Created pr_sessions object store');
-                }
-            };
-        });
+        this.db = await getDatabase();
+        console.log('📋 PRSessionManager initialized');
     }
 
     /**

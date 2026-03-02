@@ -162,12 +162,18 @@ class RepoSpectorPanelInjector {
         // Import styles into shadow DOM
         const styleLink = document.createElement('link');
         styleLink.rel = 'stylesheet';
-        styleLink.href = chrome.runtime.getURL('assets/popup.css');
+        if (chrome && chrome.runtime && chrome.runtime.getURL) {
+            styleLink.href = chrome.runtime.getURL('assets/popup.css');
+        } else {
+            console.warn('chrome.runtime.getURL is not available. Extension context might be invalidated.');
+        }
         shadowRoot.appendChild(styleLink);
 
         const floatingPanelStyles = document.createElement('link');
         floatingPanelStyles.rel = 'stylesheet';
-        floatingPanelStyles.href = chrome.runtime.getURL('content/floatingPanel.css');
+        if (chrome && chrome.runtime && chrome.runtime.getURL) {
+            floatingPanelStyles.href = chrome.runtime.getURL('content/floatingPanel.css');
+        }
         shadowRoot.appendChild(floatingPanelStyles);
 
         // Render React component

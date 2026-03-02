@@ -73,7 +73,7 @@ class ContentExtractor {
         ];
 
         return diffIndicators.some(indicator => url.includes(indicator)) ||
-               document.querySelector('.diff-table, .diff-content, [data-testid="diff-view"]') !== null;
+            document.querySelector('.diff-table, .diff-content, [data-testid="diff-view"]') !== null;
     }
 
     setupMessageHandler() {
@@ -90,7 +90,11 @@ class ContentExtractor {
                 const iframe = this.panel.querySelector('iframe');
                 if (iframe && iframe.contentWindow) {
                     console.log('🔄 Forwarding TEST_CHUNK to iframe:', message.requestId);
-                    iframe.contentWindow.postMessage(message, new URL(chrome.runtime.getURL('/')).origin);
+                    if (chrome && chrome.runtime && chrome.runtime.getURL) {
+                        iframe.contentWindow.postMessage(message, new URL(chrome.runtime.getURL('/')).origin);
+                    } else {
+                        console.warn('chrome.runtime.getURL unavailable, cannot forward message to iframe');
+                    }
                 }
             }
 
@@ -128,27 +132,27 @@ class ContentExtractor {
                     case 'EXTRACT_CODE':
                         await this.handleExtractCode(message, sendResponse);
                         break;
-                        
+
                     case 'DETECT_PAGE_TYPE':
                         this.handleDetectPageType(message, sendResponse);
                         break;
-                        
+
                     case 'EXTRACT_DIFF':
                         await this.handleExtractDiff(message, sendResponse);
                         break;
-                        
+
                     case 'GET_PAGE_CONTEXT':
                         await this.handleGetPageContext(message, sendResponse);
                         break;
-                        
+
                     case 'PROGRESS_UPDATE':
                         this.handleProgressUpdate(message);
                         break;
-                        
+
                     default:
-                        sendResponse({ 
-                            success: false, 
-                            error: `Unknown message type: ${message.type}` 
+                        sendResponse({
+                            success: false,
+                            error: `Unknown message type: ${message.type}`
                         });
                 }
             } else if (message.action) {
@@ -157,21 +161,21 @@ class ContentExtractor {
                     case 'extractCode':
                         await this.handleLegacyExtractCode(message, sendResponse);
                         break;
-                        
+
                     case 'detectCodeType':
                         this.handleDetectPageType(message, sendResponse);
                         break;
-                        
+
                     default:
-                        sendResponse({ 
-                            success: false, 
-                            error: `Unknown action: ${message.action}` 
+                        sendResponse({
+                            success: false,
+                            error: `Unknown action: ${message.action}`
                         });
                 }
             } else {
-                sendResponse({ 
-                    success: false, 
-                    error: 'Message must have either type or action property' 
+                sendResponse({
+                    success: false,
+                    error: 'Message must have either type or action property'
                 });
             }
         } catch (error) {
@@ -327,8 +331,8 @@ class ContentExtractor {
 
     handleDetectPageType(message, sendResponse) {
         const pageType = this.detectPageType();
-        sendResponse({ 
-            success: true, 
+        sendResponse({
+            success: true,
             detection: pageType  // Use 'detection' instead of 'data' for compatibility
         });
     }
@@ -337,10 +341,10 @@ class ContentExtractor {
         try {
             const { options = {} } = message;
             const diffData = await this.diffParser.extractDiffFromDOM(options);
-            
-            sendResponse({ 
-                success: true, 
-                data: diffData 
+
+            sendResponse({
+                success: true,
+                data: diffData
             });
         } catch (error) {
             this.errorHandler.logError('Diff extraction', error);
@@ -356,9 +360,9 @@ class ContentExtractor {
     async handleGetPageContext(message, sendResponse) {
         try {
             const context = await this.getPageContext();
-            sendResponse({ 
-                success: true, 
-                data: context 
+            sendResponse({
+                success: true,
+                data: context
             });
         } catch (error) {
             this.errorHandler.logError('Page context extraction', error);
@@ -386,7 +390,7 @@ class ContentExtractor {
     detectPageType() {
         const url = window.location.href;
         const platform = this.diffParser.detectPlatform(url);
-        
+
         // Check for diff/PR/MR/commit pages
         if (this.isDiffPage(url)) {
             if (url.includes('/pull/') || url.includes('/merge_requests/')) {
@@ -412,7 +416,7 @@ class ContentExtractor {
                 };
             }
         }
-        
+
         // Check for file pages
         if (this.isFilePage(url)) {
             return {
@@ -422,7 +426,7 @@ class ContentExtractor {
                 supportsDiff: false
             };
         }
-        
+
         // Check for repository pages
         if (this.isRepositoryPage(url)) {
             return {
@@ -432,7 +436,7 @@ class ContentExtractor {
                 supportsDiff: false
             };
         }
-        
+
         return {
             type: 'unknown',
             platform,
@@ -449,9 +453,9 @@ class ContentExtractor {
             '/diff', '/diffs',
             'pull-request', 'merge-request'
         ];
-        
+
         return diffIndicators.some(indicator => url.includes(indicator)) ||
-               document.querySelector('.diff-table, .diff-content, [data-testid="diff-view"], .file-diff-split') !== null;
+            document.querySelector('.diff-table, .diff-content, [data-testid="diff-view"], .file-diff-split') !== null;
     }
 
     isFilePage(url) {
@@ -459,27 +463,27 @@ class ContentExtractor {
             '/blob/', '/tree/', '/src/',
             '/browse/', '/source/'
         ];
-        
+
         return fileIndicators.some(indicator => url.includes(indicator)) ||
-               document.querySelector('.blob-wrapper, .file-content, .source-view') !== null;
+            document.querySelector('.blob-wrapper, .file-content, .source-view') !== null;
     }
 
     isRepositoryPage(url) {
         // Repository root or main pages
         const pathSegments = new URL(url).pathname.split('/').filter(Boolean);
-        
+
         // GitHub: /owner/repo, GitLab: /owner/repo, BitBucket: /owner/repo
         if (pathSegments.length === 2) {
             return true;
         }
-        
+
         // Repository sub-pages
         const repoIndicators = [
             '/tree/main', '/tree/master',
             '/src/main', '/src/master',
             '/-/tree/', '/-/blob/'
         ];
-        
+
         return repoIndicators.some(indicator => url.includes(indicator));
     }
 
@@ -490,7 +494,7 @@ class ContentExtractor {
         try {
             // Use DiffParser to extract diff content
             const diffData = await this.diffParser.extractDiffFromDOM(options);
-            
+
             if (!diffData || !diffData.files || diffData.files.length === 0) {
                 throw new Error('No diff content found on page');
             }
@@ -658,10 +662,10 @@ class ContentExtractor {
     isDiffPageByDOM() {
         const url = window.location.href;
         const isDiffUrl = url.includes('/merge_requests/') ||
-                         url.includes('/pull/') ||
-                         url.includes('/compare/') ||
-                         url.includes('/commit/') ||
-                         url.includes('/diffs');
+            url.includes('/pull/') ||
+            url.includes('/compare/') ||
+            url.includes('/commit/') ||
+            url.includes('/diffs');
 
         const hasDiffElements = document.querySelector('.diff-file, [data-diff-file], .js-diff-load-container') !== null;
 
@@ -1031,16 +1035,16 @@ class ContentExtractor {
     async extractRepositoryPage(options = {}) {
         try {
             const platform = this.diffParser.detectPlatform(window.location.href);
-            
+
             // For repository pages, we might extract multiple files or README
             const files = await this.extractRepositoryFiles(platform, options);
-            
+
             if (!files || files.length === 0) {
                 throw new Error('No extractable content found on repository page');
             }
 
             // Combine files into a single code block
-            const combinedCode = files.map(file => 
+            const combinedCode = files.map(file =>
                 `// File: ${file.path}\n${file.content}`
             ).join('\n\n' + '='.repeat(50) + '\n\n');
 
@@ -1087,7 +1091,7 @@ class ContentExtractor {
                         const code = Array.from(elements)
                             .map(el => el.textContent || el.innerText || '')
                             .join('\n\n');
-                        
+
                         if (code.trim().length > 10) {
                             console.log(`Code extracted using selector: ${selector}`);
                             return {
@@ -1114,7 +1118,7 @@ class ContentExtractor {
             );
 
             let extractedCode = '';
-            
+
             for (const element of codeElements) {
                 const text = element.textContent || element.innerText || '';
                 if (text.trim().length > 10) { // Ignore very short code snippets
@@ -1490,14 +1494,14 @@ class ContentExtractor {
             try {
                 const elements = document.querySelectorAll(selector);
                 console.log(`Trying fallback selector "${selector}": found ${elements.length} elements`);
-                
+
                 if (elements.length > 0) {
                     const longestCode = Array.from(elements)
                         .map(el => el.textContent || el.innerText || '')
                         .filter(text => text.trim().length > 10)
-                        .reduce((longest, current) => 
+                        .reduce((longest, current) =>
                             current.length > longest.length ? current : longest, '');
-                    
+
                     if (longestCode.trim().length > 10) {
                         console.log(`GitLab content extracted using fallback selector: ${selector} (${longestCode.length} chars)`);
                         return this.cleanupExtractedCode(longestCode);
@@ -1513,12 +1517,12 @@ class ContentExtractor {
         const allElements = document.querySelectorAll('*');
         let bestContent = '';
         let bestScore = 0;
-        
+
         for (const element of allElements) {
             try {
                 const text = element.textContent || element.innerText || '';
                 if (text.length < 50) continue; // Skip very short content
-                
+
                 // Calculate a "code-likeness" score
                 let score = 0;
                 // JavaScript/C-style languages
@@ -1542,12 +1546,12 @@ class ContentExtractor {
                 if (text.includes('return')) score += 2;
                 if (text.includes('if') || text.includes('for') || text.includes('while')) score += 2;
                 if (text.includes('=')) score += 1;
-                
+
                 // Bonus for proper indentation
                 const lines = text.split('\n');
                 const indentedLines = lines.filter(line => line.match(/^\s{2,}/)).length;
                 if (indentedLines > lines.length * 0.3) score += 2;
-                
+
                 if (score > bestScore && text.length > bestContent.length) {
                     bestScore = score;
                     bestContent = text;
@@ -1567,7 +1571,7 @@ class ContentExtractor {
         console.log('Available elements on page:', document.querySelectorAll('*').length);
         console.log('Page URL:', window.location.href);
         console.log('Page title:', document.title);
-        
+
         return '';
     }
 
@@ -1631,7 +1635,7 @@ class ContentExtractor {
         const codeElements = document.querySelectorAll('pre, code');
         const longestCode = Array.from(codeElements)
             .map(el => el.textContent || el.innerText || '')
-            .reduce((longest, current) => 
+            .reduce((longest, current) =>
                 current.length > longest.length ? current : longest, '');
 
         return longestCode;
@@ -1740,7 +1744,7 @@ class ContentExtractor {
 
     async extractGitHubRepositoryFiles(_maxFiles) {
         const files = [];
-        
+
         // Look for README
         const readmeElement = document.querySelector('#readme, .readme, [data-testid="readme"]');
         if (readmeElement) {
@@ -1760,7 +1764,7 @@ class ContentExtractor {
             const link = fileLinks[i];
             const href = link.getAttribute('href');
             const filename = link.textContent?.trim();
-            
+
             if (href && filename && this.isCodeFile(filename)) {
                 // Note: In a real implementation, we'd need to fetch these files
                 // For now, we'll just record them as potential files
@@ -1777,7 +1781,7 @@ class ContentExtractor {
 
     async extractGitLabRepositoryFiles(_maxFiles) {
         const files = [];
-        
+
         // Look for README in various GitLab locations
         const readmeSelectors = [
             '.readme-holder',
@@ -1786,7 +1790,7 @@ class ContentExtractor {
             '[data-testid="readme"]',
             '.blob-viewer'
         ];
-        
+
         for (const selector of readmeSelectors) {
             const readmeElement = document.querySelector(selector);
             if (readmeElement) {
@@ -1801,7 +1805,7 @@ class ContentExtractor {
                 }
             }
         }
-        
+
         // Look for file tree items with improved selectors
         const fileTreeSelectors = [
             '.tree-item-file-name a',
@@ -1811,7 +1815,7 @@ class ContentExtractor {
             '.tree-table tbody tr td:first-child a',
             '.js-tree-browser-file a'
         ];
-        
+
         let fileLinks = [];
         for (const selector of fileTreeSelectors) {
             fileLinks = document.querySelectorAll(selector);
@@ -1820,19 +1824,19 @@ class ContentExtractor {
                 break;
             }
         }
-        
+
         // Extract file information from the tree
         if (fileLinks.length > 0) {
             for (let i = 0; i < Math.min(fileLinks.length, 10 - files.length); i++) {
                 const link = fileLinks[i];
                 const href = link.getAttribute('href');
                 const filename = link.textContent?.trim();
-                
+
                 if (href && filename && this.isCodeFile(filename)) {
                     // Extract relative path from href
                     const pathMatch = href.match(/\/-\/blob\/[^/]+\/(.+)/);
                     const relativePath = pathMatch ? pathMatch[1] : filename;
-                    
+
                     files.push({
                         path: relativePath,
                         content: `// File: ${relativePath}\n// GitLab URL: ${href}\n// Content would be fetched in a real implementation`,
@@ -1842,7 +1846,7 @@ class ContentExtractor {
                 }
             }
         }
-        
+
         // Look for package.json or other config files specifically
         const configFileSelectors = [
             'a[href*="package.json"]',
@@ -1851,13 +1855,13 @@ class ContentExtractor {
             'a[href*="cypress.config"]',
             'a[href*="playwright.config"]'
         ];
-        
+
         for (const selector of configFileSelectors) {
             const configLinks = document.querySelectorAll(selector);
             for (const link of configLinks) {
                 const href = link.getAttribute('href');
                 const filename = link.textContent?.trim();
-                
+
                 if (href && filename && !files.some(f => f.path === filename)) {
                     files.push({
                         path: filename,
@@ -1868,7 +1872,7 @@ class ContentExtractor {
                 }
             }
         }
-        
+
         // If we're on a specific file page, try to navigate to parent directories
         const currentUrl = window.location.href;
         if (currentUrl.includes('/-/blob/')) {
@@ -1876,7 +1880,7 @@ class ContentExtractor {
             if (pathMatch) {
                 const [, branch, filePath] = pathMatch;
                 const dirPath = filePath.substring(0, filePath.lastIndexOf('/'));
-                
+
                 // Add context about the current file's directory
                 files.push({
                     path: `${dirPath}/DIRECTORY_CONTEXT.md`,
@@ -1892,7 +1896,7 @@ class ContentExtractor {
     async extractBitbucketRepositoryFiles(_maxFiles) {
         // Similar to GitHub but with Bitbucket-specific selectors
         const files = [];
-        
+
         const readmeElement = document.querySelector('.readme, .overview');
         if (readmeElement) {
             const content = readmeElement.textContent || readmeElement.innerText || '';
@@ -1911,7 +1915,7 @@ class ContentExtractor {
     async extractGenericRepositoryFiles(maxFiles) {
         // Generic repository file extraction
         const files = [];
-        
+
         const codeElements = document.querySelectorAll('pre, code, .readme, .documentation');
         for (let i = 0; i < Math.min(codeElements.length, maxFiles); i++) {
             const element = codeElements[i];
@@ -1938,7 +1942,7 @@ class ContentExtractor {
             '.go', '.rb', '.php', '.swift', '.kt',
             '.rs', '.scala', '.clj', '.hs'
         ];
-        
+
         return codeExtensions.some(ext => filename.toLowerCase().endsWith(ext));
     }
 
@@ -1951,7 +1955,7 @@ class ContentExtractor {
         }
 
         const groupedByFile = {};
-        
+
         // Group changes by file
         relevantChanges.forEach(change => {
             if (!groupedByFile[change.file]) {
@@ -1966,14 +1970,14 @@ class ContentExtractor {
 
         // Build combined code
         let combinedCode = '';
-        
+
         Object.keys(groupedByFile).forEach(filename => {
             const fileChanges = groupedByFile[filename];
-            
+
             combinedCode += `// File: ${filename}\n`;
             combinedCode += `// Language: ${fileChanges.added[0]?.language || fileChanges.deleted[0]?.language || 'unknown'}\n`;
             combinedCode += '// ===== CHANGES =====\n\n';
-            
+
             if (fileChanges.added.length > 0) {
                 combinedCode += '// ADDED LINES:\n';
                 fileChanges.added.forEach(change => {
@@ -1981,7 +1985,7 @@ class ContentExtractor {
                 });
                 combinedCode += '\n';
             }
-            
+
             if (fileChanges.deleted.length > 0) {
                 combinedCode += '// DELETED LINES:\n';
                 fileChanges.deleted.forEach(change => {
@@ -1989,7 +1993,7 @@ class ContentExtractor {
                 });
                 combinedCode += '\n';
             }
-            
+
             if (options.includeContext && fileChanges.context.length > 0) {
                 combinedCode += '// CONTEXT:\n';
                 fileChanges.context.forEach(change => {
@@ -1997,7 +2001,7 @@ class ContentExtractor {
                 });
                 combinedCode += '\n';
             }
-            
+
             combinedCode += '='.repeat(50) + '\n\n';
         });
 
@@ -2010,20 +2014,20 @@ class ContentExtractor {
     async getPageContext() {
         const url = window.location.href;
         const platform = this.diffParser.detectPlatform(url);
-        
+
         // Extract repository info
         const repository = this.diffParser.extractRepositoryInfo(platform);
-        
+
         // Extract commit info
         const commit = this.diffParser.extractCommitInfo(platform);
-        
+
         // Extract PR/MR info
         const pullRequest = this.diffParser.extractPullRequestInfo(platform);
-        
+
         // Extract page title and description
         const title = document.title || '';
         const metaDescription = document.querySelector('meta[name="description"]')?.getAttribute('content') || '';
-        
+
         return {
             url,
             platform,
@@ -2308,7 +2312,7 @@ class FloatingPanelManager {
 
         // Create iframe for popup content
         const iframe = document.createElement('iframe');
-        iframe.src = chrome.runtime.getURL('src/popup/index.html');
+        iframe.src = chrome.runtime.getURL('src/popup/index.html?mode=iframe');
         iframe.id = 'repospector-iframe';
         Object.assign(iframe.style, {
             width: '100%',

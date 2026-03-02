@@ -79,6 +79,10 @@ export class KnowledgeGraphService {
         return this.nodes.get(id) || null;
     }
 
+    getAllNodes() {
+        return Array.from(this.nodes.values());
+    }
+
     getNodesByLabel(label) {
         const result = [];
         for (const node of this.nodes.values()) {

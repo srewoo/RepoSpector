@@ -5,6 +5,7 @@
  * Supports creating, updating, and retrieving conversation threads for
  * specific findings within a PR review session.
  */
+import { getDatabase } from './Database.js';
 
 export class PRThreadManager {
     constructor(options = {}) {
@@ -29,41 +30,14 @@ export class PRThreadManager {
      */
     async init() {
         if (this.db) return;
-
-        return new Promise((resolve, reject) => {
-            const request = indexedDB.open(this.dbName, this.version);
-
-            request.onerror = (event) => {
-                console.error('PRThreadManager DB error:', event.target.error);
-                reject(event.target.error);
-            };
-
-            request.onsuccess = (event) => {
-                this.db = event.target.result;
-                console.log('📝 PRThreadManager initialized');
-                resolve();
-            };
-
-            request.onupgradeneeded = (event) => {
-                const db = event.target.result;
-
-                // Create pr_threads store if it doesn't exist
-                if (!db.objectStoreNames.contains(this.storeName)) {
-                    const store = db.createObjectStore(this.storeName, { keyPath: 'threadId' });
-                    store.createIndex('sessionId', 'sessionId', { unique: false });
-                    store.createIndex('prUrl', 'prIdentifier.url', { unique: false });
-                    store.createIndex('updatedAt', 'updatedAt', { unique: false });
-                    store.createIndex('status', 'status', { unique: false });
-                    console.log('📝 Created pr_threads object store');
-                }
-            };
-        });
+        this.db = await getDatabase();
+        console.log('📝 PRThreadManager initialized');
     }
 
     /**
      * Create a new thread for a finding
      * @param {Object} params - Thread parameters
-     * @returns {Object} Created thread
+     * @returns {Promise<Object>} Created thread
      */
     async createThread(params) {
         await this.init();
@@ -135,7 +109,7 @@ export class PRThreadManager {
      * Add a message to an existing thread
      * @param {string} threadId - Thread identifier
      * @param {Object} message - Message to add { role, content, metadata }
-     * @returns {Object} Updated thread
+     * @returns {Promise<Object>} Updated thread
      */
     async addMessage(threadId, message) {
         await this.init();

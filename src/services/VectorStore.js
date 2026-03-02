@@ -1,5 +1,6 @@
 import { HNSWIndex } from './HNSWIndex.js';
 import { HNSWStore } from './HNSWStore.js';
+import { getDatabase } from './Database.js';
 
 /**
  * VectorStore service for storing and retrieving embeddings using IndexedDB
@@ -37,29 +38,7 @@ export class VectorStore {
      */
     async init() {
         if (this.db) return;
-
-        return new Promise((resolve, reject) => {
-            const request = indexedDB.open(this.dbName, this.version);
-
-            request.onerror = (event) => {
-                console.error('VectorStore DB error:', event.target.error);
-                reject(event.target.error);
-            };
-
-            request.onsuccess = (event) => {
-                this.db = event.target.result;
-                resolve();
-            };
-
-            request.onupgradeneeded = (event) => {
-                const db = event.target.result;
-                if (!db.objectStoreNames.contains(this.storeName)) {
-                    const store = db.createObjectStore(this.storeName, { keyPath: 'id' });
-                    store.createIndex('repoId', 'repoId', { unique: false });
-                    store.createIndex('filePath', 'filePath', { unique: false });
-                }
-            };
-        });
+        this.db = await getDatabase();
     }
 
     /**
@@ -73,7 +52,7 @@ export class VectorStore {
         const affectedRepos = new Set(vectors.map(v => v.repoId));
         for (const repoId of affectedRepos) {
             this.hnswIndices.delete(repoId);
-            this.hnswStore.delete(repoId).catch(() => {}); // Best-effort cleanup
+            this.hnswStore.delete(repoId).catch(() => { }); // Best-effort cleanup
         }
 
         return new Promise((resolve, reject) => {
@@ -96,7 +75,7 @@ export class VectorStore {
     async clearRepo(repoId) {
         await this.init();
         this.hnswIndices.delete(repoId);
-        this.hnswStore.delete(repoId).catch(() => {}); // Best-effort cleanup
+        this.hnswStore.delete(repoId).catch(() => { }); // Best-effort cleanup
         return new Promise((resolve, reject) => {
             const transaction = this.db.transaction([this.storeName], 'readwrite');
             const store = transaction.objectStore(this.storeName);
@@ -627,7 +606,7 @@ export class VectorStore {
 
     /**
      * Get all unique repository IDs in the store
-     * @returns {Promise<Array<{repoId: string, count: number}>>}
+     * @returns {Promise<Array<{repoId: string, chunksCount: number}>>}
      */
     async getAllRepoIds() {
         await this.init();

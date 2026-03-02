@@ -75,6 +75,11 @@ export function Settings({ onClose }) {
     const [enableAdaptiveLearning, setEnableAdaptiveLearning] = useState(true);
     const [enablePRComments, setEnablePRComments] = useState(false);
 
+    // Write feature toggles (features that write data to GitHub/GitLab)
+    const [enableAutoPostReview, setEnableAutoPostReview] = useState(false);
+    const [enableUpdatePRDescription, setEnableUpdatePRDescription] = useState(false);
+    const [enablePostInlineComments, setEnablePostInlineComments] = useState(false);
+
     // Load settings from background service (with decryption)
     useEffect(() => {
         const loadSettings = async () => {
@@ -98,6 +103,11 @@ export function Settings({ onClose }) {
                         setEnableEOL(settings.reviewSettings.enableEOL !== false);
                         setEnableAdaptiveLearning(settings.reviewSettings.enableAdaptiveLearning !== false);
                         setEnablePRComments(settings.reviewSettings.enablePRComments === true);
+
+                        // Load write feature toggles
+                        setEnableAutoPostReview(settings.reviewSettings.enableAutoPostReview === true);
+                        setEnableUpdatePRDescription(settings.reviewSettings.enableUpdatePRDescription === true);
+                        setEnablePostInlineComments(settings.reviewSettings.enablePostInlineComments === true);
                     }
 
                     // Load model selection
@@ -172,7 +182,10 @@ export function Settings({ onClose }) {
                             enableOSV: enableOSV,
                             enableEOL: enableEOL,
                             enableAdaptiveLearning: enableAdaptiveLearning,
-                            enablePRComments: enablePRComments
+                            enablePRComments: enablePRComments,
+                            enableAutoPostReview: enableAutoPostReview,
+                            enableUpdatePRDescription: enableUpdatePRDescription,
+                            enablePostInlineComments: enablePostInlineComments
                         }
                     }
                 }
@@ -606,6 +619,85 @@ export function Settings({ onClose }) {
                             <span
                                 className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
                                     enablePRComments ? 'translate-x-5' : 'translate-x-0'
+                                }`}
+                            />
+                        </button>
+                    </div>
+                </div>
+            </Collapsible>
+
+            {/* Write Features Section - Features that write to GitHub/GitLab */}
+            <Collapsible
+                title="Write Features"
+                icon={GitBranch}
+                defaultOpen={false}
+                badge={[enableAutoPostReview && 'Post Review', enableUpdatePRDescription && 'Update PR', enablePostInlineComments && 'Inline'].filter(Boolean).join(', ') || 'All Disabled'}
+            >
+                <div className="space-y-1 mb-3">
+                    <p className="text-xs text-amber-400 flex items-center gap-1">
+                        <AlertCircle className="w-3 h-3" />
+                        These features write data to your Git platform. Enable carefully.
+                    </p>
+                </div>
+                <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                            <p className="text-sm font-medium text-text">Auto-Post PR Review</p>
+                            <p className="text-xs text-textMuted">
+                                Automatically post review comments to GitHub/GitLab after analysis
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => setEnableAutoPostReview(!enableAutoPostReview)}
+                            className={`relative w-11 h-6 rounded-full transition-colors ${
+                                enableAutoPostReview ? 'bg-primary' : 'bg-surface'
+                            }`}
+                        >
+                            <span
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                                    enableAutoPostReview ? 'translate-x-5' : 'translate-x-0'
+                                }`}
+                            />
+                        </button>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                            <p className="text-sm font-medium text-text">Update PR Description</p>
+                            <p className="text-xs text-textMuted">
+                                Allow one-click PR description update from generated content
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => setEnableUpdatePRDescription(!enableUpdatePRDescription)}
+                            className={`relative w-11 h-6 rounded-full transition-colors ${
+                                enableUpdatePRDescription ? 'bg-primary' : 'bg-surface'
+                            }`}
+                        >
+                            <span
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                                    enableUpdatePRDescription ? 'translate-x-5' : 'translate-x-0'
+                                }`}
+                            />
+                        </button>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                            <p className="text-sm font-medium text-text">Post Inline Comments</p>
+                            <p className="text-xs text-textMuted">
+                                Post inline code review comments on specific lines
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => setEnablePostInlineComments(!enablePostInlineComments)}
+                            className={`relative w-11 h-6 rounded-full transition-colors ${
+                                enablePostInlineComments ? 'bg-primary' : 'bg-surface'
+                            }`}
+                        >
+                            <span
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                                    enablePostInlineComments ? 'translate-x-5' : 'translate-x-0'
                                 }`}
                             />
                         </button>

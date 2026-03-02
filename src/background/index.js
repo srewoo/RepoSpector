@@ -64,6 +64,8 @@ import { generateRepoInfo, buildExtractedDataSummary, insertAfterHeader } from '
 import { REPO_INFO_ENRICHMENT_SYSTEM_PROMPT, buildRepoInfoEnrichmentPrompt } from '../utils/repoInfoPrompts.js';
 import { MultiPassReviewEngine } from '../services/MultiPassReviewEngine.js';
 import { CodeGraphPipeline } from '../services/CodeGraphPipeline.js';
+import { ReviewMetricsService } from '../services/ReviewMetricsService.js';
+import { PRComplianceChecker } from '../services/PRComplianceChecker.js';
 
 class BackgroundService {
     constructor() {
@@ -123,6 +125,10 @@ class BackgroundService {
 
             // Initialize Knowledge Graph Pipeline (GitNexus-inspired)
             this.codeGraphPipeline = new CodeGraphPipeline();
+
+            // Initialize Review Metrics and Compliance
+            this.reviewMetricsService = new ReviewMetricsService();
+            this.prComplianceChecker = new PRComplianceChecker();
 
             console.log('RepoSpector services initialized successfully (including RAG with local embeddings + Knowledge Graph)');
         } catch (error) {
@@ -549,6 +555,30 @@ class BackgroundService {
                     await this.handleFetchCustomConfig(message, sendResponse);
                     break;
 
+                case 'ANALYZE_IMPACT':
+                    await this.handleAnalyzeImpact(message, sendResponse);
+                    break;
+
+                case 'ANALYZE_DEAD_CODE':
+                    await this.handleAnalyzeDeadCode(message, sendResponse);
+                    break;
+
+                case 'CHECK_PR_COMPLIANCE':
+                    await this.handleCheckPRCompliance(message, sendResponse);
+                    break;
+
+                case 'GET_REVIEW_METRICS':
+                    await this.handleGetReviewMetrics(message, sendResponse);
+                    break;
+
+                case 'GENERATE_REPO_DOCS':
+                    await this.handleGenerateRepoDocs(message, sendResponse);
+                    break;
+
+                case 'FETCH_FULL_FILE':
+                    await this.handleFetchFullFile(message, sendResponse);
+                    break;
+
                 default:
                     sendResponse({
                         success: false,
@@ -973,8 +1003,8 @@ class BackgroundService {
 
                     // Check if it's a token error - if so, automatically switch to chunking
                     const isTokenError = errorMessage.includes('maximum context length') ||
-                                        errorMessage.includes('token') ||
-                                        errorMessage.includes('too large');
+                        errorMessage.includes('token') ||
+                        errorMessage.includes('too large');
 
                     if (isTokenError && !tokenBudget.needsChunking) {
                         console.log('⚠️ Token limit hit - automatically switching to chunked processing');
@@ -1441,7 +1471,7 @@ class BackgroundService {
 
             // Strategy 2: Truncate code if still too large
             const codeBudget = availableTokens - budgetForHistory - systemPromptEstimate - questionTokens -
-                              (processedRAG?.chunks ? this.tokenManager.estimateTokens(processedRAG.chunks) : 0);
+                (processedRAG?.chunks ? this.tokenManager.estimateTokens(processedRAG.chunks) : 0);
 
             if (codeTokens > codeBudget) {
                 console.log(`⚠️ Truncating code from ${codeTokens} to ~${codeBudget} tokens`);
@@ -1458,7 +1488,7 @@ class BackgroundService {
 
         // Detect if this is diff content (has + or - line prefixes indicating additions/deletions)
         const isDiffContent = processedCode.includes('\n+') || processedCode.includes('\n-') ||
-                              processedCode.match(/^[\+\-]/m);
+            processedCode.match(/^[\+\-]/m);
 
         if (isDiffContent) {
             // Add the comprehensive code review prompt for diffs
@@ -1554,7 +1584,7 @@ ${CODE_REVIEW_PROMPT}`;
             console.log(`📦 Processing chunk ${chunk.index + 1}/${chunk.total} (${chunk.tokens} tokens)`);
 
             const chunkPrompt = userPrompt.replace('{{CODE}}', chunk.content) +
-                              `\n\n**Note:** This is chunk ${chunk.index + 1} of ${chunk.total} from a large file.`;
+                `\n\n**Note:** This is chunk ${chunk.index + 1} of ${chunk.total} from a large file.`;
 
             try {
                 const result = await this.callOpenAI({
@@ -2708,7 +2738,7 @@ Return only the complete test code with proper syntax for the detected language,
                 chrome.tabs.sendMessage(tabId, {
                     type: 'INDEX_PROGRESS',
                     data: { status: 'starting', message: 'Initializing indexing...' }
-                }).catch(() => {});
+                }).catch(() => { });
             }
 
             // Fetch repository files
@@ -2718,7 +2748,7 @@ Return only the complete test code with proper syntax for the detected language,
                     chrome.tabs.sendMessage(tabId, {
                         type: 'INDEX_PROGRESS',
                         data: progress
-                    }).catch(() => {});
+                    }).catch(() => { });
                 }
             });
 
@@ -2734,7 +2764,7 @@ Return only the complete test code with proper syntax for the detected language,
                         chrome.tabs.sendMessage(tabId, {
                             type: 'INDEX_PROGRESS',
                             data: progress
-                        }).catch(() => {});
+                        }).catch(() => { });
                     }
                 }
             );
@@ -2750,7 +2780,7 @@ Return only the complete test code with proper syntax for the detected language,
                         chrome.tabs.sendMessage(tabId, {
                             type: 'INDEX_PROGRESS',
                             data: { status: 'graph', message: progress.message }
-                        }).catch(() => {});
+                        }).catch(() => { });
                     }
                 });
                 console.log('✅ Knowledge graph built:', graphStats);
@@ -2772,7 +2802,7 @@ Return only the complete test code with proper syntax for the detected language,
             chrome.runtime.sendMessage({
                 type: 'INDEX_PROGRESS',
                 data: { status: 'complete', repoId }
-            }).catch(() => {});
+            }).catch(() => { });
 
             sendResponse({
                 success: true,
@@ -3587,6 +3617,23 @@ Return only the complete test code with proper syntax for the detected language,
             const prData = await this.pullRequestService.fetchPullRequest(prUrl);
             console.log(`📊 PR fetched: ${prData.files.length} files, +${prData.stats.additions} -${prData.stats.deletions}`);
 
+            // Enhance files with full content if enabled (not just patch lines)
+            if (options.fetchFullFiles !== false) {
+                try {
+                    const headRef = prData.branches?.source;
+                    prData.files = await this.pullRequestService.enhanceFilesWithFullContent(
+                        prUrl, prData.files,
+                        { maxFiles: options.maxFullFiles || 10, ref: headRef }
+                    );
+                    const enhanced = prData.files.filter(f => f.fullContent).length;
+                    if (enhanced > 0) {
+                        console.log(`📄 Enhanced ${enhanced} files with full content for deeper review`);
+                    }
+                } catch (enhanceErr) {
+                    console.warn('Failed to enhance files with full content:', enhanceErr.message);
+                }
+            }
+
             // Fallback to single-pass for small PRs
             const FILE_THRESHOLD = options.multiPassThreshold || 3;
             if (prData.files.length <= FILE_THRESHOLD) {
@@ -3644,7 +3691,7 @@ Return only the complete test code with proper syntax for the detected language,
                     chrome.runtime.sendMessage({
                         type: 'PR_REVIEW_PROGRESS',
                         data: event
-                    }).catch(() => {});
+                    }).catch(() => { });
                 } catch (e) { /* popup may be closed */ }
             };
 
@@ -3697,6 +3744,20 @@ Return only the complete test code with proper syntax for the detected language,
                 aiSummary = summaryResponse.content || summaryResponse;
             } catch (e) {
                 console.warn('Failed to generate PR summary:', e.message);
+            }
+
+            // Record review metrics
+            try {
+                await this.reviewMetricsService.recordReview({
+                    repoId,
+                    prUrl,
+                    findings: result.perFileFindings || [],
+                    staticFindings: staticResult.findings || [],
+                    reviewType: 'multi-pass',
+                    filesReviewed: prData.files.length
+                });
+            } catch (metricsErr) {
+                console.warn('Failed to record review metrics:', metricsErr.message);
             }
 
             sendResponse({
@@ -4116,8 +4177,8 @@ Return only the complete test code with proper syntax for the detected language,
             let thread = existingThreads.find(t =>
                 t.finding?.id === finding.id ||
                 (t.finding?.file === finding.file &&
-                 t.finding?.lineNumber === finding.lineNumber &&
-                 t.finding?.message === finding.message)
+                    t.finding?.lineNumber === finding.lineNumber &&
+                    t.finding?.message === finding.message)
             );
 
             if (!thread) {
@@ -4158,8 +4219,8 @@ Return only the complete test code with proper syntax for the detected language,
                 session = sessions.find(s =>
                     s.prIdentifier?.url === prIdentifier.url ||
                     (s.prIdentifier?.owner === prIdentifier.owner &&
-                     s.prIdentifier?.repo === prIdentifier.repo &&
-                     s.prIdentifier?.prNumber === prIdentifier.prNumber)
+                        s.prIdentifier?.repo === prIdentifier.repo &&
+                        s.prIdentifier?.prNumber === prIdentifier.prNumber)
                 );
             }
 
@@ -4734,10 +4795,24 @@ ${typeInstructions[type] || typeInstructions.sequence}
 
     async handlePostPRReview(message, sendResponse) {
         try {
-            const { prUrl, analysisResult, aiSummary, options = {} } = message.data || message.payload || {};
+            const { prUrl, analysisResult, aiSummary, options = {}, action, description } = message.data || message.payload || {};
 
             if (!prUrl) {
                 sendResponse({ success: false, error: 'PR URL is required' });
+                return;
+            }
+
+            // Handle PR description update action
+            if (action === 'update_description' && description) {
+                const settings = await this.getSettings();
+                const reviewSettings = settings.reviewSettings || {};
+                if (!reviewSettings.enableUpdatePRDescription) {
+                    sendResponse({ success: false, error: 'PR description updates are disabled. Enable "Update PR Description" in Settings > Write Features.' });
+                    return;
+                }
+                await this.updatePRServiceTokens();
+                await this.pullRequestService.updatePRDescription(prUrl, description);
+                sendResponse({ success: true, data: { updated: true } });
                 return;
             }
 
@@ -4909,6 +4984,318 @@ ${typeInstructions[type] || typeInstructions.sequence}
         } catch (error) {
             console.error('Error processing thread message:', error);
             throw error;
+        }
+    }
+
+    // ========== NEW FEATURE HANDLERS ==========
+
+    /**
+     * Handle impact analysis via knowledge graph
+     */
+    async handleAnalyzeImpact(message, sendResponse) {
+        const { targetName, repoId, direction = 'both' } = message.payload || message.data || {};
+
+        try {
+            if (!targetName) {
+                throw new Error('Target function/class name is required');
+            }
+
+            // Load knowledge graph for this repo
+            const graph = this.codeGraphPipeline?.graph;
+            if (!graph) {
+                throw new Error('Knowledge graph not available. Please index the repository first.');
+            }
+
+            // Try to load the graph for this repo
+            await graph.load(repoId);
+
+            const { ImpactAnalyzer } = await import('../services/ImpactAnalyzer.js');
+            const analyzer = new ImpactAnalyzer(graph);
+            const result = analyzer.analyze(targetName, { direction, maxDepth: 5 });
+
+            if (!result.found) {
+                sendResponse({
+                    success: true,
+                    data: {
+                        response: `No symbol named "${targetName}" found in the knowledge graph. Make sure the repository is indexed and try the exact function or class name.`
+                    }
+                });
+                return;
+            }
+
+            // Format for display
+            let response = `## Impact Analysis: ${result.target.name}\n\n`;
+            response += `**Type**: ${result.target.type} | **File**: ${result.target.filePath}\n`;
+            response += `**Risk Level**: ${result.riskLevel.toUpperCase()}\n\n`;
+
+            if (result.upstream && result.upstream.nodes.length > 0) {
+                response += `### Upstream (${result.upstream.nodes.length} callers)\n`;
+                for (const node of result.upstream.nodes.slice(0, 15)) {
+                    response += `- **${node.name}** (${node.filePath}) — confidence: ${Math.round(node.confidence * 100)}%\n`;
+                }
+                if (result.upstream.nodes.length > 15) {
+                    response += `- ... and ${result.upstream.nodes.length - 15} more\n`;
+                }
+                response += '\n';
+            }
+
+            if (result.downstream && result.downstream.nodes.length > 0) {
+                response += `### Downstream (${result.downstream.nodes.length} dependencies)\n`;
+                for (const node of result.downstream.nodes.slice(0, 15)) {
+                    response += `- **${node.name}** (${node.filePath}) — confidence: ${Math.round(node.confidence * 100)}%\n`;
+                }
+                if (result.downstream.nodes.length > 15) {
+                    response += `- ... and ${result.downstream.nodes.length - 15} more\n`;
+                }
+                response += '\n';
+            }
+
+            response += `### Summary\n${result.summary}`;
+
+            sendResponse({ success: true, data: { response } });
+        } catch (error) {
+            console.error('Impact analysis error:', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
+    /**
+     * Handle dead code analysis via knowledge graph
+     */
+    async handleAnalyzeDeadCode(message, sendResponse) {
+        const { repoId } = message.payload || message.data || {};
+
+        try {
+            const graph = this.codeGraphPipeline?.graph;
+            if (!graph) {
+                throw new Error('Knowledge graph not available. Please index the repository first.');
+            }
+
+            await graph.load(repoId);
+
+            // Find nodes with no incoming edges (potential dead code)
+            const reverseAdj = graph.getReverseAdjacency();
+            const allNodes = graph.getAllNodes();
+            const deadCandidates = [];
+
+            for (const node of allNodes) {
+                // Skip if it's an entry point (exported, main, handler, etc.)
+                const name = (node.properties?.name || '').toLowerCase();
+                const isEntryPoint = name.includes('main') || name.includes('handler') ||
+                    name.includes('controller') || name.includes('export') ||
+                    name.includes('route') || name.includes('middleware') ||
+                    name.includes('test') || name.includes('spec');
+
+                if (isEntryPoint) continue;
+
+                // Check if no callers
+                const callers = reverseAdj.get(node.id) || [];
+                if (callers.length === 0 && node.label !== 'Module') {
+                    deadCandidates.push({
+                        name: node.properties?.name,
+                        type: node.label,
+                        filePath: node.properties?.filePath,
+                        line: node.properties?.startLine
+                    });
+                }
+            }
+
+            let response = `## Dead Code Analysis\n\n`;
+            response += `Found **${deadCandidates.length}** potentially unused symbols:\n\n`;
+
+            if (deadCandidates.length === 0) {
+                response += 'No dead code candidates found. All symbols appear to have callers.\n';
+            } else {
+                for (const candidate of deadCandidates.slice(0, 30)) {
+                    response += `- **${candidate.name}** (${candidate.type}) in \`${candidate.filePath}:${candidate.line || '?'}\`\n`;
+                }
+                if (deadCandidates.length > 30) {
+                    response += `\n... and ${deadCandidates.length - 30} more.\n`;
+                }
+                response += '\n*Note: Entry points (handlers, controllers, exports, tests) are excluded. Verify before removing.*';
+            }
+
+            sendResponse({ success: true, data: { response } });
+        } catch (error) {
+            console.error('Dead code analysis error:', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
+    /**
+     * Handle PR description compliance check
+     */
+    async handleCheckPRCompliance(message, sendResponse) {
+        const { prUrl, repoId } = message.payload || message.data || {};
+
+        try {
+            if (!prUrl) throw new Error('PR URL is required');
+
+            const settings = await this.getStoredSettings();
+
+            // Fetch PR data
+            const prData = await this.pullRequestService.fetchPullRequest(prUrl, {
+                githubToken: settings.githubToken,
+                gitlabToken: settings.gitlabToken
+            });
+
+            // Fetch custom rules if available
+            let customRules = null;
+            if (repoId) {
+                const parts = repoId.split('/');
+                const platform = prUrl.includes('gitlab') ? 'gitlab' : 'github';
+                const token = platform === 'github' ? settings.githubToken : settings.gitlabToken;
+                customRules = await this.customRulesService.fetchConfig(platform, parts[0], parts[1], token);
+            }
+
+            const report = this.prComplianceChecker.check(prData, customRules);
+            const formatted = PRComplianceChecker.formatReport(report);
+
+            sendResponse({ success: true, data: { response: formatted, report } });
+        } catch (error) {
+            console.error('PR compliance check error:', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
+    /**
+     * Handle review metrics retrieval
+     */
+    async handleGetReviewMetrics(message, sendResponse) {
+        const { repoId } = message.payload || message.data || {};
+
+        try {
+            const metrics = await this.reviewMetricsService.getMetrics(repoId || 'all', 30);
+            const formatted = ReviewMetricsService.formatMetrics(metrics, repoId || 'all repos');
+
+            sendResponse({ success: true, data: { response: formatted, metrics } });
+        } catch (error) {
+            console.error('Review metrics error:', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
+    /**
+     * Handle repo documentation generation
+     */
+    async handleGenerateRepoDocs(message, sendResponse) {
+        const { repoId, url, docType = 'overview' } = message.payload || message.data || {};
+
+        try {
+            if (!repoId) throw new Error('Repository ID is required');
+
+            // Get repo documentation from RAG
+            const repoDoc = await this.ragService.getRepositoryDocumentation(repoId);
+
+            // Get knowledge graph data if available
+            let graphSummary = '';
+            const graph = this.codeGraphPipeline?.graph;
+            if (graph) {
+                try {
+                    await graph.load(repoId);
+                    const nodes = graph.getAllNodes();
+                    const stats = {
+                        functions: nodes.filter(n => n.label === 'Function').length,
+                        classes: nodes.filter(n => n.label === 'Class').length,
+                        modules: nodes.filter(n => n.label === 'Module').length
+                    };
+                    graphSummary = `Code Graph: ${stats.functions} functions, ${stats.classes} classes, ${stats.modules} modules`;
+                } catch (_e) { /* graph not available */ }
+            }
+
+            // Get RAG chunks for architecture understanding
+            const chunks = await this.ragService.retrieveContext(repoId,
+                'project architecture main components entry points configuration', 20);
+
+            const settings = await this.getStoredSettings();
+            const modelName = this.getModelId(settings.model);
+
+            // Build prompt based on docType
+            let systemPrompt = `You are RepoSpector, generating ${docType} documentation for a repository.`;
+            let userPrompt = `Generate ${docType} documentation for repository "${repoId}".\n\n`;
+
+            if (repoDoc.found) {
+                userPrompt += `## Existing Documentation\n${repoDoc.content.substring(0, 3000)}\n\n`;
+            }
+            if (graphSummary) {
+                userPrompt += `## ${graphSummary}\n\n`;
+            }
+            if (chunks.length > 0) {
+                userPrompt += `## Code Samples\n`;
+                for (const chunk of chunks.slice(0, 10)) {
+                    userPrompt += `### ${chunk.filePath || 'unknown'}\n\`\`\`\n${(chunk.content || '').substring(0, 500)}\n\`\`\`\n\n`;
+                }
+            }
+
+            if (docType === 'overview') {
+                userPrompt += `\nGenerate a comprehensive project overview including:\n- Project purpose and goals\n- Architecture overview\n- Key components and their responsibilities\n- Technology stack\n- Getting started guide\n\nOutput as clean Markdown.`;
+            } else if (docType === 'api') {
+                userPrompt += `\nGenerate API documentation including:\n- Available endpoints/functions\n- Parameters and return types\n- Usage examples\n\nOutput as clean Markdown.`;
+            } else if (docType === 'architecture') {
+                userPrompt += `\nGenerate architecture documentation including:\n- System architecture diagram (as Mermaid code block)\n- Component responsibilities\n- Data flow\n- Dependencies between components\n\nOutput as clean Markdown with Mermaid diagrams.`;
+            }
+
+            const response = await this.llmService.callLLM({
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: userPrompt }
+                ],
+                apiKey: settings.apiKey,
+                model: modelName,
+                maxTokens: 4000
+            });
+
+            sendResponse({
+                success: true,
+                data: {
+                    repoInfoMarkdown: response,
+                    repoId,
+                    docType
+                }
+            });
+        } catch (error) {
+            console.error('Repo docs generation error:', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
+    /**
+     * Handle fetching full file content (not just patch)
+     */
+    async handleFetchFullFile(message, sendResponse) {
+        const { repoId, filePath, platform, ref } = message.payload || message.data || {};
+
+        try {
+            const settings = await this.getStoredSettings();
+            let content;
+
+            if (platform === 'github') {
+                const token = settings.githubToken;
+                const url = `https://api.github.com/repos/${repoId}/contents/${encodeURIComponent(filePath)}${ref ? `?ref=${ref}` : ''}`;
+                const headers = {
+                    'Accept': 'application/vnd.github.v3.raw',
+                    ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+                };
+                const resp = await fetch(url, { headers });
+                if (!resp.ok) throw new Error(`Failed to fetch file: ${resp.status}`);
+                content = await resp.text();
+            } else if (platform === 'gitlab') {
+                const token = settings.gitlabToken;
+                const projectPath = encodeURIComponent(repoId);
+                const encodedPath = encodeURIComponent(filePath);
+                const url = `https://gitlab.com/api/v4/projects/${projectPath}/repository/files/${encodedPath}/raw${ref ? `?ref=${ref}` : '?ref=main'}`;
+                const headers = token ? { 'PRIVATE-TOKEN': token } : {};
+                const resp = await fetch(url, { headers });
+                if (!resp.ok) throw new Error(`Failed to fetch file: ${resp.status}`);
+                content = await resp.text();
+            } else {
+                throw new Error(`Unsupported platform: ${platform}`);
+            }
+
+            sendResponse({ success: true, data: { content, filePath } });
+        } catch (error) {
+            console.error('Full file fetch error:', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
         }
     }
 

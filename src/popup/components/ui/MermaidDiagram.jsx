@@ -78,11 +78,18 @@ function sanitizeMermaidCode(code) {
 
     // Sequence diagrams need minimal sanitization
     if (isSequenceDiagram) {
-        return code.split('\n').map(line => {
+        return code.split('\n').filter(line => {
+            const trimmed = line.trim();
+            // Remove activate / deactivate words to prevent state errors 
+            if (/^(activate|deactivate)\b/i.test(trimmed)) {
+                return false;
+            }
+            return true;
+        }).map(line => {
             const trimmed = line.trim();
             if (!trimmed || trimmed.startsWith('%%') || trimmed === 'end' ||
                 trimmed === 'sequenceDiagram' ||
-                /^(participant|actor|activate|deactivate|Note\s|alt|else|opt|loop|par|and|rect|critical|break)\s*/i.test(trimmed)) {
+                /^(participant|actor|Note\s|alt|else|opt|loop|par|and|rect|critical|break)\s*/i.test(trimmed)) {
                 return line;
             }
             return line.replace(/<br\s*\/?>/gi, '\\n');

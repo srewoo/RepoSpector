@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Bot, User, Sparkles, AlertCircle, Database, GitBranch, Clock, Network, FileText, Download, Waypoints, Shield, Layers } from 'lucide-react';
+import { Send, Bot, User, Sparkles, AlertCircle, Database, GitBranch, Clock, Network, FileText, Download, Waypoints, Shield, Layers, ThumbsUp, ThumbsDown, Copy, Terminal, Hash, BarChart3, FileCode, Search } from 'lucide-react';
 import { Button } from './ui/Button';
 import { Modal } from './ui/Modal';
 import { CodePreview } from './CodePreview';
@@ -10,6 +10,8 @@ import { MermaidDiagram } from './ui/MermaidDiagram';
 import { cn } from '@/lib/utils';
 import { useExtension } from '@/hooks/useExtension';
 import { conversationHistory } from '@/services/conversationHistory';
+import { SlashCommandParser } from '@/services/SlashCommandParser';
+import { ExportService } from '@/services/ExportService';
 
 /**
  * Format timestamp to relative time (e.g., "just now", "2m ago", "1h ago")
@@ -67,9 +69,9 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
     };
 
     const suggestions = [
-        { label: 'Generate unit tests', icon: '🧪' },
-        { label: 'Create integration tests', icon: '🔗' },
-        { label: 'Explain this code', icon: '📖' },
+        { label: 'Generate unit tests', icon: '🧪', command: '/test unit' },
+        { label: 'Create integration tests', icon: '🔗', command: '/test integration' },
+        { label: 'Explain this code', icon: '📖', command: '/explain' },
         { label: 'Find issues in this code', icon: '🔍' },
         { label: 'Suggest improvements', icon: '💡' },
     ];
@@ -93,6 +95,8 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
     const [streamingPhase, setStreamingPhase] = useState(''); // Track current phase of streaming
     const [currentRequestId, setCurrentRequestId] = useState(null); // Track current request ID for correlation
     const [useDeepContext, setUseDeepContext] = useState(false); // Toggle for RAG context
+    const [slashSuggestions, setSlashSuggestions] = useState([]); // Slash command autocomplete
+    const [feedbackGiven, setFeedbackGiven] = useState({}); // Track feedback per message
 
     // Listen for model loading progress and streaming chunks
     // Use ref to access current state without re-registering listener
@@ -553,14 +557,148 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
         // Reset streaming state for new request
         setStreamingMessageId(null);
         setCurrentRequestId(null);
+        setSlashSuggestions([]); // Clear autocomplete
 
         const userMessage = { id: Date.now(), role: 'user', content: input, type: 'text' };
         setMessages(prev => [...prev, userMessage]);
         // Save user message to history
         conversationHistory.addMessage(userMessage).catch(console.error);
 
+        const userInput = input;
         const userPrompt = input.toLowerCase();
         setInput('');
+
+        // ===== SLASH COMMAND HANDLING =====
+        const parsed = SlashCommandParser.parse(userInput);
+        if (parsed && parsed.isCommand) {
+            if (!parsed.valid) {
+                const errorMsg = { id: Date.now() + 1, role: 'assistant', content: parsed.error, type: 'error' };
+                setMessages(prev => [...prev, errorMsg]);
+                return;
+            }
+
+            // Handle /help locally
+            if (parsed.handler === 'HELP') {
+                const helpText = SlashCommandParser.getHelpText();
+                const helpMsg = { id: Date.now() + 1, role: 'assistant', content: helpText, type: 'text' };
+                setMessages(prev => [...prev, helpMsg]);
+                return;
+            }
+
+            // Handle /export locally
+            if (parsed.handler === 'EXPORT') {
+                try {
+                    const format = parsed.subcommand || 'markdown';
+                    if (format === 'markdown') {
+                        const md = ExportService.exportChatAsMarkdown(messages, { repoId: currentRepo?.repoId });
+                        ExportService.download(md, `repospector-chat-${Date.now()}.md`);
+                        const successMsg = { id: Date.now() + 1, role: 'assistant', content: 'Chat exported as Markdown file.', type: 'text' };
+                        setMessages(prev => [...prev, successMsg]);
+                    } else if (format === 'png') {
+                        // Find last mermaid diagram
+                        const svgEl = document.querySelector('.mermaid-diagram svg');
+                        if (svgEl) {
+                            const blob = await ExportService.exportDiagramAsPNG(svgEl);
+                            ExportService.download(blob, `repospector-diagram-${Date.now()}.png`, 'image/png');
+                            const successMsg = { id: Date.now() + 1, role: 'assistant', content: 'Diagram exported as PNG.', type: 'text' };
+                            setMessages(prev => [...prev, successMsg]);
+                        } else {
+                            const errMsg = { id: Date.now() + 1, role: 'assistant', content: 'No diagram found to export. Generate a diagram first.', type: 'error' };
+                            setMessages(prev => [...prev, errMsg]);
+                        }
+                    }
+                } catch (err) {
+                    const errMsg = { id: Date.now() + 1, role: 'assistant', content: `Export failed: ${err.message}`, type: 'error' };
+                    setMessages(prev => [...prev, errMsg]);
+                }
+                return;
+            }
+
+            // Check if index is required but not available
+            if (parsed.requiresIndex && !isRepoIndexed) {
+                const errMsg = { id: Date.now() + 1, role: 'assistant', content: `The \`${parsed.command}\` command requires an indexed repository. Please index the repo first from the Repos tab.`, type: 'error' };
+                setMessages(prev => [...prev, errMsg]);
+                return;
+            }
+
+            // Build and send the command payload to background
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            const context = {
+                repoId: currentRepo?.repoId,
+                tabUrl: tab?.url,
+                tabId: tab?.id,
+                isRepoIndexed,
+                isPRPage
+            };
+
+            const payloadInfo = SlashCommandParser.buildPayload(parsed, context);
+            if (!payloadInfo) {
+                const errMsg = { id: Date.now() + 1, role: 'assistant', content: `Failed to build command payload for ${parsed.command}`, type: 'error' };
+                setMessages(prev => [...prev, errMsg]);
+                return;
+            }
+
+            // Show progress
+            if (payloadInfo.displayMessage) {
+                setStreamingPhase(payloadInfo.displayMessage);
+            }
+
+            try {
+                // Handle streaming commands differently
+                if (payloadInfo.responseType === 'streaming') {
+                    const response = await sendMessage(payloadInfo.messageType, payloadInfo.payload);
+                    if (response.requestId) {
+                        setCurrentRequestId(response.requestId);
+                    }
+                    if (response.success) {
+                        setStreamingPhase('');
+                        if (!streamingMessageId && response.response && response.response.trim()) {
+                            const aiMessage = { id: Date.now() + 1, role: 'assistant', content: response.response, type: 'text' };
+                            setMessages(prev => [...prev, aiMessage]);
+                        }
+                        if (streamingMessageId) setStreamingMessageId(null);
+                    } else {
+                        setStreamingPhase('');
+                        throw new Error(response.error || `${parsed.command} failed`);
+                    }
+                } else {
+                    const response = await sendMessage(payloadInfo.messageType, payloadInfo.payload);
+                    setStreamingPhase('');
+
+                    if (response.success) {
+                        const data = response.data || response;
+
+                        if (payloadInfo.responseType === 'mindmap' && data.mermaidCode) {
+                            const aiMsg = { id: Date.now() + 1, role: 'assistant', content: data.response || `Generated ${parsed.subcommand || 'diagram'}:`, type: 'mindmap', mermaidCode: data.mermaidCode, fallbackCode: data.fallbackCode };
+                            setMessages(prev => [...prev, aiMsg]);
+                        } else if (payloadInfo.responseType === 'repoinfo' && data.repoInfoMarkdown) {
+                            const aiMsg = { id: Date.now() + 1, role: 'assistant', content: `Generated documentation for **${currentRepo?.repoId || 'repo'}**:`, type: 'repoinfo', repoInfoMarkdown: data.repoInfoMarkdown, repoId: data.repoId };
+                            setMessages(prev => [...prev, aiMsg]);
+                        } else if (payloadInfo.responseType === 'pr-description' && data.description) {
+                            const aiMsg = { id: Date.now() + 1, role: 'assistant', content: `## Generated PR Description\n\n${data.description}\n\n*Use the button below to update the PR description on GitHub/GitLab.*`, type: 'pr-description', prDescription: data.description, prUrl: tab?.url };
+                            setMessages(prev => [...prev, aiMsg]);
+                        } else if (payloadInfo.responseType === 'metrics' && data.metrics) {
+                            const aiMsg = { id: Date.now() + 1, role: 'assistant', content: data.response, type: 'text' };
+                            setMessages(prev => [...prev, aiMsg]);
+                        } else if (data.response) {
+                            const aiMsg = { id: Date.now() + 1, role: 'assistant', content: data.response, type: 'text' };
+                            setMessages(prev => [...prev, aiMsg]);
+                        } else {
+                            const aiMsg = { id: Date.now() + 1, role: 'assistant', content: 'Command completed but returned no displayable data.', type: 'text' };
+                            setMessages(prev => [...prev, aiMsg]);
+                        }
+                    } else {
+                        throw new Error(response.error || `${parsed.command} failed`);
+                    }
+                }
+            } catch (err) {
+                setStreamingPhase('');
+                const errMsg = { id: Date.now() + 1, role: 'assistant', content: `Error: ${err?.message || err}`, type: 'error' };
+                setMessages(prev => [...prev, errMsg]);
+            }
+            return; // Done with slash command
+        }
+        // ===== END SLASH COMMAND HANDLING =====
 
         // Show initial streaming phase
         setStreamingPhase('🔍 Preparing AI request...');
@@ -883,13 +1021,27 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
     return (
         <div className="flex flex-col h-full w-full">
             <div className="flex-1 overflow-y-auto space-y-4 p-4 pb-20 min-h-0">
-                {/* Token Usage Indicator */}
-                <TokenUsageIndicator
-                    messageCount={messages.length}
-                    estimatedTokens={estimatedTokens}
-                    tokenLimit={tokenLimit}
-                    className="mb-4"
-                />
+                {/* Token Usage Indicator + Export */}
+                <div className="flex items-center justify-between mb-4">
+                    <TokenUsageIndicator
+                        messageCount={messages.length}
+                        estimatedTokens={estimatedTokens}
+                        tokenLimit={tokenLimit}
+                    />
+                    {messages.length > 1 && (
+                        <button
+                            onClick={() => {
+                                const md = ExportService.exportChatAsMarkdown(messages, { repoId: currentRepo?.repoId });
+                                ExportService.download(md, `repospector-chat-${Date.now()}.md`);
+                            }}
+                            className="text-[10px] text-textMuted hover:text-text flex items-center gap-1 transition-colors"
+                            title="Export chat as Markdown"
+                        >
+                            <Download className="w-3 h-3" />
+                            Export
+                        </button>
+                    )}
+                </div>
 
                 {messages.map((msg) => (
                     <div
@@ -942,12 +1094,52 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                                     {suggestions.map((s) => (
                                         <button
                                             key={s.label}
-                                            onClick={() => setInput(s.label.toLowerCase())}
+                                            onClick={() => setInput(s.command || s.label.toLowerCase())}
                                             className="px-3 py-1.5 text-xs bg-surface hover:bg-surfaceHighlight border border-border rounded-full text-textMuted hover:text-text transition-colors cursor-pointer"
                                         >
                                             {s.icon} {s.label}
                                         </button>
                                     ))}
+                                    {/* Slash commands quick actions */}
+                                    <button
+                                        onClick={() => setInput('/help')}
+                                        className="px-3 py-1.5 text-xs bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 rounded-full text-purple-400 hover:text-purple-300 transition-colors cursor-pointer flex items-center gap-1"
+                                    >
+                                        <Terminal className="w-3 h-3" />
+                                        /help commands
+                                    </button>
+                                    {isPRPage && (
+                                        <>
+                                            <button
+                                                onClick={() => setInput('/pr-desc')}
+                                                className="px-3 py-1.5 text-xs bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 rounded-full text-blue-400 hover:text-blue-300 transition-colors cursor-pointer flex items-center gap-1"
+                                            >
+                                                <FileText className="w-3 h-3" />
+                                                Generate PR description
+                                            </button>
+                                            <button
+                                                onClick={() => setInput('/compliance')}
+                                                className="px-3 py-1.5 text-xs bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 rounded-full text-blue-400 hover:text-blue-300 transition-colors cursor-pointer flex items-center gap-1"
+                                            >
+                                                <Shield className="w-3 h-3" />
+                                                Check PR compliance
+                                            </button>
+                                            <button
+                                                onClick={() => setInput('/security')}
+                                                className="px-3 py-1.5 text-xs bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 rounded-full text-red-400 hover:text-red-300 transition-colors cursor-pointer flex items-center gap-1"
+                                            >
+                                                <Shield className="w-3 h-3" />
+                                                Security review
+                                            </button>
+                                            <button
+                                                onClick={() => setInput('/changelog')}
+                                                className="px-3 py-1.5 text-xs bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 rounded-full text-blue-400 hover:text-blue-300 transition-colors cursor-pointer flex items-center gap-1"
+                                            >
+                                                <FileCode className="w-3 h-3" />
+                                                Generate changelog
+                                            </button>
+                                        </>
+                                    )}
                                     {/* Main repo page: mindmap + RepoInfo */}
                                     {isMainRepoPage && (
                                         <>
@@ -990,25 +1182,39 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                                     {isRepoIndexed && (
                                         <>
                                             <button
-                                                onClick={() => setInput('Show me the codebase architecture overview')}
+                                                onClick={() => setInput('/docs overview')}
                                                 className="px-3 py-1.5 text-xs bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-full text-emerald-400 hover:text-emerald-300 transition-colors cursor-pointer flex items-center gap-1"
                                             >
                                                 <Layers className="w-3 h-3" />
                                                 Architecture overview
                                             </button>
                                             <button
-                                                onClick={() => setInput('What is the impact of changing ')}
+                                                onClick={() => setInput('/impact ')}
                                                 className="px-3 py-1.5 text-xs bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-full text-emerald-400 hover:text-emerald-300 transition-colors cursor-pointer flex items-center gap-1"
                                             >
                                                 <Shield className="w-3 h-3" />
                                                 Impact analysis
                                             </button>
                                             <button
-                                                onClick={() => setInput('Trace the execution flow starting from ')}
+                                                onClick={() => setInput('/dead-code')}
+                                                className="px-3 py-1.5 text-xs bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-full text-emerald-400 hover:text-emerald-300 transition-colors cursor-pointer flex items-center gap-1"
+                                            >
+                                                <Search className="w-3 h-3" />
+                                                Find dead code
+                                            </button>
+                                            <button
+                                                onClick={() => setInput('/diagram architecture')}
                                                 className="px-3 py-1.5 text-xs bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-full text-emerald-400 hover:text-emerald-300 transition-colors cursor-pointer flex items-center gap-1"
                                             >
                                                 <Waypoints className="w-3 h-3" />
-                                                Trace execution flow
+                                                Architecture diagram
+                                            </button>
+                                            <button
+                                                onClick={() => setInput('/metrics')}
+                                                className="px-3 py-1.5 text-xs bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-full text-emerald-400 hover:text-emerald-300 transition-colors cursor-pointer flex items-center gap-1"
+                                            >
+                                                <BarChart3 className="w-3 h-3" />
+                                                Review metrics
                                             </button>
                                         </>
                                     )}
@@ -1163,7 +1369,121 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                                         AI
                                     </span>
                                 )}
+
+                                {/* Feedback buttons (thumbs up/down) for AI responses */}
+                                {msg.role === 'assistant' && msg.id !== 1 && !msg.isStreaming && msg.type !== 'welcome' && msg.type !== 'error' && (
+                                    <div className="flex items-center gap-1 ml-auto">
+                                        <button
+                                            onClick={async () => {
+                                                setFeedbackGiven(prev => ({ ...prev, [msg.id]: 'positive' }));
+                                                try {
+                                                    await chrome.runtime.sendMessage({
+                                                        type: 'RECORD_FINDING_ACTION',
+                                                        data: {
+                                                            ruleId: msg.type || 'chat-response',
+                                                            repoId: currentRepo?.repoId || 'unknown',
+                                                            action: 'resolved',
+                                                            findingMessage: (msg.content || '').substring(0, 200)
+                                                        }
+                                                    });
+                                                } catch (_e) { /* ignore */ }
+                                            }}
+                                            className={cn(
+                                                "p-1 rounded transition-colors",
+                                                feedbackGiven[msg.id] === 'positive'
+                                                    ? "text-green-400 bg-green-400/10"
+                                                    : "text-textMuted/40 hover:text-green-400 hover:bg-green-400/10"
+                                            )}
+                                            title="Helpful"
+                                        >
+                                            <ThumbsUp className="w-3 h-3" />
+                                        </button>
+                                        <button
+                                            onClick={async () => {
+                                                setFeedbackGiven(prev => ({ ...prev, [msg.id]: 'negative' }));
+                                                try {
+                                                    await chrome.runtime.sendMessage({
+                                                        type: 'RECORD_FINDING_ACTION',
+                                                        data: {
+                                                            ruleId: msg.type || 'chat-response',
+                                                            repoId: currentRepo?.repoId || 'unknown',
+                                                            action: 'dismissed',
+                                                            findingMessage: (msg.content || '').substring(0, 200)
+                                                        }
+                                                    });
+                                                } catch (_e) { /* ignore */ }
+                                            }}
+                                            className={cn(
+                                                "p-1 rounded transition-colors",
+                                                feedbackGiven[msg.id] === 'negative'
+                                                    ? "text-red-400 bg-red-400/10"
+                                                    : "text-textMuted/40 hover:text-red-400 hover:bg-red-400/10"
+                                            )}
+                                            title="Not helpful"
+                                        >
+                                            <ThumbsDown className="w-3 h-3" />
+                                        </button>
+
+                                        {/* Copy button */}
+                                        <button
+                                            onClick={() => {
+                                                const text = msg.content || msg.code || msg.repoInfoMarkdown || '';
+                                                navigator.clipboard.writeText(text).catch(console.error);
+                                            }}
+                                            className="p-1 rounded text-textMuted/40 hover:text-text hover:bg-surfaceHighlight transition-colors"
+                                            title="Copy to clipboard"
+                                        >
+                                            <Copy className="w-3 h-3" />
+                                        </button>
+                                    </div>
+                                )}
                             </div>
+
+                            {/* PR Description action button */}
+                            {msg.type === 'pr-description' && msg.prDescription && !msg.isStreaming && (
+                                <div className="flex gap-2 mt-2">
+                                    <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={async () => {
+                                            try {
+                                                const response = await chrome.runtime.sendMessage({
+                                                    type: 'POST_PR_REVIEW',
+                                                    data: {
+                                                        prUrl: msg.prUrl,
+                                                        action: 'update_description',
+                                                        description: msg.prDescription
+                                                    }
+                                                });
+                                                if (response.success) {
+                                                    const successMsg = { id: Date.now(), role: 'assistant', content: 'PR description updated successfully!', type: 'text' };
+                                                    setMessages(prev => [...prev, successMsg]);
+                                                } else {
+                                                    throw new Error(response.error);
+                                                }
+                                            } catch (err) {
+                                                const errMsg = { id: Date.now(), role: 'assistant', content: `Failed to update PR: ${err.message}. Make sure "Update PR Description" is enabled in Settings > Write Features.`, type: 'error' };
+                                                setMessages(prev => [...prev, errMsg]);
+                                            }
+                                        }}
+                                        className="text-xs"
+                                    >
+                                        <GitBranch className="w-3 h-3 mr-1" />
+                                        Update PR Description
+                                    </Button>
+                                    <Button
+                                        size="sm"
+                                        variant="ghost"
+                                        onClick={() => {
+                                            navigator.clipboard.writeText(msg.prDescription).catch(console.error);
+                                        }}
+                                        className="text-xs"
+                                    >
+                                        <Copy className="w-3 h-3 mr-1" />
+                                        Copy
+                                    </Button>
+                                </div>
+                            )}
                         </div>
                     </div>
                 ))}
@@ -1273,13 +1593,47 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                 )}
 
                 <form onSubmit={handleSubmit} className="relative">
+                    {/* Slash Command Autocomplete */}
+                    {slashSuggestions.length > 0 && (
+                        <div className="absolute bottom-full left-0 right-0 mb-1 bg-surface border border-border rounded-lg shadow-lg overflow-hidden z-10 max-h-48 overflow-y-auto">
+                            {slashSuggestions.map((s) => (
+                                <button
+                                    key={s.command}
+                                    type="button"
+                                    onClick={() => {
+                                        setInput(s.command + ' ');
+                                        setSlashSuggestions([]);
+                                    }}
+                                    className="w-full flex items-start gap-2 px-3 py-2 hover:bg-surfaceHighlight text-left text-sm transition-colors"
+                                >
+                                    <Terminal className="w-3.5 h-3.5 text-primary mt-0.5 shrink-0" />
+                                    <div>
+                                        <span className="font-mono text-primary">{s.command}</span>
+                                        <span className="text-textMuted ml-2">{s.description}</span>
+                                        {s.requiresIndex && (
+                                            <span className="text-[10px] text-amber-400 ml-1">(indexed)</span>
+                                        )}
+                                    </div>
+                                </button>
+                            ))}
+                        </div>
+                    )}
                     <input
                         type="text"
                         value={input}
-                        onChange={(e) => setInput(e.target.value)}
+                        onChange={(e) => {
+                            const val = e.target.value;
+                            setInput(val);
+                            // Slash command autocomplete
+                            if (val.startsWith('/') && !val.includes(' ')) {
+                                setSlashSuggestions(SlashCommandParser.getSuggestions(val));
+                            } else {
+                                setSlashSuggestions([]);
+                            }
+                        }}
                         placeholder={useDeepContext && isRepoIndexed
-                            ? `Ask about ${currentRepo?.repoId || 'your code'}...`
-                            : "Ask about your code or generate tests..."
+                            ? `Ask about ${currentRepo?.repoId || 'your code'}... (type / for commands)`
+                            : "Ask about your code or type / for commands..."
                         }
                         className="w-full bg-surfaceHighlight border border-border rounded-xl pl-4 pr-12 py-3 text-sm text-text focus:outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/50 transition-all placeholder:text-textMuted/50"
                         disabled={isLoading || isIndexing}

@@ -30,8 +30,9 @@ export function useExtension() {
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState(null);
 
-    // Check if we're in an iframe
-    const isInIframe = window.self !== window.top;
+    // Check if we're explicitly loaded as an injected iframe (via query param)
+    // rather than relying on window.self !== window.top which is true for Chrome side panels too
+    const isInIframe = window.location.search.includes('mode=iframe');
 
     const sendMessage = async (type, payload) => {
         setIsLoading(true);
