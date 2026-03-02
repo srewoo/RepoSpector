@@ -148,6 +148,13 @@ const SLASH_COMMANDS = {
         requiresIndex: false,
         handler: 'HELP',
         category: 'utility'
+    },
+    '/clear': {
+        description: 'Clear chat conversation history',
+        usage: '/clear',
+        requiresIndex: false,
+        handler: 'CLEAR_CHAT',
+        category: 'utility'
     }
 };
 
@@ -345,7 +352,7 @@ export class SlashCommandParser {
                             contextLevel: 'smart',
                             userPrompt: `Generate ${subcommand || 'unit'} tests for this code${args ? `: ${args}` : ''}`
                         },
-                        useDeepContext: isRepoIndexed
+                        useDeepContext: context.useDeepContext ?? isRepoIndexed
                     },
                     displayMessage: `Generating ${subcommand || 'unit'} tests...`,
                     responseType: 'streaming'
@@ -448,6 +455,14 @@ export class SlashCommandParser {
                     payload: {},
                     displayMessage: null,
                     responseType: 'help'
+                };
+
+            case 'CLEAR_CHAT':
+                return {
+                    messageType: 'CLEAR_CHAT',
+                    payload: {},
+                    displayMessage: null,
+                    responseType: 'clear'
                 };
 
             default:

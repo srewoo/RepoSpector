@@ -573,8 +573,8 @@ export class LLMService {
                                     onChunk(content);
                                 }
 
-                                if (tabId) {
-                                    this.sendChunkToTab(tabId, content, options.requestId, false);
+                                if (tabId || options.isFromPopup) {
+                                    this.sendChunk(tabId, content, fullContent, options.requestId, false, options.isFromPopup);
                                 }
                             }
                         } catch (e) {
@@ -585,8 +585,8 @@ export class LLMService {
             }
 
             // Send final chunk
-            if (tabId) {
-                this.sendChunkToTab(tabId, '', options.requestId, true);
+            if (tabId || options.isFromPopup) {
+                this.sendChunk(tabId, '', fullContent, options.requestId, true, options.isFromPopup);
             }
 
             console.log(`✅ Streaming complete: ${chunkCount} chunks, ${fullContent.length} chars`);
@@ -628,8 +628,8 @@ export class LLMService {
                                         onChunk(content);
                                     }
 
-                                    if (tabId) {
-                                        this.sendChunkToTab(tabId, content, options.requestId, false);
+                                    if (tabId || options.isFromPopup) {
+                                        this.sendChunk(tabId, content, fullContent, options.requestId, false, options.isFromPopup);
                                     }
                                 }
                             }
@@ -640,8 +640,8 @@ export class LLMService {
                 }
             }
 
-            if (tabId) {
-                this.sendChunkToTab(tabId, '', options.requestId, true);
+            if (tabId || options.isFromPopup) {
+                this.sendChunk(tabId, '', fullContent, options.requestId, true, options.isFromPopup);
             }
 
             console.log(`✅ Anthropic streaming complete: ${chunkCount} chunks, ${fullContent.length} chars`);
@@ -680,8 +680,8 @@ export class LLMService {
                                 onChunk(content);
                             }
 
-                            if (tabId) {
-                                this.sendChunkToTab(tabId, content, options.requestId, false);
+                            if (tabId || options.isFromPopup) {
+                                this.sendChunk(tabId, content, fullContent, options.requestId, false, options.isFromPopup);
                             }
                         }
 
@@ -694,8 +694,8 @@ export class LLMService {
                 }
             }
 
-            if (tabId) {
-                this.sendChunkToTab(tabId, '', options.requestId, true);
+            if (tabId || options.isFromPopup) {
+                this.sendChunk(tabId, '', fullContent, options.requestId, true, options.isFromPopup);
             }
 
             console.log(`✅ Ollama streaming complete: ${chunkCount} chunks, ${fullContent.length} chars`);
@@ -706,21 +706,30 @@ export class LLMService {
     }
 
     /**
-     * Send streaming chunk to tab
+     * Send streaming chunk to the appropriate destination (popup or tab)
      */
-    sendChunkToTab(tabId, content, requestId, isLastChunk) {
-        chrome.tabs.sendMessage(tabId, {
+    sendChunk(tabId, chunk, fullContent, requestId, isLastChunk, isFromPopup = false) {
+        const payload = {
             action: 'TEST_CHUNK',
             requestId: requestId,
             tabId: tabId,
             data: {
-                chunk: content,
+                chunk: chunk,
+                fullContent: fullContent,
                 isLastChunk: isLastChunk,
                 isComplete: isLastChunk
             }
-        }).catch(() => {
-            // Tab might be closed
-        });
+        };
+
+        if (isFromPopup) {
+            chrome.runtime.sendMessage(payload).catch(() => {
+                // Popup might be closed
+            });
+        } else if (tabId) {
+            chrome.tabs.sendMessage(tabId, payload).catch(() => {
+                // Tab might be closed
+            });
+        }
     }
 
     /**

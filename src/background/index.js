@@ -2550,7 +2550,7 @@ Return only the complete test code with proper syntax for the detected language,
 
     async handleGetSettings(message, sendResponse) {
         try {
-            const settings = await this.getSettings();
+            const settings = await this.getStoredSettings();
 
             sendResponse({
                 success: true,
@@ -3143,7 +3143,7 @@ Return only the complete test code with proper syntax for the detected language,
             }
 
             // Get LLM settings
-            const settings = await this.getSettings();
+            const settings = await this.getStoredSettings();
 
             // Stream the analysis
             const response = await this.llmService.streamChat(
@@ -3212,7 +3212,7 @@ Return only the complete test code with proper syntax for the detected language,
             const prompt = buildPRSummaryPrompt(prData);
 
             // Get settings
-            const settings = await this.getSettings();
+            const settings = await this.getStoredSettings();
 
             // Get quick summary from LLM
             const response = await this.llmService.streamChat(
@@ -3272,7 +3272,7 @@ Return only the complete test code with proper syntax for the detected language,
             const prompt = buildSecurityReviewPrompt(prData, highRiskFiles);
 
             // Get settings
-            const settings = await this.getSettings();
+            const settings = await this.getStoredSettings();
 
             // Get security analysis
             const response = await this.llmService.streamChat(
@@ -3332,7 +3332,7 @@ Return only the complete test code with proper syntax for the detected language,
             const prompt = buildTestAutomationReviewPrompt(code, context);
 
             // Get settings
-            const settings = await this.getSettings();
+            const settings = await this.getStoredSettings();
 
             // Get analysis
             const response = await this.llmService.streamChat(
@@ -3426,7 +3426,7 @@ Return only the complete test code with proper syntax for the detected language,
             // Step 1: Run static analysis on changed files
             console.log('🔍 Running static analysis on PR files...');
             // Load review quality settings
-            const settings = await this.getSettings();
+            const settings = await this.getStoredSettings();
             const reviewSettings = settings.reviewSettings || {};
 
             // Derive repoId from PR data for adaptive learning
@@ -3641,7 +3641,7 @@ Return only the complete test code with proper syntax for the detected language,
                 return this.handleAnalyzePRWithStaticAnalysis(message, sendResponse);
             }
 
-            const settings = await this.getSettings();
+            const settings = await this.getStoredSettings();
             const reviewSettings = settings.reviewSettings || {};
             const repoId = prData.branches?.targetRepo ||
                 `${prData.author?.login || 'unknown'}/${prData.title || 'unknown'}`;
@@ -3832,7 +3832,7 @@ Return only the complete test code with proper syntax for the detected language,
      */
     async updatePRServiceTokens() {
         try {
-            const settings = await this.getSettings();
+            const settings = await this.getStoredSettings();
             this.pullRequestService.githubToken = settings.githubToken || null;
             this.pullRequestService.gitlabToken = settings.gitlabToken || null;
         } catch (e) {
@@ -4077,7 +4077,7 @@ Return only the complete test code with proper syntax for the detected language,
             });
 
             // Get AI response
-            const settings = await this.getSettings();
+            const settings = await this.getStoredSettings();
             const response = await this.llmService.streamChat(
                 [
                     { role: 'system', content: THREAD_SYSTEM_PROMPT },
@@ -4255,7 +4255,7 @@ Return only the complete test code with proper syntax for the detected language,
 
             await this.updatePRServiceTokens();
             const prData = await this.pullRequestService.fetchPullRequest(prUrl);
-            const settings = await this.getSettings();
+            const settings = await this.getStoredSettings();
 
             const prompt = buildPRDescriptionPrompt(prData);
             const response = await this.llmService.streamChat(
@@ -4290,7 +4290,7 @@ Return only the complete test code with proper syntax for the detected language,
             await this.updatePRServiceTokens();
             const prData = await this.pullRequestService.fetchPullRequest(prUrl);
             if (diagramType) prData.diagramType = diagramType;
-            const settings = await this.getSettings();
+            const settings = await this.getStoredSettings();
 
             const MAX_RETRIES = 2;
             let lastError = null;
@@ -4515,7 +4515,7 @@ Return only the complete test code with proper syntax for the detected language,
                 return `// File: ${filePath}\n${content}`;
             }).join('\n\n---\n\n');
 
-            const settings = await this.getSettings();
+            const settings = await this.getStoredSettings();
             const type = diagramType || 'sequence';
             const typeLabel = { sequence: 'sequence diagram', class: 'class diagram', state: 'state diagram', er: 'entity-relationship diagram' }[type] || 'sequence diagram';
 
@@ -4586,7 +4586,7 @@ ${typeInstructions[type] || typeInstructions.sequence}
 
             await this.updatePRServiceTokens();
             const prData = await this.pullRequestService.fetchPullRequest(prUrl);
-            const settings = await this.getSettings();
+            const settings = await this.getStoredSettings();
 
             const prompt = buildChangelogPrompt(prData);
             const response = await this.llmService.streamChat(
@@ -4668,7 +4668,7 @@ ${typeInstructions[type] || typeInstructions.sequence}
             let finalMermaidCode = mermaidCode;
             let fallbackCode = null; // code-generated version as fallback
             try {
-                const settings = await this.getSettings();
+                const settings = await this.getStoredSettings();
                 if (settings.apiKey) {
                     const importSummary = buildImportSummary(importGraph, filePaths);
                     const response = await this.llmService.streamChat(
@@ -4767,7 +4767,7 @@ ${typeInstructions[type] || typeInstructions.sequence}
             // LLM enrichment pass (optional — only if API key is configured)
             let finalMarkdown = repoInfoMarkdown;
             try {
-                const settings = await this.getSettings();
+                const settings = await this.getStoredSettings();
                 if (settings.apiKey) {
                     const extractedSummary = buildExtractedDataSummary(fileContents, importGraph, repoId);
                     const response = await this.llmService.streamChat(
@@ -4804,7 +4804,7 @@ ${typeInstructions[type] || typeInstructions.sequence}
 
             // Handle PR description update action
             if (action === 'update_description' && description) {
-                const settings = await this.getSettings();
+                const settings = await this.getStoredSettings();
                 const reviewSettings = settings.reviewSettings || {};
                 if (!reviewSettings.enableUpdatePRDescription) {
                     sendResponse({ success: false, error: 'PR description updates are disabled. Enable "Update PR Description" in Settings > Write Features.' });
@@ -4817,7 +4817,7 @@ ${typeInstructions[type] || typeInstructions.sequence}
             }
 
             // Check if PR comment posting is enabled
-            const settings = await this.getSettings();
+            const settings = await this.getStoredSettings();
             const reviewSettings = settings.reviewSettings || {};
             if (reviewSettings.enablePRComments === false) {
                 sendResponse({ success: false, error: 'PR comment posting is disabled in Settings' });
@@ -4951,7 +4951,7 @@ ${typeInstructions[type] || typeInstructions.sequence}
             );
 
             // Get AI response
-            const settings = await this.getSettings();
+            const settings = await this.getStoredSettings();
             const response = await this.llmService.streamChat(
                 [
                     { role: 'system', content: THREAD_SYSTEM_PROMPT },
@@ -5240,10 +5240,9 @@ ${typeInstructions[type] || typeInstructions.sequence}
                     { role: 'system', content: systemPrompt },
                     { role: 'user', content: userPrompt }
                 ],
-                apiKey: settings.apiKey,
                 model: modelName,
-                maxTokens: 4000
-            });
+                max_tokens: 4000
+            }, settings.apiKey);
 
             sendResponse({
                 success: true,

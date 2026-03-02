@@ -173,9 +173,9 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                 const contentLength = (fullContent || '').length;
                 if (!streamingMessageIdRef.current) {
                     setStreamingPhase('🤖 AI analyzing code structure...');
-                } else if (contentLength < 100) {
+                } else if (contentLength < 400) {
                     setStreamingPhase('🧠 AI understanding context...');
-                } else if (contentLength < 500) {
+                } else if (contentLength < 1200) {
                     setStreamingPhase('✨ AI generating response...');
                 } else {
                     setStreamingPhase('📝 AI writing...');
@@ -585,6 +585,13 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                 return;
             }
 
+            // Handle /clear locally
+            if (parsed.handler === 'CLEAR_CHAT') {
+                setMessages([{ id: Date.now() + 1, role: 'assistant', content: 'Chat history cleared.', type: 'text' }]);
+                await conversationHistory.clearHistory();
+                return;
+            }
+
             // Handle /export locally
             if (parsed.handler === 'EXPORT') {
                 try {
@@ -628,7 +635,8 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                 tabUrl: tab?.url,
                 tabId: tab?.id,
                 isRepoIndexed,
-                isPRPage
+                isPRPage,
+                useDeepContext
             };
 
             const payloadInfo = SlashCommandParser.buildPayload(parsed, context);
@@ -680,8 +688,9 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                         } else if (payloadInfo.responseType === 'metrics' && data.metrics) {
                             const aiMsg = { id: Date.now() + 1, role: 'assistant', content: data.response, type: 'text' };
                             setMessages(prev => [...prev, aiMsg]);
-                        } else if (data.response) {
-                            const aiMsg = { id: Date.now() + 1, role: 'assistant', content: data.response, type: 'text' };
+                        } else if (data.response || data.securityAnalysis || data.changelog) {
+                            const content = data.response || data.securityAnalysis || data.changelog;
+                            const aiMsg = { id: Date.now() + 1, role: 'assistant', content: content, type: 'text' };
                             setMessages(prev => [...prev, aiMsg]);
                         } else {
                             const aiMsg = { id: Date.now() + 1, role: 'assistant', content: 'Command completed but returned no displayable data.', type: 'text' };

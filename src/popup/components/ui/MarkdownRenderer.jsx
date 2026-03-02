@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { Copy, Check } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { copyToClipboard } from '../../utils/clipboard';
@@ -39,138 +40,139 @@ export function MarkdownRenderer({ content, className, showCopy = true }) {
                 </button>
             )}
             <ReactMarkdown
-            className={cn('markdown-content', className)}
-            components={{
-                // Headings
-                h1: ({ children }) => (
-                    <h1 className="text-xl font-bold text-text mt-4 mb-2 first:mt-0">{children}</h1>
-                ),
-                h2: ({ children }) => (
-                    <h2 className="text-lg font-semibold text-text mt-4 mb-2 first:mt-0">{children}</h2>
-                ),
-                h3: ({ children }) => (
-                    <h3 className="text-base font-semibold text-text mt-3 mb-1.5 first:mt-0">{children}</h3>
-                ),
-                h4: ({ children }) => (
-                    <h4 className="text-sm font-semibold text-text mt-2 mb-1 first:mt-0">{children}</h4>
-                ),
+                className={cn('markdown-content', className)}
+                remarkPlugins={[remarkGfm]}
+                components={{
+                    // Headings
+                    h1: ({ children }) => (
+                        <h1 className="text-xl font-bold text-text mt-4 mb-2 first:mt-0">{children}</h1>
+                    ),
+                    h2: ({ children }) => (
+                        <h2 className="text-lg font-semibold text-text mt-4 mb-2 first:mt-0">{children}</h2>
+                    ),
+                    h3: ({ children }) => (
+                        <h3 className="text-base font-semibold text-text mt-3 mb-1.5 first:mt-0">{children}</h3>
+                    ),
+                    h4: ({ children }) => (
+                        <h4 className="text-sm font-semibold text-text mt-2 mb-1 first:mt-0">{children}</h4>
+                    ),
 
-                // Paragraphs
-                p: ({ children }) => (
-                    <p className="text-sm text-text mb-2 last:mb-0 leading-relaxed">{children}</p>
-                ),
+                    // Paragraphs
+                    p: ({ children }) => (
+                        <p className="text-sm text-text mb-2 last:mb-0 leading-relaxed">{children}</p>
+                    ),
 
-                // Lists
-                ul: ({ children }) => (
-                    <ul className="list-disc list-inside space-y-1 mb-2 ml-2 text-sm">{children}</ul>
-                ),
-                ol: ({ children }) => (
-                    <ol className="list-decimal list-inside space-y-1 mb-2 ml-2 text-sm">{children}</ol>
-                ),
-                li: ({ children }) => (
-                    <li className="text-text">{children}</li>
-                ),
+                    // Lists
+                    ul: ({ children }) => (
+                        <ul className="list-disc list-inside space-y-1 mb-2 ml-2 text-sm">{children}</ul>
+                    ),
+                    ol: ({ children }) => (
+                        <ol className="list-decimal list-inside space-y-1 mb-2 ml-2 text-sm">{children}</ol>
+                    ),
+                    li: ({ children }) => (
+                        <li className="text-text">{children}</li>
+                    ),
 
-                // Code — detect inline vs block by checking for language className
-                // In react-markdown v9+ the `inline` prop is removed, so we infer:
-                // code blocks have a className like "language-js", inline code does not
-                code: ({ inline, className, children }) => {
-                    const isCodeBlock = className || inline === false;
-                    if (!isCodeBlock) {
+                    // Code — detect inline vs block by checking for language className
+                    // In react-markdown v9+ the `inline` prop is removed, so we infer:
+                    // code blocks have a className like "language-js", inline code does not
+                    code: ({ inline, className, children }) => {
+                        const isCodeBlock = className || inline === false;
+                        if (!isCodeBlock) {
+                            return (
+                                <code className="inline px-1.5 py-0.5 bg-surface rounded text-xs font-mono text-primary whitespace-nowrap">
+                                    {children}
+                                </code>
+                            );
+                        }
                         return (
-                            <code className="inline px-1.5 py-0.5 bg-surface rounded text-xs font-mono text-primary whitespace-nowrap">
+                            <code className={cn("block", className)}>
                                 {children}
                             </code>
                         );
-                    }
-                    return (
-                        <code className={cn("block", className)}>
+                    },
+                    pre: ({ children }) => (
+                        <pre className="bg-background border border-border rounded-lg p-3 overflow-x-auto mb-3 text-xs font-mono">
                             {children}
-                        </code>
-                    );
-                },
-                pre: ({ children }) => (
-                    <pre className="bg-background border border-border rounded-lg p-3 overflow-x-auto mb-3 text-xs font-mono">
-                        {children}
-                    </pre>
-                ),
+                        </pre>
+                    ),
 
-                // Bold and italic
-                strong: ({ children }) => (
-                    <strong className="font-semibold text-text">{children}</strong>
-                ),
-                em: ({ children }) => (
-                    <em className="italic text-textMuted">{children}</em>
-                ),
+                    // Bold and italic
+                    strong: ({ children }) => (
+                        <strong className="font-semibold text-text">{children}</strong>
+                    ),
+                    em: ({ children }) => (
+                        <em className="italic text-textMuted">{children}</em>
+                    ),
 
-                // Links
-                a: ({ href, children }) => (
-                    <a
-                        href={href}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-primary hover:underline"
-                    >
-                        {children}
-                    </a>
-                ),
-
-                // Blockquotes
-                blockquote: ({ children }) => (
-                    <blockquote className="border-l-4 border-primary/30 pl-3 italic text-textMuted my-2">
-                        {children}
-                    </blockquote>
-                ),
-
-                // Horizontal rule
-                hr: () => (
-                    <hr className="border-border my-4" />
-                ),
-
-                // Tables
-                table: ({ children }) => (
-                    <div className="overflow-x-auto mb-3">
-                        <table className="min-w-full text-sm border border-border rounded">
+                    // Links
+                    a: ({ href, children }) => (
+                        <a
+                            href={href}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-primary hover:underline"
+                        >
                             {children}
-                        </table>
-                    </div>
-                ),
-                thead: ({ children }) => (
-                    <thead className="bg-surface">{children}</thead>
-                ),
-                tbody: ({ children }) => (
-                    <tbody className="divide-y divide-border">{children}</tbody>
-                ),
-                tr: ({ children }) => (
-                    <tr>{children}</tr>
-                ),
-                th: ({ children }) => (
-                    <th className="px-3 py-2 text-left font-semibold text-text border-b border-border">
-                        {children}
-                    </th>
-                ),
-                td: ({ children }) => (
-                    <td className="px-3 py-2 text-text">{children}</td>
-                ),
+                        </a>
+                    ),
 
-                // Checkboxes (task lists)
-                input: ({ type, checked }) => {
-                    if (type === 'checkbox') {
-                        return (
-                            <input
-                                type="checkbox"
-                                checked={checked}
-                                readOnly
-                                className="mr-2 rounded border-border"
-                            />
-                        );
+                    // Blockquotes
+                    blockquote: ({ children }) => (
+                        <blockquote className="border-l-4 border-primary/30 pl-3 italic text-textMuted my-2">
+                            {children}
+                        </blockquote>
+                    ),
+
+                    // Horizontal rule
+                    hr: () => (
+                        <hr className="border-border my-4" />
+                    ),
+
+                    // Tables
+                    table: ({ children }) => (
+                        <div className="overflow-x-auto mb-3">
+                            <table className="min-w-full text-sm border border-border rounded">
+                                {children}
+                            </table>
+                        </div>
+                    ),
+                    thead: ({ children }) => (
+                        <thead className="bg-surface">{children}</thead>
+                    ),
+                    tbody: ({ children }) => (
+                        <tbody className="divide-y divide-border">{children}</tbody>
+                    ),
+                    tr: ({ children }) => (
+                        <tr>{children}</tr>
+                    ),
+                    th: ({ children }) => (
+                        <th className="px-3 py-2 text-left font-semibold text-text border-b border-border">
+                            {children}
+                        </th>
+                    ),
+                    td: ({ children }) => (
+                        <td className="px-3 py-2 text-text">{children}</td>
+                    ),
+
+                    // Checkboxes (task lists)
+                    input: ({ type, checked }) => {
+                        if (type === 'checkbox') {
+                            return (
+                                <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    readOnly
+                                    className="mr-2 rounded border-border"
+                                />
+                            );
+                        }
+                        return null;
                     }
-                    return null;
-                }
-            }}
-        >
-            {content}
-        </ReactMarkdown>
+                }}
+            >
+                {content}
+            </ReactMarkdown>
         </div>
     );
 }
