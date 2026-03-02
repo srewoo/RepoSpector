@@ -12,6 +12,7 @@ function initMermaid() {
         securityLevel: 'loose',
         fontFamily: 'ui-monospace, monospace',
         fontSize: 12,
+        maxEdges: 10000,
         flowchart: {
             htmlLabels: true,
             curve: 'basis',
@@ -98,6 +99,9 @@ function sanitizeMermaidCode(code) {
 
     // Flowchart sanitization
     return code.split('\n').map(line => {
+        // Fix single % comments to %%
+        line = line.replace(/(^|\s+)%(\s+|$)/g, '$1%%$2');
+
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('%%') || trimmed === 'end' ||
             trimmed.startsWith('classDef ') ||
@@ -138,10 +142,10 @@ function sanitizeMermaidCode(code) {
         }
         // Fix unquoted node labels with special chars: ID[((file.py))] → ID["file.py"]
         return line.replace(
-            /(\b[A-Za-z_]\w*)\s*([\[({])\(*([^"]*?)\)*([\])}])/g,
+            /([A-Za-z0-9_\-]+)\s*([\[({])\(*([^"]*?)\)*([\])}])/g,
             (match, id, open, label, close) => {
                 if (label.startsWith('"') && label.endsWith('"')) return match;
-                if (/[()[\]{}<>|#&]/.test(label)) {
+                if (/[()[\]{}<>|#&]/.test(label) || label.includes('.')) {
                     const cleanLabel = label.replace(/[()[\]{}<>|]/g, ' ').replace(/\s+/g, ' ').trim();
                     return `${id}${open}"${cleanLabel}"${close}`;
                 }
