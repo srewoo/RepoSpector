@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import mermaid from 'mermaid';
-import { Download } from 'lucide-react';
+import { Download, ZoomIn, ZoomOut, Maximize } from 'lucide-react';
+import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch';
 
 let mermaidInitialized = false;
 
@@ -204,11 +205,38 @@ export function MermaidDiagram({ code, fallbackCode, className = '' }) {
     return (
         <div className={className}>
             {svgContent ? (
-                <div
-                    ref={containerRef}
-                    className="overflow-x-auto rounded-lg bg-[#0f172a] p-4"
-                    dangerouslySetInnerHTML={{ __html: svgContent }}
-                />
+                <div className="relative rounded-lg bg-[#0f172a] overflow-hidden group border border-[#334155]">
+                    <TransformWrapper
+                        initialScale={1}
+                        minScale={0.1}
+                        maxScale={8}
+                        centerOnInit={true}
+                        wheel={{ step: 0.1 }}
+                    >
+                        {({ zoomIn, zoomOut, resetTransform }) => (
+                            <>
+                                <div className="absolute top-2 right-2 z-10 flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-[#1e293b]/80 backdrop-blur-sm p-1 rounded-md border border-[#475569]">
+                                    <button onClick={() => zoomIn()} className="p-1.5 hover:bg-[#334155] rounded text-textMuted hover:text-text" title="Zoom In">
+                                        <ZoomIn className="w-4 h-4" />
+                                    </button>
+                                    <button onClick={() => zoomOut()} className="p-1.5 hover:bg-[#334155] rounded text-textMuted hover:text-text" title="Zoom Out">
+                                        <ZoomOut className="w-4 h-4" />
+                                    </button>
+                                    <button onClick={() => resetTransform()} className="p-1.5 hover:bg-[#334155] rounded text-textMuted hover:text-text" title="Reset">
+                                        <Maximize className="w-4 h-4" />
+                                    </button>
+                                </div>
+                                <TransformComponent wrapperStyle={{ width: '100%', height: '100%', minHeight: '300px' }}>
+                                    <div
+                                        ref={containerRef}
+                                        className="w-full h-full flex items-center justify-center p-4 cursor-grab active:cursor-grabbing"
+                                        dangerouslySetInnerHTML={{ __html: svgContent }}
+                                    />
+                                </TransformComponent>
+                            </>
+                        )}
+                    </TransformWrapper>
+                </div>
             ) : error ? (
                 <div className="space-y-2">
                     <p className="text-xs text-amber-400">Diagram render failed — showing source code</p>
