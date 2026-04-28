@@ -1,7 +1,7 @@
+// #13a — framer-motion removed; hover/tap replaced with CSS active:scale-* transitions.
 import React from 'react';
 import { cn } from '@/lib/utils';
 import { Loader2 } from 'lucide-react';
-import { motion } from 'framer-motion';
 
 const buttonVariants = {
     primary: 'bg-primary hover:bg-primaryHover text-white shadow-lg shadow-primary/20',
@@ -27,39 +27,26 @@ const Button = React.forwardRef(({
     variant = 'primary',
     size = 'default',
     isLoading,
-    animate = true,
+    // `animate` kept for API compatibility — hover/tap now uses CSS only
+    animate: _animate = true,
     children,
     ...props
 }, ref) => {
     const baseClasses = cn(
-        'inline-flex items-center justify-center rounded-lg font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:pointer-events-none disabled:opacity-50',
+        'inline-flex items-center justify-center rounded-lg font-medium',
+        'transition-transform duration-100',
+        'hover:scale-[1.02] active:scale-[0.98]',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
+        'disabled:pointer-events-none disabled:opacity-50',
         buttonVariants[variant] || buttonVariants.primary,
         buttonSizes[size] || buttonSizes.default,
         className
     );
 
-    // Use motion.button for animated version
-    if (animate) {
-        return (
-            <motion.button
-                ref={ref}
-                className={baseClasses}
-                disabled={isLoading || props.disabled}
-                whileHover={{ scale: props.disabled ? 1 : 1.02 }}
-                whileTap={{ scale: props.disabled ? 1 : 0.98 }}
-                transition={{ type: 'spring', stiffness: 400, damping: 17 }}
-                {...props}
-            >
-                {isLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                {children}
-            </motion.button>
-        );
-    }
-
     return (
         <button
             ref={ref}
-            className={cn(baseClasses, 'active:scale-95')}
+            className={baseClasses}
             disabled={isLoading || props.disabled}
             {...props}
         >
@@ -71,7 +58,6 @@ const Button = React.forwardRef(({
 
 Button.displayName = 'Button';
 
-// Icon button wrapper for convenience
 const IconButton = React.forwardRef(({ className, ...props }, ref) => (
     <Button
         ref={ref}

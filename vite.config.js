@@ -137,6 +137,9 @@ export default defineConfig(({ mode }) => ({
         // Force Rollup to bundle everything inline
         commonjsOptions: {
             transformMixedEsModules: true,
+            // Exclude pure ES modules that contain template literals with ### patterns
+            // that confuse the CJS resolver's parser (known rollup-plugin-commonjs issue)
+            exclude: [/src\/utils\/prompts\.js/, /src\/utils\/standardsLoader\.js/],
         },
         outDir: 'dist',
         emptyOutDir: true,

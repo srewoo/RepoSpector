@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Save, Eye, EyeOff, Key, AlertCircle, CheckCircle, Cpu, Sun, Moon, Palette, Github, GitBranch, Shield } from 'lucide-react';
+import { Save, Eye, EyeOff, Key, AlertCircle, CheckCircle, Cpu, Sun, Moon, Palette, Github, GitBranch, Shield, BarChart2, Trash2 } from 'lucide-react';
 import { Button } from './ui/Button';
 import { Card, CardHeader, CardTitle, CardContent } from './ui/Card';
 import { Collapsible } from './ui/Collapsible';
@@ -80,6 +80,12 @@ export function Settings({ onClose }) {
     const [enableUpdatePRDescription, setEnableUpdatePRDescription] = useState(false);
     const [enablePostInlineComments, setEnablePostInlineComments] = useState(false);
 
+    // Telemetry (#16a)
+    const [enableTelemetry, setEnableTelemetry] = useState(false);
+    const [telemetrySummary, setTelemetrySummary] = useState(null);
+    const [telemetryLoading, setTelemetryLoading] = useState(false);
+    const [telemetryClearing, setTelemetryClearing] = useState(false);
+
     // Load settings from background service (with decryption)
     useEffect(() => {
         const loadSettings = async () => {
@@ -142,6 +148,49 @@ export function Settings({ onClose }) {
 
         loadSettings();
     }, []);
+
+    // Load telemetry enabled state + summary
+    useEffect(() => {
+        const loadTelemetry = async () => {
+            try {
+                const resp = await chrome.runtime.sendMessage({ type: 'GET_TELEMETRY' });
+                if (resp?.success && resp.data) {
+                    setEnableTelemetry(resp.data.enabled || false);
+                    setTelemetrySummary(resp.data.summary || null);
+                }
+            } catch (_e) { /* telemetry is optional */ }
+        };
+        loadTelemetry();
+    }, []);
+
+    const handleToggleTelemetry = async (next) => {
+        setEnableTelemetry(next);
+        try {
+            await chrome.runtime.sendMessage({ type: 'SET_TELEMETRY_ENABLED', data: { enabled: next } });
+            if (next) {
+                const resp = await chrome.runtime.sendMessage({ type: 'GET_TELEMETRY' });
+                if (resp?.success) setTelemetrySummary(resp.data?.summary || null);
+            }
+        } catch (_e) { /* ignore */ }
+    };
+
+    const handleClearTelemetry = async () => {
+        setTelemetryClearing(true);
+        try {
+            await chrome.runtime.sendMessage({ type: 'CLEAR_TELEMETRY' });
+            setTelemetrySummary(null);
+        } catch (_e) { /* ignore */ }
+        setTelemetryClearing(false);
+    };
+
+    const handleRefreshTelemetry = async () => {
+        setTelemetryLoading(true);
+        try {
+            const resp = await chrome.runtime.sendMessage({ type: 'GET_TELEMETRY' });
+            if (resp?.success) setTelemetrySummary(resp.data?.summary || null);
+        } catch (_e) { /* ignore */ }
+        setTelemetryLoading(false);
+    };
 
     // Update model when provider changes (only after settings are loaded, not during initial load)
     useEffect(() => {
@@ -702,6 +751,96 @@ export function Settings({ onClose }) {
                             />
                         </button>
                     </div>
+                </div>
+            </Collapsible>
+
+            {/* Telemetry Section (#16a) */}
+            <Collapsible
+                title="Local Telemetry"
+                icon={BarChart2}
+                defaultOpen={false}
+                badge={enableTelemetry ? 'Enabled' : 'Opt-in'}
+            >
+                <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                            <p className="text-sm font-medium text-text">Enable Local Telemetry</p>
+                            <p className="text-xs text-textMuted">
+                                Store review stats locally (never leaves your browser)
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => handleToggleTelemetry(!enableTelemetry)}
+                            className={`relative w-11 h-6 rounded-full transition-colors ${
+                                enableTelemetry ? 'bg-primary' : 'bg-surface'
+                            }`}
+                        >
+                            <span
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                                    enableTelemetry ? 'translate-x-5' : 'translate-x-0'
+                                }`}
+                            />
+                        </button>
+                    </div>
+
+                    {enableTelemetry && (
+                        <div className="space-y-3">
+                            {telemetrySummary ? (
+                                <div className="bg-surface rounded-lg p-3 space-y-2 text-xs">
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <p className="text-textMuted">Total Reviews</p>
+                                            <p className="font-medium text-text">{telemetrySummary.totalRuns ?? 0}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-textMuted">Total Cost</p>
+                                            <p className="font-medium text-text">${(telemetrySummary.totalCostUsd ?? 0).toFixed(4)}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-textMuted">Latency p50</p>
+                                            <p className="font-medium text-text">{telemetrySummary.p50Ms != null ? `${(telemetrySummary.p50Ms / 1000).toFixed(1)}s` : '—'}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-textMuted">Latency p95</p>
+                                            <p className="font-medium text-text">{telemetrySummary.p95Ms != null ? `${(telemetrySummary.p95Ms / 1000).toFixed(1)}s` : '—'}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-textMuted">FP Rate</p>
+                                            <p className="font-medium text-text">{telemetrySummary.fpRate != null ? `${(telemetrySummary.fpRate * 100).toFixed(0)}%` : '—'}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-textMuted">Findings Kept</p>
+                                            <p className="font-medium text-text">{telemetrySummary.totalFindingsKept ?? 0}</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            ) : (
+                                <p className="text-xs text-textMuted">No reviews recorded yet.</p>
+                            )}
+                            <div className="flex gap-2">
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={handleRefreshTelemetry}
+                                    isLoading={telemetryLoading}
+                                    className="flex-1"
+                                >
+                                    <BarChart2 className="w-3 h-3 mr-1" />
+                                    Refresh Stats
+                                </Button>
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={handleClearTelemetry}
+                                    isLoading={telemetryClearing}
+                                    className="flex-1 text-red-400 hover:text-red-300"
+                                >
+                                    <Trash2 className="w-3 h-3 mr-1" />
+                                    Reset
+                                </Button>
+                            </div>
+                        </div>
+                    )}
                 </div>
             </Collapsible>
 

@@ -1,6 +1,8 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { cn } from '@/lib/utils';
-import { motion, AnimatePresence } from 'framer-motion';
+import { AnimatePresence, motion } from 'framer-motion';
+import { usePRReview } from '../hooks/usePRReview.js';
+import { parseStandardsChecklist, parseSummaryCounts } from '../utils/findingsParser.js';
 import {
     GitPullRequest,
     AlertTriangle,
@@ -48,340 +50,33 @@ export function PRReviewInterface({
     loading = false,
     progress = null
 }) {
-    const [activeTab, setActiveTab] = useState('summary'); // 'summary' | 'overview' | 'findings' | 'static'
-    const [selectedFinding, setSelectedFinding] = useState(null);
-    const [threadView, setThreadView] = useState(false);
-    const [activeThread, setActiveThread] = useState(null);
-    const [sendingMessage, setSendingMessage] = useState(false);
-    const [postingReview, setPostingReview] = useState(false);
-    const [postResult, setPostResult] = useState(null); // { success, error }
-    const [generatedDescription, setGeneratedDescription] = useState(null);
-    const [generatedChangelog, setGeneratedChangelog] = useState(null);
-    const [generatedMermaid, setGeneratedMermaid] = useState(null);
-    const [generatedRepoInfo, setGeneratedRepoInfo] = useState(null);
-    const [generating, setGenerating] = useState(null); // 'description' | 'changelog' | 'mermaid' | 'repoinfo' | null
+    // #12 — all state/logic lives in the hook
+    const {
+        activeTab, setActiveTab,
+        selectedFinding, setSelectedFinding,
+        threadView, setThreadView,
+        activeThread, setActiveThread,
+        sendingMessage,
+        postingReview, setPostingReview,
+        postResult, setPostResult,
+        generatedDescription, setGeneratedDescription,
+        generatedChangelog, setGeneratedChangelog,
+        generatedMermaid, setGeneratedMermaid,
+        generatedRepoInfo, setGeneratedRepoInfo,
+        generating, setGenerating,
+        findings, staticFindings,
+        effectiveVerdict, riskScore, effectiveRecommendation,
+        reviewEffort, isMultiPass,
+        standardsChecklist, summaryCounts,
+        reviewVerdict, reviewEvent, blockingCount,
+        handleOpenThread, handleSendMessage, handleQuickAction,
+        handleMarkResolved, handleDismiss, handleDismissFinding,
+        repoId
+    } = usePRReview({ analysisResult, staticAnalysisResult, prUrl, prData, session });
 
-    const { analysis, staticAnalysis, reviewEffort, isMultiPass, perFileFindings } = analysisResult || {};
-    const staticFindings = staticAnalysisResult?.findings || staticAnalysis?.findings || [];
+    const { analysis, staticAnalysis } = analysisResult || {};
 
-    // Convert multi-pass structured per-file findings to UI findings format
-    const convertMultiPassFindings = (perFileResults) => {
-        if (!perFileResults || !Array.isArray(perFileResults)) return [];
-        const findings = [];
-        for (const result of perFileResults) {
-            for (const f of (result.findings || [])) {
-                findings.push({
-                    id: `mp-${f.id || findings.length}-${Date.now()}`,
-                    file: f.file || result.file || 'Unknown',
-                    line: f.line || 0,
-                    type: f.type || f.title || 'general',
-                    severity: f.severity || 'medium',
-                    message: f.description || f.title || '',
-                    title: f.title || '',
-                    impact: f.impact || '',
-                    suggestion: f.suggestion || '',
-                    cwe: f.cwe || null,
-                    source: 'ai',
-                    confidence: f.confidence || 0.8
-                });
-            }
-        }
-        return findings;
-    };
-
-    // Parse findings from LLM analysis text (single-pass and aggregation fallback)
-    const parseLLMFindings = (text) => {
-        if (!text) return [];
-
-        const findings = [];
-
-        // Parse Critical Issues section
-        const criticalMatch = text.match(/###?\s*Critical Issues[^\n]*\n([\s\S]*?)(?=###?\s*Warnings|###?\s*Suggestions|###?\s*Cross-File|###?\s*Security Checklist|$)/i);
-        if (criticalMatch && criticalMatch[1]) {
-            const issues = extractIssuesFromSection(criticalMatch[1], 'critical');
-            findings.push(...issues);
-        }
-
-        // Parse Warnings section
-        const warningsMatch = text.match(/###?\s*Warnings[^\n]*\n([\s\S]*?)(?=###?\s*Suggestions|###?\s*Cross-File|###?\s*Security Checklist|###?\s*Critical|$)/i);
-        if (warningsMatch && warningsMatch[1]) {
-            const issues = extractIssuesFromSection(warningsMatch[1], 'high');
-            findings.push(...issues);
-        }
-
-        // Parse Suggestions section
-        const suggestionsMatch = text.match(/###?\s*Suggestions[^\n]*\n([\s\S]*?)(?=###?\s*Cross-File|###?\s*Security|###?\s*Critical|###?\s*Warnings|###?\s*Test|###?\s*Positive|$)/i);
-        if (suggestionsMatch && suggestionsMatch[1]) {
-            const issues = extractIssuesFromSection(suggestionsMatch[1], 'low');
-            findings.push(...issues);
-        }
-
-        return findings;
-    };
-
-    const extractIssuesFromSection = (sectionText, defaultSeverity) => {
-        const issues = [];
-        let match;
-
-        // Pattern 1: Structured format without bullets (File:, Line:, Type:, Severity:, Issue:)
-        const structuredPattern = /File:\s*([^\n]+)\s*\n\s*Line:\s*(\d+)[^\n]*\n\s*Type:\s*([^\n]+)\s*\n\s*Severity:\s*([^\n]+)\s*\n\s*Issue:\s*([^\n]+)/gi;
-
-        while ((match = structuredPattern.exec(sectionText)) !== null) {
-            issues.push({
-                id: `llm-${issues.length}-${Date.now()}`,
-                file: match[1].replace(/\*\*/g, '').trim(),
-                line: parseInt(match[2], 10),
-                type: match[3].replace(/\*\*/g, '').trim(),
-                severity: mapSeverity(match[4].trim()),
-                message: match[5].replace(/\*\*/g, '').trim(),
-                source: 'ai',
-                confidence: 0.85
-            });
-        }
-
-        // Pattern 2: Bullet-point structured format from multi-pass aggregation
-        // Matches: - **File**: path\n- **Line**: 42\n- **Type**: ...\n...
-        if (issues.length === 0) {
-            const bulletPattern = /-\s*\*?\*?File\*?\*?:\s*([^\n]+)\s*\n\s*-\s*\*?\*?Line\*?\*?:\s*(\d+)[^\n]*\n\s*-\s*\*?\*?Type\*?\*?:\s*([^\n]+)\s*\n\s*-\s*\*?\*?Severity\*?\*?:\s*([^\n]+)\s*\n(?:\s*-\s*\*?\*?CWE\*?\*?:\s*[^\n]*\n)?(?:\s*-\s*\*?\*?Confidence\*?\*?:\s*[^\n]*\n)?\s*-\s*\*?\*?Issue\*?\*?:\s*([^\n]+)/gi;
-            while ((match = bulletPattern.exec(sectionText)) !== null) {
-                issues.push({
-                    id: `llm-${issues.length}-${Date.now()}`,
-                    file: match[1].replace(/\*\*/g, '').trim(),
-                    line: parseInt(match[2], 10),
-                    type: match[3].replace(/\*\*/g, '').trim(),
-                    severity: mapSeverity(match[4].trim()),
-                    message: match[5].replace(/\*\*/g, '').trim(),
-                    source: 'ai',
-                    confidence: 0.85
-                });
-            }
-        }
-
-        // Pattern 3: Numbered items (1. **Title**: description)
-        if (issues.length === 0) {
-            const numberedPattern = /^\s*\d+\.\s*\*?\*?([^*\n:]+)\*?\*?:?\s*([^\n]+)/gm;
-            while ((match = numberedPattern.exec(sectionText)) !== null) {
-                const title = match[1].trim();
-                const desc = match[2].trim();
-                if (title && desc && !title.toLowerCase().includes('no ') && !desc.toLowerCase().includes('no current')) {
-                    issues.push({
-                        id: `llm-${issues.length}-${Date.now()}`,
-                        file: 'Unknown',
-                        line: 0,
-                        type: title,
-                        severity: defaultSeverity,
-                        message: desc,
-                        source: 'ai',
-                        confidence: 0.75
-                    });
-                }
-            }
-        }
-
-        // Pattern 4: Simple bullet items (- **Title**: description or - Title: description)
-        if (issues.length === 0) {
-            const bulletItemPattern = /^\s*[-*]\s+\*?\*?([^*\n:]+)\*?\*?:\s*([^\n]+)/gm;
-            while ((match = bulletItemPattern.exec(sectionText)) !== null) {
-                const title = match[1].trim();
-                const desc = match[2].trim();
-                // Skip metadata fields that look like findings
-                if (/^(file|line|type|severity|issue|impact|fix|cwe|confidence|cross-file)$/i.test(title)) continue;
-                if (title && desc && desc.length > 10) {
-                    issues.push({
-                        id: `llm-${issues.length}-${Date.now()}`,
-                        file: 'Unknown',
-                        line: 0,
-                        type: title,
-                        severity: defaultSeverity,
-                        message: desc,
-                        source: 'ai',
-                        confidence: 0.7
-                    });
-                }
-            }
-        }
-
-        return issues;
-    };
-
-    const mapSeverity = (severityText) => {
-        const text = (severityText || '').toLowerCase().replace(/\*\*/g, '');
-        if (text.includes('critical')) return 'critical';
-        if (text.includes('high')) return 'high';
-        if (text.includes('medium')) return 'medium';
-        if (text.includes('low')) return 'low';
-        return 'medium';
-    };
-
-    // Use structured per-file findings when available (multi-pass), fall back to text parsing
-    const multiPassFindings = isMultiPass ? convertMultiPassFindings(perFileFindings) : [];
-    const llmFindings = multiPassFindings.length > 0 ? multiPassFindings : parseLLMFindings(analysis);
-    const findings = [...staticFindings, ...llmFindings];
-
-    // Determine verdict based on findings severity
-    const getVerdictFromFindings = (findingsList) => {
-        if (!findingsList || findingsList.length === 0) return null;
-
-        const hasCritical = findingsList.some(f => f.severity === 'critical');
-        const hasHigh = findingsList.some(f => f.severity === 'high');
-        const hasMedium = findingsList.some(f => f.severity === 'medium');
-
-        if (hasCritical) {
-            return { action: 'block', verdict: 'Do Not Merge', level: 'critical', score: 15 };
-        }
-        if (hasHigh) {
-            return { action: 'block', verdict: 'Changes Requested', level: 'high', score: 35 };
-        }
-        if (hasMedium) {
-            return { action: 'caution', verdict: 'Review Carefully', level: 'medium', score: 55 };
-        }
-        return { action: 'review', verdict: 'Minor Issues', level: 'low', score: 75 };
-    };
-
-    const findingsVerdict = getVerdictFromFindings(findings);
-
-    // Parse LLM verdict from analysis text
-    const parseLLMVerdict = (text) => {
-        if (!text) return null;
-
-        const verdictMatch = text.match(/VERDICT:\s*(\w+)/i);
-        const riskMatch = text.match(/RISK_LEVEL:\s*(\w+)/i);
-
-        if (verdictMatch) {
-            const verdict = verdictMatch[1].toUpperCase();
-            const risk = riskMatch ? riskMatch[1].toLowerCase() : 'medium';
-
-            // Map LLM verdict to action and display
-            const verdictMap = {
-                'APPROVE': { action: 'approve', verdict: 'Safe to Merge', level: 'low', score: 90 },
-                'REQUEST_CHANGES': { action: 'block', verdict: 'Changes Requested', level: 'high', score: 40 },
-                'NEEDS_DISCUSSION': { action: 'caution', verdict: 'Needs Discussion', level: 'medium', score: 60 },
-                'BLOCK': { action: 'block', verdict: 'Do Not Merge', level: 'critical', score: 20 }
-            };
-
-            const riskScoreMap = {
-                'low': 85,
-                'medium': 55,
-                'high': 30,
-                'critical': 15
-            };
-
-            const mapped = verdictMap[verdict] || { action: 'review', verdict: verdict, level: risk, score: 50 };
-            // Adjust score based on risk level from LLM
-            if (riskMatch) {
-                mapped.score = riskScoreMap[risk] || mapped.score;
-                mapped.level = risk;
-            }
-
-            return mapped;
-        }
-        return null;
-    };
-
-    const llmVerdict = parseLLMVerdict(analysis);
-
-    // Priority: findings > LLM verdict > static analysis
-    // Use the most severe assessment
-    const getEffectiveVerdict = () => {
-        const verdicts = [findingsVerdict, llmVerdict].filter(Boolean);
-
-        if (verdicts.length === 0) {
-            return staticAnalysisResult?.recommendation || analysisResult?.recommendation;
-        }
-
-        // Return the most severe verdict
-        const severityOrder = { block: 0, caution: 1, review: 2, approve: 3 };
-        verdicts.sort((a, b) => (severityOrder[a.action] || 3) - (severityOrder[b.action] || 3));
-        return verdicts[0];
-    };
-
-    const effectiveVerdict = getEffectiveVerdict();
-
-    // Use effective verdict for risk score
-    const riskScore = effectiveVerdict
-        ? { score: effectiveVerdict.score, level: effectiveVerdict.level }
-        : (staticAnalysisResult?.riskScore || staticAnalysis?.riskScore);
-
-    const effectiveRecommendation = effectiveVerdict
-        ? { action: effectiveVerdict.action, verdict: effectiveVerdict.verdict }
-        : (staticAnalysisResult?.recommendation || analysisResult?.recommendation);
-
-    // Handle opening a thread for a finding
-    const handleOpenThread = useCallback(async (finding) => {
-        setSelectedFinding(finding);
-        setThreadView(true);
-
-        // Check if thread exists or create new one
-        try {
-            const response = await chrome.runtime.sendMessage({
-                type: 'GET_OR_CREATE_THREAD',
-                data: {
-                    sessionId: session?.sessionId,
-                    prIdentifier: {
-                        url: prUrl,
-                        ...prData
-                    },
-                    finding
-                }
-            });
-
-            if (response.success) {
-                setActiveThread(response.data);
-            }
-        } catch (err) {
-            console.error('Failed to get/create thread:', err);
-        }
-    }, [session, prUrl, prData]);
-
-    // Handle sending message in thread
-    const handleSendMessage = useCallback(async (message) => {
-        if (!activeThread?.threadId) return;
-
-        setSendingMessage(true);
-        try {
-            const response = await chrome.runtime.sendMessage({
-                type: 'SEND_THREAD_MESSAGE',
-                data: {
-                    threadId: activeThread.threadId,
-                    message
-                }
-            });
-
-            if (response.success) {
-                setActiveThread(response.data.thread);
-            }
-        } catch (err) {
-            console.error('Failed to send message:', err);
-        } finally {
-            setSendingMessage(false);
-        }
-    }, [activeThread]);
-
-    // Handle quick action
-    const handleQuickAction = useCallback(async (actionType) => {
-        if (!activeThread?.threadId) return;
-
-        setSendingMessage(true);
-        try {
-            const response = await chrome.runtime.sendMessage({
-                type: 'THREAD_QUICK_ACTION',
-                data: {
-                    threadId: activeThread.threadId,
-                    actionType
-                }
-            });
-
-            if (response.success) {
-                setActiveThread(response.data.thread);
-            }
-        } catch (err) {
-            console.error('Failed to execute quick action:', err);
-        } finally {
-            setSendingMessage(false);
-        }
-    }, [activeThread]);
-
-    // Handle PR-level quick actions
+    // Handle PR-level quick actions (local to this component — delegates to parent callbacks)
     const handlePRAction = useCallback((actionId) => {
         switch (actionId) {
             case 'focus-security':
@@ -397,65 +92,6 @@ export function PRReviewInterface({
                 break;
         }
     }, [onFocusArea, onAskQuestion, onRefresh]);
-
-    // Handle thread status update
-    const handleMarkResolved = useCallback(async () => {
-        if (!activeThread?.threadId) return;
-
-        try {
-            await chrome.runtime.sendMessage({
-                type: 'UPDATE_THREAD_STATUS',
-                data: {
-                    threadId: activeThread.threadId,
-                    status: 'resolved'
-                }
-            });
-            setActiveThread(prev => ({ ...prev, status: 'resolved' }));
-        } catch (err) {
-            console.error('Failed to mark resolved:', err);
-        }
-    }, [activeThread]);
-
-    const handleDismiss = useCallback(async () => {
-        if (!activeThread?.threadId) return;
-
-        try {
-            await chrome.runtime.sendMessage({
-                type: 'UPDATE_THREAD_STATUS',
-                data: {
-                    threadId: activeThread.threadId,
-                    status: 'dismissed'
-                }
-            });
-            setActiveThread(prev => ({ ...prev, status: 'dismissed' }));
-        } catch (err) {
-            console.error('Failed to dismiss:', err);
-        }
-    }, [activeThread]);
-
-    // Derive repoId for adaptive learning
-    const repoId = prData?.branches?.targetRepo ||
-        (prUrl ? prUrl.match(/(?:github\.com|gitlab\.com)\/([^/]+\/[^/]+)/)?.[1] : null) ||
-        'unknown';
-
-    // Handle finding-level dismiss (records to adaptive learning)
-    const handleDismissFinding = useCallback(async (finding) => {
-        if (!finding?.ruleId) return;
-        try {
-            await chrome.runtime.sendMessage({
-                type: 'RECORD_FINDING_ACTION',
-                data: {
-                    ruleId: finding.ruleId,
-                    repoId,
-                    action: 'dismissed',
-                    filePath: finding.filePath || finding.file,
-                    findingMessage: finding.message
-                }
-            });
-        } catch (err) {
-            console.error('Failed to record dismiss:', err);
-        }
-    }, [repoId]);
 
     // Handle finding-level resolve (records to adaptive learning)
     const handleResolveFinding = useCallback(async (finding) => {
@@ -493,7 +129,8 @@ export function PRReviewInterface({
                         includeInlineComments: true,
                         maxFindings: 10,
                         maxInlineComments: 15,
-                        event: 'COMMENT'
+                        // #22 — use mechanical verdict: APPROVE when no blocking, REQUEST_CHANGES otherwise
+                        event: reviewEvent || 'COMMENT'
                     }
                 }
             });

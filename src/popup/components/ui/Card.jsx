@@ -1,6 +1,6 @@
+// #13a — framer-motion removed; animate prop now uses CSS animate-fade-in class.
 import React from 'react';
 import { cn } from '@/lib/utils';
-import { motion } from 'framer-motion';
 
 const cardVariants = {
     default: 'rounded-xl border border-border bg-surface/50 text-text shadow-sm backdrop-blur-sm',
@@ -10,51 +10,31 @@ const cardVariants = {
     ghost: 'rounded-xl bg-transparent text-text',
 };
 
-const Card = React.forwardRef(({ className, variant = 'default', animate = false, ...props }, ref) => {
-    const Component = animate ? motion.div : 'div';
-
-    const animationProps = animate ? {
-        initial: { opacity: 0, y: 10 },
-        animate: { opacity: 1, y: 0 },
-        exit: { opacity: 0, y: -10 },
-        transition: { duration: 0.2 }
-    } : {};
-
-    return (
-        <Component
-            ref={ref}
-            className={cn(cardVariants[variant] || cardVariants.default, className)}
-            {...animationProps}
-            {...props}
-        />
-    );
-});
+const Card = React.forwardRef(({ className, variant = 'default', animate = false, ...props }, ref) => (
+    <div
+        ref={ref}
+        className={cn(
+            cardVariants[variant] || cardVariants.default,
+            animate && 'animate-fade-in',
+            className
+        )}
+        {...props}
+    />
+));
 Card.displayName = 'Card';
 
 const CardHeader = React.forwardRef(({ className, ...props }, ref) => (
-    <div
-        ref={ref}
-        className={cn('flex flex-col space-y-1.5 p-6', className)}
-        {...props}
-    />
+    <div ref={ref} className={cn('flex flex-col space-y-1.5 p-6', className)} {...props} />
 ));
 CardHeader.displayName = 'CardHeader';
 
 const CardTitle = React.forwardRef(({ className, ...props }, ref) => (
-    <h3
-        ref={ref}
-        className={cn('font-semibold leading-none tracking-tight', className)}
-        {...props}
-    />
+    <h3 ref={ref} className={cn('font-semibold leading-none tracking-tight', className)} {...props} />
 ));
 CardTitle.displayName = 'CardTitle';
 
 const CardDescription = React.forwardRef(({ className, ...props }, ref) => (
-    <p
-        ref={ref}
-        className={cn('text-sm text-textMuted', className)}
-        {...props}
-    />
+    <p ref={ref} className={cn('text-sm text-textMuted', className)} {...props} />
 ));
 CardDescription.displayName = 'CardDescription';
 
@@ -64,11 +44,7 @@ const CardContent = React.forwardRef(({ className, ...props }, ref) => (
 CardContent.displayName = 'CardContent';
 
 const CardFooter = React.forwardRef(({ className, ...props }, ref) => (
-    <div
-        ref={ref}
-        className={cn('flex items-center p-6 pt-0', className)}
-        {...props}
-    />
+    <div ref={ref} className={cn('flex items-center p-6 pt-0', className)} {...props} />
 ));
 CardFooter.displayName = 'CardFooter';
 

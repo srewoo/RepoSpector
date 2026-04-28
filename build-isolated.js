@@ -147,11 +147,20 @@ async function buildBackgroundScript() {
                 commonjs({
                     transformMixedEsModules: true,
                     include: ['node_modules/**', 'src/**'],
-                    requireReturnsDefault: 'auto'
+                    requireReturnsDefault: 'auto',
+                    // prompts.js / standardsLoader.js are pure ES modules whose template
+                    // literals contain "### " at column 0 — the CJS AST parser chokes on
+                    // that sequence (known @rollup/plugin-commonjs limitation).
+                    // Excluding them lets Rollup handle them natively as ES modules.
+                    exclude: [/src\/utils\/prompts\.js$/, /src\/utils\/standardsLoader\.js$/]
                 }),
                 babel({
                     babelHelpers: 'bundled',
-                    exclude: 'node_modules/**',
+                    // prompts.js / standardsLoader.js contain "### " at col-0 inside
+                    // template literals — both @rollup/plugin-commonjs and @babel/parser
+                    // trip on this pattern. These files use only ES6+ that Chrome 88
+                    // supports natively, so skipping Babel is safe.
+                    exclude: ['node_modules/**', /src\/utils\/prompts\.js$/, /src\/utils\/standardsLoader\.js$/],
                     presets: [
                         ['@babel/preset-env', {
                             targets: {

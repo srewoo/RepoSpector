@@ -69,6 +69,7 @@ import { PRComplianceChecker } from '../services/PRComplianceChecker.js';
 import { FindingCache } from '../services/FindingCache.js';
 import { TelemetryService } from '../services/TelemetryService.js';
 import { dispatch, registerHandlers } from './messageRouter.js';
+import { detectLanguages, buildStandardsBlock } from '../utils/standardsLoader.js';
 
 class BackgroundService {
     constructor() {
@@ -2959,10 +2960,14 @@ Return only the complete test code with proper syntax for the detected language,
             } else {
                 // General comprehensive review
                 systemPrompt = PR_ANALYSIS_SYSTEM_PROMPT;
+                // #19 — build language-aware standards block in background (not in prompts.js)
+                const prLangs = detectLanguages(prData.files);
+                const standardsBlock = buildStandardsBlock(prLangs, prData.files);
                 userPrompt = buildPRAnalysisPrompt(prData, {
                     focusAreas: options.focusAreas || ['security', 'bugs', 'performance', 'style'],
                     maxFilesToReview: options.maxFiles || 100,
                     includeTestAnalysis: options.includeTestAnalysis !== false,
+                    standardsBlock: { ...standardsBlock, langs: [...prLangs] },
                     ...contextWithDocs
                 });
             }
@@ -2991,6 +2996,14 @@ Return only the complete test code with proper syntax for the detected language,
                 }
             );
 
+            // #22 — Parse BLOCKING count from summary to compute mechanical verdict.
+            const analysisText = response.content || response || '';
+            const blockingMatch = analysisText.match(/BLOCKING:\s*(\d+)/i);
+            const blockingCount = blockingMatch ? parseInt(blockingMatch[1], 10) : 0;
+            const reviewVerdict = blockingCount > 0 ? 'CHANGES_REQUESTED' : 'APPROVED';
+            // Map verdict → GitHub/GitLab post-review event field
+            const reviewEvent = blockingCount > 0 ? 'REQUEST_CHANGES' : 'APPROVE';
+
             // Telemetry: record this run (no-op when telemetry is disabled).
             try {
                 await this.telemetry.record({
@@ -2998,6 +3011,7 @@ Return only the complete test code with proper syntax for the detected language,
                     durationMs: Date.now() - startedAt,
                     tokensIn: response.usage?.prompt_tokens || 0,
                     tokensOut: response.usage?.completion_tokens || 0,
+                    costUsd: this._estimateCost(effectiveModel, response.usage?.prompt_tokens || 0, response.usage?.completion_tokens || 0),
                     model: effectiveModel,
                 });
             } catch (e) { /* never let telemetry break a review */ }
@@ -3005,7 +3019,10 @@ Return only the complete test code with proper syntax for the detected language,
             sendResponse({
                 success: true,
                 data: {
-                    analysis: response.content || response,
+                    analysis: analysisText,
+                    reviewVerdict,
+                    reviewEvent,
+                    blockingCount,
                     prSummary: this.pullRequestService.generatePRSummary(prData),
                     prData: {
                         title: prData.title,
@@ -3493,12 +3510,13 @@ Return only the complete test code with proper syntax for the detected language,
                 return this.handleAnalyzePRWithStaticAnalysis(message, sendResponse);
             }
 
+            const multiPassStartedAt = Date.now();
             const settings = await this.getStoredSettings();
             const reviewSettings = settings.reviewSettings || {};
             const repoId = prData.branches?.targetRepo ||
                 `${prData.author?.login || 'unknown'}/${prData.title || 'unknown'}`;
 
-            // Fetch custom config for static analysis
+            // #16b — honour model pin from .repospector.yaml in multi-pass path
             let customConfig = null;
             try {
                 const urlMatch = prUrl.match(/(?:github\.com|gitlab\.com)\/([^/]+)\/([^/]+)/);
@@ -3547,6 +3565,13 @@ Return only the complete test code with proper syntax for the detected language,
                 } catch (e) { /* popup may be closed */ }
             };
 
+            // #16b — apply model pin from .repospector.yaml
+            const multiPassPinnedModel = customConfig?.settings?.model;
+            const multiPassModel = multiPassPinnedModel || settings.model;
+            if (multiPassPinnedModel && multiPassPinnedModel !== settings.model) {
+                console.log(`🎯 Using model pinned by .repospector.yaml: ${multiPassPinnedModel}`);
+            }
+
             // Execute multi-pass review
             const engine = new MultiPassReviewEngine({
                 llmService: this.llmService,
@@ -3563,7 +3588,7 @@ Return only the complete test code with proper syntax for the detected language,
                 },
                 {
                     provider: settings.provider,
-                    model: settings.model,
+                    model: multiPassModel,
                     apiKey: settings.apiKey
                 },
                 {
@@ -3612,10 +3637,35 @@ Return only the complete test code with proper syntax for the detected language,
                 console.warn('Failed to record review metrics:', metricsErr.message);
             }
 
+            // Telemetry for multi-pass (no-op when disabled)
+            try {
+                const totalTokensIn = (result.tokenUsage?.input || 0);
+                const totalTokensOut = (result.tokenUsage?.output || 0);
+                await this.telemetry.record({
+                    kind: 'pr_review',
+                    durationMs: Date.now() - multiPassStartedAt,
+                    tokensIn: totalTokensIn,
+                    tokensOut: totalTokensOut,
+                    costUsd: this._estimateCost(multiPassModel, totalTokensIn, totalTokensOut),
+                    model: multiPassModel,
+                });
+            } catch (e) { /* never let telemetry break a review */ }
+
+            // #22 — mechanical verdict from multi-pass findings
+            const allFindings = [...(result.perFileFindings || []), ...(staticResult.findings || [])];
+            const multiPassBlocking = allFindings.filter(f =>
+                f.severity === 'critical' || f.severity === 'high'
+            ).length;
+            const multiPassVerdict = multiPassBlocking > 0 ? 'CHANGES_REQUESTED' : 'APPROVED';
+            const multiPassReviewEvent = multiPassBlocking > 0 ? 'REQUEST_CHANGES' : 'APPROVE';
+
             sendResponse({
                 success: true,
                 data: {
                     analysis: result.analysis,
+                    reviewVerdict: multiPassVerdict,
+                    reviewEvent: multiPassReviewEvent,
+                    blockingCount: multiPassBlocking,
                     aiSummary,
                     isMultiPass: true,
                     perFileFindings: result.perFileFindings,
@@ -3677,6 +3727,41 @@ Return only the complete test code with proper syntax for the detected language,
         } catch (e) {
             return { found: false };
         }
+    }
+
+    /**
+     * #16c — Cost estimation using a per-model pricing table.
+     * Prices are in USD per 1K tokens (input / output).
+     * Returns 0 for unknown models so telemetry never breaks a review.
+     */
+    _estimateCost(model = '', tokensIn = 0, tokensOut = 0) {
+        const PRICING = {
+            // OpenAI
+            'openai:gpt-4.1':         { in: 0.002,   out: 0.008 },
+            'openai:gpt-4.1-mini':    { in: 0.0004,  out: 0.0016 },
+            'openai:o1-mini':         { in: 0.003,   out: 0.012 },
+            'openai:gpt-4o':          { in: 0.005,   out: 0.015 },
+            // Anthropic
+            'anthropic:claude-opus-4':          { in: 0.015,  out: 0.075 },
+            'anthropic:claude-sonnet-4':        { in: 0.003,  out: 0.015 },
+            'anthropic:claude-3.5-haiku':       { in: 0.0008, out: 0.004 },
+            'anthropic:claude-3-5-sonnet-20241022': { in: 0.003, out: 0.015 },
+            // Google
+            'google:gemini-2.0-flash':      { in: 0.0001, out: 0.0004 },
+            'google:gemini-2.0-pro':        { in: 0.0035, out: 0.0105 },
+            'google:gemini-2.0-flash-lite': { in: 0.000075, out: 0.0003 },
+            // Groq (free tier, near-zero cost estimate)
+            'groq:llama-3.3-70b':           { in: 0.00059, out: 0.00079 },
+            'groq:deepseek-r1-distill-llama-70b': { in: 0.00075, out: 0.00099 },
+            'groq:mixtral-8x7b':            { in: 0.00024, out: 0.00024 },
+            // Mistral
+            'mistral:mistral-large':   { in: 0.003, out: 0.009 },
+            'mistral:codestral':       { in: 0.001, out: 0.003 },
+            'mistral:mistral-small':   { in: 0.0002, out: 0.0006 },
+        };
+        const price = PRICING[model];
+        if (!price) return 0;
+        return (tokensIn / 1000) * price.in + (tokensOut / 1000) * price.out;
     }
 
     /**
@@ -5572,4 +5657,33 @@ registerHandlers({
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     dispatch(request, sender, sendResponse, { errorHandler: backgroundServiceInstance.errorHandler });
     return true; // keep channel open for async response
+});
+
+// ─── #16d — Daily alarm: prune expired FindingCache and AdaptiveLearning entries ──
+
+const DAILY_PRUNE_ALARM = 'rs-daily-prune';
+
+chrome.alarms.get(DAILY_PRUNE_ALARM, (alarm) => {
+    if (!alarm) {
+        chrome.alarms.create(DAILY_PRUNE_ALARM, {
+            delayInMinutes: 60,
+            periodInMinutes: 24 * 60
+        });
+    }
+});
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+    if (alarm.name !== DAILY_PRUNE_ALARM) return;
+    try {
+        await backgroundServiceInstance.findingCache.pruneExpired();
+        console.log('🧹 FindingCache pruned');
+    } catch (e) {
+        console.warn('FindingCache prune failed:', e.message);
+    }
+    try {
+        await backgroundServiceInstance.adaptiveLearningService.cleanup?.();
+        console.log('🧹 AdaptiveLearning pruned');
+    } catch (e) {
+        console.warn('AdaptiveLearning cleanup failed:', e.message);
+    }
 });

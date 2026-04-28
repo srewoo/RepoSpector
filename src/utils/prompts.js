@@ -623,27 +623,38 @@ The user prompt includes specific deprecated APIs and bug patterns for the langu
 ### Step 3: Report every real issue
 Each finding must have a specific line number, a clear description, and a concrete fix suggestion (not "consider X" but "replace X with Y").
 
+## Mandatory Rule Citation (#20)
+
+Every finding MUST include a \`Rule:\` line citing the standards file and exact rule ID:
+\`\`\`
+Rule: standards/python/coding.md → PY-CODING-001 "No deprecated datetime UTC helpers"
+\`\`\`
+Findings without a \`Rule:\` line will be rejected as unciteable. If a finding is real but no specific rule covers it, cite \`Rule: general/security\` or \`Rule: general/correctness\` with a brief description of the principle violated.
+
 ## What makes a GOOD finding (aim for this quality)
 \`\`\`
 File: services/user_service.py
 Line: 47
 Type: Deprecated API
 Severity: High
+Rule: standards/python/coding.md → PY-CODING-001 "No deprecated datetime UTC helpers"
 Issue: datetime.utcfromtimestamp(ts) is deprecated since Python 3.12 and returns naive UTC datetime
 Impact: DeprecationWarning in Python 3.12+, timezone-naive comparison bugs
 Fix: Replace with datetime.fromtimestamp(ts, tz=timezone.utc)
 \`\`\`
 
 ## What makes a BAD finding (avoid this)
-- "Consider adding more tests" ← too vague, no line number
+- "Consider adding more tests" ← too vague, no line number, no Rule citation
 - "The code could be more readable" ← not a defect
 - "This function is complex" ← not actionable
+- Any finding missing the \`Rule:\` line ← will be dropped by the parser
 
 ## Key Principles
 - Report EVERY deprecated API call, behavioral change, incorrect API usage, and naming inconsistency as individual findings
 - Most real-world diffs have at least 2-5 genuine issues — if you're finding zero, look harder
 - Test coverage suggestions go in the Test Coverage section, NOT as Critical/Warning findings
-- Every finding needs: File, Line, Type, Severity, Issue, Impact, Fix`;
+- Every finding needs: File, Line, Type, Severity, Rule, Issue, Impact, Fix
+`;
 
 /**
  * Score a file by risk level for review prioritization.
@@ -679,7 +690,12 @@ export function buildPRAnalysisPrompt(prData, options = {}) {
         // doesn't drown the review in patterns the team has already rejected.
         // Suppression is too aggressive — false positives often cluster, and
         // a one-line nudge in the prompt outperforms a hard filter.
-        dismissedRules = []
+        dismissedRules = [],
+        // #19 — pre-built standards block from standardsLoader.js { text, langs, ruleIds }
+        // Pass this from the caller (background handler) to avoid import in this file.
+        standardsBlock = null,
+        // Optional: standards override path from .repospector.yaml (placeholder for #26)
+        _customStandardsPath = null
     } = options;
 
     // Prioritize files by risk score before truncating
@@ -710,6 +726,27 @@ ${f.patch || 'No patch available'}
         ).join('\n')
         : 'No inline comments yet';
 
+    // #19 — Language-aware standards block.
+    // Computed by the caller using standardsLoader.js (passed in options.standardsBlock)
+    // to avoid adding an import to this file that confuses the rollup CJS resolver.
+    const standardsSection = standardsBlock?.text
+        ? `\n## Applicable Standards\n\nThe following rules apply to the languages detected in this PR (${(standardsBlock.langs || []).join(', ')}). Check every rule against the diff and mark it PASS/FAIL/SKIPPED in the Standards Checklist.\n\n${standardsBlock.text}\n`
+        : '';
+
+    // #25 — Conventional Commits check
+    const CONVENTIONAL_COMMIT_RE = /^(feat|fix|refactor|test|docs|chore|perf|ci|style|build|revert)(\([^)]+\))?!?: .+/;
+    const badCommits = prData.commits.filter(c => {
+        const firstLine = (c.message || '').split('\n')[0].trim();
+        return firstLine && !CONVENTIONAL_COMMIT_RE.test(firstLine);
+    });
+    const conventionalCommitsSection = badCommits.length > 0
+        ? `\n### Commit Message Compliance
+The following commits do not follow Conventional Commits format (\`<type>(<scope>)?: <description>\`):
+${badCommits.map(c => `- \`${c.sha?.substring(0, 7)}\`: ${c.message?.split('\n')[0]}`).join('\n')}
+Valid types: feat, fix, refactor, test, docs, chore, perf, ci, style, build, revert
+Flag these as SUGGESTION findings if they are not squash-merged.\n`
+        : '';
+
     // Adaptive-learning context: list rules the user has repeatedly dismissed
     // in this repo. Top of prompt (high salience) but framed as a soft signal.
     const dismissedSection = dismissedRules.length > 0
@@ -719,7 +756,7 @@ ${dismissedRules.map(r => `- \`${r.ruleId}\`${r.sample ? ` (e.g. "${r.sample.sub
         : '';
 
     let prompt = `## Pull Request Analysis
-${dismissedSection}
+${standardsSection}${dismissedSection}
 ### PR Information
 - **Title**: ${prData.title}
 - **Author**: ${prData.author?.login || 'Unknown'}
@@ -782,6 +819,11 @@ Use this context to:
 - Verify integration points are handled correctly
 - Check if related code needs updates
 `;
+    }
+
+    // Add conventional commits check (#25)
+    if (conventionalCommitsSection) {
+        prompt += `\n---\n${conventionalCommitsSection}`;
     }
 
     // Add focus area instructions
@@ -921,29 +963,63 @@ Evaluate:
 
 ### Summary
 \`\`\`
-VERDICT: [APPROVE / REQUEST_CHANGES / COMMENT]
+VERDICT: [APPROVED / CHANGES_REQUESTED]
 RISK_LEVEL: [LOW / MEDIUM / HIGH / CRITICAL]
 CONFIDENCE: [HIGH / MEDIUM / LOW]
+BLOCKING: [count of blocking findings]
+SUGGESTION: [count of suggestion findings]
+NITPICK: [count of nitpick findings]
 \`\`\`
 
-### Critical Issues (Must Fix Before Merge)
-For each issue:
+VERDICT is mechanical: APPROVED when BLOCKING = 0, CHANGES_REQUESTED when BLOCKING ≥ 1.
+
+### Standards Checklist
+List every rule from the "Applicable Standards" section above as PASS, FAIL, or SKIPPED:
+\`\`\`
+- [PASS/FAIL/SKIPPED] <RULE-ID>: <short description> [→ see finding #N if FAIL] [reason if SKIPPED]
+\`\`\`
+Example:
+\`\`\`
+- [PASS] JS-CODING-007: No hardcoded secrets
+- [FAIL] JS-TEST-001: Every exported function has a test → see findings
+- [SKIPPED] GO-CODING-001: No Go files changed
+\`\`\`
+
+### BLOCKING Issues (critical/high security or correctness — must fix before merge)
+For each blocking finding:
 \`\`\`
 File: [filename]
 Line: [line number]
 Type: [Security/Bug/Performance]
-Severity: [Critical/High/Medium]
+Severity: [Critical/High]
+Bucket: BLOCKING
+Rule: standards/<lang>/coding.md → RULE-ID "rule text" (or general/security / general/correctness)
 CWE: [CWE-ID if security-related, e.g. CWE-79]
 Issue: [Clear description]
 Impact: [What could go wrong]
 Fix: [Specific code suggestion]
 \`\`\`
 
-### Warnings (Should Fix)
-[Same format as above]
+### SUGGESTION Issues (medium/low severity — should fix)
+\`\`\`
+File: [filename]
+Line: [line number]
+Type: [Security/Bug/Performance/Quality]
+Severity: [Medium/Low]
+Bucket: SUGGESTION
+Rule: standards/<lang>/coding.md → RULE-ID "rule text"
+Issue: [Clear description]
+Fix: [Specific code suggestion]
+\`\`\`
 
-### Suggestions (Nice to Have)
-[Brief list of improvements]
+### NITPICK Issues (info/style — nice to have)
+\`\`\`
+File: [filename]
+Line: [line number]
+Bucket: NITPICK
+Rule: standards/<lang>/coding.md → RULE-ID "rule text"
+Issue: [Brief note]
+\`\`\`
 
 ### Security Checklist
 - [ ] No hardcoded secrets or API keys
@@ -961,8 +1037,10 @@ Fix: [Specific code suggestion]
 - [ ] Security scenarios are tested
 
 ### Final Verdict
-**Recommendation**: [Clear action item]
+**Recommendation**: [APPROVED — no blocking issues / CHANGES REQUESTED — N blocking issue(s) must be addressed]
 **Blocking Issues**: [Count]
+**Suggestions**: [Count]
+**Nitpicks**: [Count]
 **Total Issues Found**: [Count by severity]
 
 ---
@@ -976,7 +1054,10 @@ IMPORTANT:
 - Report EVERY finding individually — do NOT consolidate multiple issues into one
 - Even small issues matter: deprecated APIs, wrong log levels, naming inconsistencies, behavioral scope changes
 - Aim for thoroughness: a good review catches 5-15 issues across all severity levels for a typical PR
-- For each file, check: What changed? What could go wrong? What's deprecated? What's inconsistent?`;
+- For each file, check: What changed? What could go wrong? What's deprecated? What's inconsistent?
+- EVERY finding must include a Rule: citation — findings without one will be dropped
+- The Standards Checklist must list every rule from the "Applicable Standards" section as PASS/FAIL/SKIPPED
+- VERDICT is computed mechanically: APPROVED when BLOCKING = 0, CHANGES_REQUESTED otherwise`;
 
     return prompt;
 }

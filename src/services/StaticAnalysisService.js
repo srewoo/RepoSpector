@@ -12,6 +12,7 @@ import { ConfidenceScorer } from './ConfidenceScorer.js';
 import { EOLService } from './EOLService.js';
 import { ImportGraphService } from './ImportGraphService.js';
 import { SecretsScanner } from './SecretsScanner.js';
+import { SymbolExtractor } from './SymbolExtractor.js';
 
 export class StaticAnalysisService {
     constructor(options = {}) {
@@ -23,6 +24,7 @@ export class StaticAnalysisService {
         this.eolService = options.eolService || (options.enableEOL !== false ? new EOLService(options.eol || {}) : null);
         this.importGraphService = options.importGraphService || new ImportGraphService();
         this.secretsScanner = new SecretsScanner();
+        this.symbolExtractor = new SymbolExtractor();
 
         // Optional services (injected from background)
         this.adaptiveLearningService = options.adaptiveLearningService || null;
@@ -258,15 +260,18 @@ export class StaticAnalysisService {
         // Run analysis
         const analysisResult = await this.analyzeFiles(filesToAnalyze, options);
 
+        // #27 — Track analyzer disposition: ran | skipped | error
+        const analyzerStatus = {};
+
         // Run EOL checks if enabled
-        if (this.options.enableEOL && this.eolService) {
+        if (!this.options.enableEOL || !this.eolService) {
+            analyzerStatus.eol = { status: 'skipped', reason: this.options.enableEOL ? 'eolService not configured' : 'disabled in settings' };
+        } else {
             try {
                 const eolFindings = await this.eolService.checkDependencies(
-                    // Pass dependencies extracted from analysis
                     analysisResult.findings
                         .filter(f => f.tool === 'dependency' && f.packageName)
                         .map(f => ({ name: f.packageName, version: f.installedVersion })),
-                    // Pass PR files for config file checking
                     prData.files || []
                 );
 
@@ -275,14 +280,18 @@ export class StaticAnalysisService {
                     analysisResult.totalFindings = analysisResult.findings.length;
                     console.log(`📅 EOL check found ${eolFindings.length} issues`);
                 }
+                analyzerStatus.eol = { status: eolFindings.length > 0 ? 'fail' : 'pass', findings: eolFindings.length };
             } catch (e) {
                 console.warn('EOL check failed:', e.message);
+                analyzerStatus.eol = { status: 'skipped', reason: `tool error: ${e.message}` };
             }
         }
 
         // Run cross-file import graph analysis
         let importGraphContext = null;
-        if (this.importGraphService) {
+        if (!this.importGraphService) {
+            analyzerStatus.importGraph = { status: 'skipped', reason: 'importGraphService not configured' };
+        } else {
             try {
                 this.importGraphService.buildGraph(prData.files || []);
                 const breakingChanges = this.importGraphService.detectBreakingChanges(prData.files || []);
@@ -292,8 +301,10 @@ export class StaticAnalysisService {
                     console.log(`🔗 Import graph found ${breakingChanges.length} cross-file issues`);
                 }
                 importGraphContext = this.importGraphService.formatForPrompt(prData.files || []);
+                analyzerStatus.importGraph = { status: breakingChanges.length > 0 ? 'fail' : 'pass', findings: breakingChanges.length };
             } catch (e) {
                 console.warn('Import graph analysis failed:', e.message);
+                analyzerStatus.importGraph = { status: 'skipped', reason: `tool error: ${e.message}` };
             }
         }
 
@@ -305,8 +316,64 @@ export class StaticAnalysisService {
                 analysisResult.totalFindings = analysisResult.findings.length;
                 console.log(`🔑 Secrets scan found ${secretFindings.length} exposed secrets`);
             }
+            analyzerStatus.secrets = { status: secretFindings.length > 0 ? 'fail' : 'pass', findings: secretFindings.length };
         } catch (e) {
             console.warn('Secrets scan failed:', e.message);
+            analyzerStatus.secrets = { status: 'skipped', reason: `tool error: ${e.message}` };
+        }
+
+        // #24 — Exported functions with no corresponding test file → BLOCKING finding
+        try {
+            const testFilePatterns = [/_test\.(js|ts|jsx|tsx|py|go)$/, /\.test\.(js|ts|jsx|tsx)$/, /\.spec\.(js|ts|jsx|tsx)$/, /^test_.*\.py$/, /tests?\//];
+            const changedTestFiles = (prData.files || []).filter(f =>
+                testFilePatterns.some(p => p.test(f.filename))
+            );
+            // Only run this check when no test files were changed alongside source files
+            const changedSourceFiles = (prData.files || []).filter(f =>
+                /\.(js|ts|jsx|tsx|py|go)$/.test(f.filename) &&
+                !testFilePatterns.some(p => p.test(f.filename)) &&
+                f.status !== 'removed' && f.patch
+            );
+
+            if (changedSourceFiles.length > 0 && changedTestFiles.length === 0) {
+                const uncoveredFunctions = [];
+                for (const file of changedSourceFiles) {
+                    const addedCode = this.extractAddedCode(file.patch || '');
+                    const symbols = this.symbolExtractor.extractFromJavaScript(addedCode, {
+                        filePath: file.filename
+                    });
+                    const exportedFns = (symbols?.functions || []).filter(s => s.isExported);
+                    for (const fn of exportedFns) {
+                        uncoveredFunctions.push({ file: file.filename, fn: fn.name, line: fn.startLine });
+                    }
+                }
+
+                for (const { file, fn, line } of uncoveredFunctions) {
+                    analysisResult.findings.push({
+                        id: `no-test-${file}-${fn}`,
+                        filePath: file,
+                        file,
+                        line,
+                        severity: 'high',
+                        category: 'quality',
+                        bucket: 'BLOCKING',
+                        rule: 'standards/javascript/testing.md → JS-TEST-001 "Every exported function must have at least one unit test"',
+                        title: `No test for exported function \`${fn}\``,
+                        message: `Exported function \`${fn}\` in ${file} was added or modified but no test file was changed in this PR.`,
+                        fix: `Add a test in a \`*.test.ts\` / \`*.spec.ts\` file that exercises the behaviour of \`${fn}\`.`,
+                        source: 'static',
+                        tool: 'coverage-check',
+                        confidence: 0.85
+                    });
+                }
+
+                if (uncoveredFunctions.length > 0) {
+                    analysisResult.totalFindings = analysisResult.findings.length;
+                    console.log(`🧪 Coverage check: ${uncoveredFunctions.length} exported functions have no tests`);
+                }
+            }
+        } catch (e) {
+            console.warn('Exported-function coverage check failed:', e.message);
         }
 
         // Apply adaptive learning adjustments
@@ -363,7 +430,9 @@ export class StaticAnalysisService {
             // High-level recommendation (use unfiltered for accurate verdict)
             recommendation: this.generatePRRecommendation(analysisResult),
             // Cross-file import graph context for LLM prompt injection
-            importGraphContext
+            importGraphContext,
+            // #27 — per-analyzer disposition for Standards Checklist SKIPPED/FAIL labelling
+            analyzerStatus
         };
     }
 
