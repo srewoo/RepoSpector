@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint (advisory until tech-debt cleanup lands)
+        # 114 pre-existing errors as of the spine refactor; tracked as Phase 1
+        # follow-up. Once cleared, drop continue-on-error to make this a gate.
+        continue-on-error: true
+        run: npm run lint
+
+      - name: Unit + integration tests
+        run: npm test -- --ci --runInBand
+
+      - name: Build extension
+        run: npm run build
+
+      - name: Bundle size budget
+        run: node scripts/check-bundle-size.cjs
+
+      - name: Upload built extension
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ github.sha }}
+          path: dist/
+          retention-days: 7

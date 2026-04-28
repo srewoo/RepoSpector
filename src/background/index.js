@@ -66,6 +66,7 @@ import { MultiPassReviewEngine } from '../services/MultiPassReviewEngine.js';
 import { CodeGraphPipeline } from '../services/CodeGraphPipeline.js';
 import { ReviewMetricsService } from '../services/ReviewMetricsService.js';
 import { PRComplianceChecker } from '../services/PRComplianceChecker.js';
+import { dispatch, registerHandlers } from './messageRouter.js';
 
 class BackgroundService {
     constructor() {
@@ -384,214 +385,6 @@ class BackgroundService {
         // to avoid duplicate listeners. This method is kept for potential future use but
         // should NOT add a listener here to prevent conflicts.
         console.log('📡 BackgroundService ready to handle messages');
-    }
-
-    async handleMessage(message, sender, sendResponse) {
-        try {
-            // Determine if request came from popup or content script
-            // Popup messages have no sender.tab, content script messages have sender.tab
-            // Also check message.isFromPopup flag set by content script relay for iframe popup
-            const isFromPopup = !sender || !sender.tab || message.isFromPopup === true;
-            console.log('📍 Message received:', message.type, '| From:', isFromPopup ? 'Popup' : 'Content Script', '| message.isFromPopup:', message.isFromPopup);
-
-            switch (message.type) {
-                case 'GENERATE_TESTS':
-                    await this.handleGenerateTests(message, sendResponse, sender, isFromPopup);
-                    break;
-
-                case 'CHAT_WITH_CODE':
-                    await this.handleChatWithCode(message, sendResponse, sender);
-                    break;
-
-                case 'VALIDATE_API_KEY':
-                    await this.handleValidateApiKey(message, sendResponse);
-                    break;
-
-                case 'SAVE_SETTINGS':
-                    await this.handleSaveSettings(message, sendResponse);
-                    break;
-
-                case 'GET_SETTINGS':
-                    await this.handleGetSettings(message, sendResponse);
-                    break;
-
-                case 'ANALYZE_CONTEXT':
-                    await this.handleAnalyzeContext(message, sendResponse);
-                    break;
-
-                case 'PROCESS_DIFF':
-                    await this.handleProcessDiff(message, sendResponse);
-                    break;
-
-                case 'GET_PROGRESS':
-                    this.handleGetProgress(message, sendResponse);
-                    break;
-
-                case 'GET_TAB_ID':
-                    this.handleGetTabId(message, sender, sendResponse);
-                    break;
-
-                case 'INDEX_REPOSITORY':
-                    await this.handleIndexRepository(message, sender, sendResponse);
-                    break;
-
-                case 'CHECK_INDEX_STATUS':
-                    await this.handleCheckIndexStatus(message, sendResponse);
-                    break;
-
-                case 'CLEAR_INDEX':
-                    await this.handleClearIndex(message, sendResponse);
-                    break;
-
-                case 'GET_INDEX_STATS':
-                    await this.handleGetIndexStats(message, sendResponse);
-                    break;
-
-                case 'GET_INDEXED_REPOS':
-                    await this.handleGetIndexedRepos(message, sendResponse);
-                    break;
-
-                case 'DELETE_REPO_INDEX':
-                    await this.handleDeleteRepoIndex(message, sendResponse);
-                    break;
-
-                case 'CANCEL_REQUEST':
-                    this.handleCancelRequest(message, sendResponse);
-                    break;
-
-                case 'ANALYZE_PULL_REQUEST':
-                    await this.handleAnalyzePullRequest(message, sendResponse);
-                    break;
-
-                case 'GET_PR_SUMMARY':
-                    await this.handleGetPRSummary(message, sendResponse);
-                    break;
-
-                case 'SECURITY_REVIEW_PR':
-                    await this.handleSecurityReviewPR(message, sendResponse);
-                    break;
-
-                case 'REVIEW_TEST_AUTOMATION':
-                    await this.handleReviewTestAutomation(message, sendResponse);
-                    break;
-
-                case 'ANALYZE_PR_WITH_STATIC_ANALYSIS':
-                    await this.handleAnalyzePRWithStaticAnalysis(message, sendResponse);
-                    break;
-
-                case 'MULTI_PASS_PR_REVIEW':
-                    await this.handleMultiPassPRReview(message, sendResponse);
-                    break;
-
-                case 'RUN_STATIC_ANALYSIS':
-                    await this.handleRunStaticAnalysis(message, sendResponse);
-                    break;
-
-                case 'CREATE_PR_THREAD':
-                    await this.handleCreatePRThread(message, sendResponse);
-                    break;
-
-                case 'GET_PR_THREAD':
-                    await this.handleGetPRThread(message, sendResponse);
-                    break;
-
-                case 'SEND_THREAD_MESSAGE':
-                    await this.handleSendThreadMessage(message, sendResponse);
-                    break;
-
-                case 'THREAD_QUICK_ACTION':
-                    await this.handleThreadQuickAction(message, sendResponse);
-                    break;
-
-                case 'UPDATE_THREAD_STATUS':
-                    await this.handleUpdateThreadStatus(message, sendResponse);
-                    break;
-
-                case 'GET_OR_CREATE_THREAD':
-                    await this.handleGetOrCreateThread(message, sendResponse);
-                    break;
-
-                case 'GET_PR_SESSION':
-                    await this.handleGetPRSession(message, sendResponse);
-                    break;
-
-                case 'POST_PR_REVIEW':
-                    await this.handlePostPRReview(message, sendResponse);
-                    break;
-
-                case 'GENERATE_PR_DESCRIPTION':
-                    await this.handleGeneratePRDescription(message, sendResponse);
-                    break;
-
-                case 'GENERATE_MERMAID_DIAGRAM':
-                    await this.handleGenerateMermaidDiagram(message, sendResponse);
-                    break;
-
-                case 'GENERATE_CHANGELOG':
-                    await this.handleGenerateChangelog(message, sendResponse);
-                    break;
-
-                case 'GENERATE_REPO_MINDMAP':
-                    await this.handleGenerateRepoMindmap(message, sendResponse);
-                    break;
-
-                case 'GENERATE_REPO_DIAGRAM':
-                    await this.handleGenerateRepoDiagram(message, sendResponse);
-                    break;
-
-                case 'GENERATE_REPO_INFO':
-                    await this.handleGenerateRepoInfo(message, sendResponse);
-                    break;
-
-                case 'RECORD_FINDING_ACTION':
-                    await this.handleRecordFindingAction(message, sendResponse);
-                    break;
-
-                case 'GET_LEARNING_STATS':
-                    await this.handleGetLearningStats(message, sendResponse);
-                    break;
-
-                case 'FETCH_CUSTOM_CONFIG':
-                    await this.handleFetchCustomConfig(message, sendResponse);
-                    break;
-
-                case 'ANALYZE_IMPACT':
-                    await this.handleAnalyzeImpact(message, sendResponse);
-                    break;
-
-                case 'ANALYZE_DEAD_CODE':
-                    await this.handleAnalyzeDeadCode(message, sendResponse);
-                    break;
-
-                case 'CHECK_PR_COMPLIANCE':
-                    await this.handleCheckPRCompliance(message, sendResponse);
-                    break;
-
-                case 'GET_REVIEW_METRICS':
-                    await this.handleGetReviewMetrics(message, sendResponse);
-                    break;
-
-                case 'GENERATE_REPO_DOCS':
-                    await this.handleGenerateRepoDocs(message, sendResponse);
-                    break;
-
-                case 'FETCH_FULL_FILE':
-                    await this.handleFetchFullFile(message, sendResponse);
-                    break;
-
-                default:
-                    sendResponse({
-                        success: false,
-                        error: `Unknown message type: ${message.type}`
-                    });
-            }
-        } catch (error) {
-            this.errorHandler.logError('Background message handler', error);
-            sendResponse({
-                success: false,
-                error: this.getErrorMessage(error)
-            });
-        }
     }
 
     async handleGenerateTests(message, sendResponse, sender, isFromPopup = true) {
@@ -5337,168 +5130,208 @@ ${typeInstructions[type] || typeInstructions.sequence}
     }
 }
 
-// Initialize services
+// ─────────────────────────────────────────────────────────────────────────────
+// Service worker bootstrap
+// ─────────────────────────────────────────────────────────────────────────────
+
 let ragService = null;
 
-// Initialize BackgroundService ONCE at startup (not inside message listener)
 const backgroundServiceInstance = new BackgroundService();
 console.log('🚀 BackgroundService initialized at startup');
 
-// Listen for messages - single listener to avoid conflicts
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    handleMessage(request, sender, sendResponse, backgroundServiceInstance);
-    return true; // Keep channel open for async response
-});
+// ─── RAG handlers (module-scope; close over `ragService`) ────────────────────
 
-async function handleMessage(request, sender, sendResponse, serviceInstance) {
+async function handleInitRag(message, sendResponse) {
+    const payload = message.payload || {};
     try {
-        const { type, payload } = request;
+        const provider = payload.provider || 'openai';
 
-        switch (type) {
-            case 'INIT_RAG':
-                try {
-                    // IMPORTANT: Default to OpenAI in service worker context
-                    // Transformers.js requires DOM and won't work in service workers
-                    const provider = payload.provider || 'openai';
-                    const options = {
-                        provider,
-                        apiKey: payload.apiKey // Only needed for OpenAI
-                    };
-
-                    // Validate based on provider
-                    if (provider === 'openai' && !payload.apiKey) {
-                        sendResponse({ success: false, error: 'API Key required for OpenAI provider' });
-                        return;
-                    }
-
-                    // Warn if user tries to use Transformers in service worker
-                    if (provider === 'transformers') {
-                        console.warn('⚠️ Transformers.js is not supported in service worker context. This will fail.');
-                        sendResponse({
-                            success: false,
-                            error: 'Transformers.js requires DOM access and cannot run in service workers. Please use OpenAI embedding provider instead.'
-                        });
-                        return;
-                    }
-
-                    ragService = new RAGService(options);
-
-                    // Initialize RAG service
-                    await ragService.init((progress) => {
-                        if (progress) {
-                            chrome.runtime.sendMessage({ type: 'RAG_MODEL_PROGRESS', payload: progress }).catch(() => {
-                                // Ignore errors if popup is closed
-                            });
-                        }
-                    });
-
-                    // Link RAG service to ContextAnalyzer if instance exists
-                    if (serviceInstance && serviceInstance.contextAnalyzer) {
-                        serviceInstance.contextAnalyzer.setRagService(ragService);
-                    }
-
-                    sendResponse({
-                        success: true,
-                        providerInfo: ragService.getProviderInfo()
-                    });
-                } catch (error) {
-                    console.error('RAG initialization failed:', error);
-                    sendResponse({
-                        success: false,
-                        error: this.getErrorMessage(error) || 'Failed to initialize RAG service'
-                    });
-                }
-                break;
-
-            case 'INDEX_REPO':
-                if (!ragService) {
-                    sendResponse({ success: false, error: 'RAG Service not initialized' });
-                    return;
-                }
-                // Note: In a real extension, we'd need to fetch files here or pass them in
-                // For this demo, we assume files are passed in payload
-                await ragService.indexRepositoryIncremental(payload.repoId, payload.files, (progress) => {
-                    // Optional: Send progress updates back to UI via runtime.sendMessage
-                    chrome.runtime.sendMessage({ type: 'RAG_PROGRESS', payload: progress });
-                });
-                sendResponse({ success: true });
-                break;
-
-            case 'RETRIEVE_CONTEXT':
-                if (!ragService) {
-                    sendResponse({ success: false, error: 'RAG Service not initialized' });
-                    return;
-                }
-                const results = await ragService.retrieveContext(payload.repoId, payload.query);
-                sendResponse({ success: true, results });
-                break;
-
-            case 'CHECK_INDEXED':
-                if (!ragService) {
-                    sendResponse({ success: false, error: 'RAG Service not initialized' });
-                    return;
-                }
-                const isIndexed = await ragService.vectorStore.isIndexed(payload.repoId);
-                sendResponse({ success: true, isIndexed });
-                break;
-
-            case 'AUTO_INDEX_REPO':
-                try {
-                    const { url, provider, apiKey, token } = payload;
-
-                    // Initialize RAG if not already done
-                    if (!ragService) {
-                        ragService = new RAGService({ provider, apiKey });
-                        await ragService.init();
-                    }
-
-                    // Determine platform and fetch files
-                    let service;
-                    let repoId;
-
-                    if (url.includes('github.com')) {
-                        service = new GitHubService(token);
-                        repoId = service.getRepoId(url);
-                    } else if (url.includes('gitlab.com')) {
-                        service = new GitLabService(token);
-                        repoId = service.getRepoId(url);
-                    } else {
-                        sendResponse({ success: false, error: 'Unsupported platform' });
-                        return;
-                    }
-
-                    // Fetch repository files
-                    const files = await service.fetchRepositoryFiles(url, (progress) => {
-                        chrome.runtime.sendMessage({ type: 'AUTO_INDEX_PROGRESS', payload: progress });
-                    });
-
-                    // Index the repository
-                    await ragService.indexRepositoryIncremental(repoId, files, (progress) => {
-                        chrome.runtime.sendMessage({ type: 'RAG_PROGRESS', payload: progress });
-                    });
-
-                    sendResponse({ success: true, repoId, filesIndexed: files.length });
-                } catch (error) {
-                    console.error('Auto-index error:', error);
-                    sendResponse({ success: false, error: this.getErrorMessage(error) });
-                }
-                break;
-
-            // ... existing handlers ...
-            default:
-                // Delegate to BackgroundService for all other message types
-                if (serviceInstance && typeof serviceInstance.handleMessage === 'function') {
-                    await serviceInstance.handleMessage(request, sender, sendResponse);
-                } else {
-                    console.warn(`Unknown message type or handler not found: ${type}`);
-                    sendResponse({ success: false, error: `Unknown message type: ${type}` });
-                }
-                break;
+        if (provider === 'openai' && !payload.apiKey) {
+            sendResponse({ success: false, error: 'API Key required for OpenAI provider' });
+            return;
         }
+        if (provider === 'transformers') {
+            console.warn('⚠️ Transformers.js is not supported in service worker context.');
+            sendResponse({
+                success: false,
+                error: 'Transformers.js requires DOM access. Use OpenAI embedding provider, or run via the offscreen document.',
+            });
+            return;
+        }
+
+        ragService = new RAGService({ provider, apiKey: payload.apiKey });
+        await ragService.init((progress) => {
+            if (progress) {
+                chrome.runtime
+                    .sendMessage({ type: 'RAG_MODEL_PROGRESS', payload: progress })
+                    .catch(() => {});
+            }
+        });
+
+        if (backgroundServiceInstance && backgroundServiceInstance.contextAnalyzer) {
+            backgroundServiceInstance.contextAnalyzer.setRagService(ragService);
+        }
+
+        sendResponse({ success: true, providerInfo: ragService.getProviderInfo() });
     } catch (error) {
-        console.error('Background error:', error);
-        sendResponse({ success: false, error: this.getErrorMessage(error) });
+        console.error('RAG initialization failed:', error);
+        sendResponse({ success: false, error: error.message || 'Failed to initialize RAG service' });
     }
 }
 
-// BackgroundService is initialized above (line ~2904) before the message listener
+async function handleIndexRepo(message, sendResponse) {
+    if (!ragService) {
+        sendResponse({ success: false, error: 'RAG Service not initialized' });
+        return;
+    }
+    const { repoId, files } = message.payload || {};
+    await ragService.indexRepositoryIncremental(repoId, files, (progress) => {
+        chrome.runtime.sendMessage({ type: 'RAG_PROGRESS', payload: progress }).catch(() => {});
+    });
+    sendResponse({ success: true });
+}
+
+async function handleRetrieveContext(message, sendResponse) {
+    if (!ragService) {
+        sendResponse({ success: false, error: 'RAG Service not initialized' });
+        return;
+    }
+    const { repoId, query } = message.payload || {};
+    const results = await ragService.retrieveContext(repoId, query);
+    sendResponse({ success: true, results });
+}
+
+async function handleCheckIndexed(message, sendResponse) {
+    if (!ragService) {
+        sendResponse({ success: false, error: 'RAG Service not initialized' });
+        return;
+    }
+    const isIndexed = await ragService.vectorStore.isIndexed(message.payload?.repoId);
+    sendResponse({ success: true, isIndexed });
+}
+
+async function handleAutoIndexRepo(message, sendResponse) {
+    try {
+        const { url, provider, apiKey, token } = message.payload || {};
+
+        if (!ragService) {
+            ragService = new RAGService({ provider, apiKey });
+            await ragService.init();
+        }
+
+        let service;
+        let repoId;
+        if (url.includes('github.com')) {
+            service = new GitHubService(token);
+            repoId = service.getRepoId(url);
+        } else if (url.includes('gitlab.com')) {
+            service = new GitLabService(token);
+            repoId = service.getRepoId(url);
+        } else {
+            sendResponse({ success: false, error: 'Unsupported platform' });
+            return;
+        }
+
+        const files = await service.fetchRepositoryFiles(url, (progress) => {
+            chrome.runtime.sendMessage({ type: 'AUTO_INDEX_PROGRESS', payload: progress }).catch(() => {});
+        });
+
+        await ragService.indexRepositoryIncremental(repoId, files, (progress) => {
+            chrome.runtime.sendMessage({ type: 'RAG_PROGRESS', payload: progress }).catch(() => {});
+        });
+
+        sendResponse({ success: true, repoId, filesIndexed: files.length });
+    } catch (error) {
+        console.error('Auto-index error:', error);
+        sendResponse({ success: false, error: error.message || 'Auto-index failed' });
+    }
+}
+
+// ─── Handler registry ────────────────────────────────────────────────────────
+//
+// Each entry maps a message type to a function with signature
+//   (message, sendResponse, sender, ctx) => Promise<void>
+// Most entries are thin adapters around `BackgroundService` instance methods
+// whose argument order varies historically — this is the one place that knows
+// about that variance. New handlers should be registered next to their feature
+// module, not here.
+
+const svc = backgroundServiceInstance;
+
+registerHandlers({
+    // Test generation & chat
+    GENERATE_TESTS: (m, send, sender, ctx) => svc.handleGenerateTests(m, send, sender, ctx.isFromPopup),
+    CHAT_WITH_CODE: (m, send, sender) => svc.handleChatWithCode(m, send, sender),
+
+    // Settings & config
+    VALIDATE_API_KEY: (m, send) => svc.handleValidateApiKey(m, send),
+    SAVE_SETTINGS: (m, send) => svc.handleSaveSettings(m, send),
+    GET_SETTINGS: (m, send) => svc.handleGetSettings(m, send),
+
+    // Context & diff
+    ANALYZE_CONTEXT: (m, send) => svc.handleAnalyzeContext(m, send),
+    PROCESS_DIFF: (m, send) => svc.handleProcessDiff(m, send),
+    GET_PROGRESS: (m, send) => svc.handleGetProgress(m, send),
+    GET_TAB_ID: (m, send, sender) => svc.handleGetTabId(m, sender, send),
+
+    // Indexing
+    INDEX_REPOSITORY: (m, send, sender) => svc.handleIndexRepository(m, sender, send),
+    CHECK_INDEX_STATUS: (m, send) => svc.handleCheckIndexStatus(m, send),
+    CLEAR_INDEX: (m, send) => svc.handleClearIndex(m, send),
+    GET_INDEX_STATS: (m, send) => svc.handleGetIndexStats(m, send),
+    GET_INDEXED_REPOS: (m, send) => svc.handleGetIndexedRepos(m, send),
+    DELETE_REPO_INDEX: (m, send) => svc.handleDeleteRepoIndex(m, send),
+    CANCEL_REQUEST: (m, send) => svc.handleCancelRequest(m, send),
+
+    // PR review
+    ANALYZE_PULL_REQUEST: (m, send) => svc.handleAnalyzePullRequest(m, send),
+    GET_PR_SUMMARY: (m, send) => svc.handleGetPRSummary(m, send),
+    SECURITY_REVIEW_PR: (m, send) => svc.handleSecurityReviewPR(m, send),
+    REVIEW_TEST_AUTOMATION: (m, send) => svc.handleReviewTestAutomation(m, send),
+    ANALYZE_PR_WITH_STATIC_ANALYSIS: (m, send) => svc.handleAnalyzePRWithStaticAnalysis(m, send),
+    MULTI_PASS_PR_REVIEW: (m, send) => svc.handleMultiPassPRReview(m, send),
+    RUN_STATIC_ANALYSIS: (m, send) => svc.handleRunStaticAnalysis(m, send),
+
+    // PR threads
+    CREATE_PR_THREAD: (m, send) => svc.handleCreatePRThread(m, send),
+    GET_PR_THREAD: (m, send) => svc.handleGetPRThread(m, send),
+    SEND_THREAD_MESSAGE: (m, send) => svc.handleSendThreadMessage(m, send),
+    THREAD_QUICK_ACTION: (m, send) => svc.handleThreadQuickAction(m, send),
+    UPDATE_THREAD_STATUS: (m, send) => svc.handleUpdateThreadStatus(m, send),
+    GET_OR_CREATE_THREAD: (m, send) => svc.handleGetOrCreateThread(m, send),
+    GET_PR_SESSION: (m, send) => svc.handleGetPRSession(m, send),
+    POST_PR_REVIEW: (m, send) => svc.handlePostPRReview(m, send),
+
+    // Generators
+    GENERATE_PR_DESCRIPTION: (m, send) => svc.handleGeneratePRDescription(m, send),
+    GENERATE_MERMAID_DIAGRAM: (m, send) => svc.handleGenerateMermaidDiagram(m, send),
+    GENERATE_CHANGELOG: (m, send) => svc.handleGenerateChangelog(m, send),
+    GENERATE_REPO_MINDMAP: (m, send) => svc.handleGenerateRepoMindmap(m, send),
+    GENERATE_REPO_DIAGRAM: (m, send) => svc.handleGenerateRepoDiagram(m, send),
+    GENERATE_REPO_INFO: (m, send) => svc.handleGenerateRepoInfo(m, send),
+    GENERATE_REPO_DOCS: (m, send) => svc.handleGenerateRepoDocs(m, send),
+
+    // Learning, custom rules, analysis
+    RECORD_FINDING_ACTION: (m, send) => svc.handleRecordFindingAction(m, send),
+    GET_LEARNING_STATS: (m, send) => svc.handleGetLearningStats(m, send),
+    FETCH_CUSTOM_CONFIG: (m, send) => svc.handleFetchCustomConfig(m, send),
+    ANALYZE_IMPACT: (m, send) => svc.handleAnalyzeImpact(m, send),
+    ANALYZE_DEAD_CODE: (m, send) => svc.handleAnalyzeDeadCode(m, send),
+    CHECK_PR_COMPLIANCE: (m, send) => svc.handleCheckPRCompliance(m, send),
+    GET_REVIEW_METRICS: (m, send) => svc.handleGetReviewMetrics(m, send),
+    FETCH_FULL_FILE: (m, send) => svc.handleFetchFullFile(m, send),
+
+    // RAG (module-scope handlers)
+    INIT_RAG: handleInitRag,
+    INDEX_REPO: handleIndexRepo,
+    RETRIEVE_CONTEXT: handleRetrieveContext,
+    CHECK_INDEXED: handleCheckIndexed,
+    AUTO_INDEX_REPO: handleAutoIndexRepo,
+});
+
+// ─── Single onMessage listener ───────────────────────────────────────────────
+
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    dispatch(request, sender, sendResponse, { errorHandler: backgroundServiceInstance.errorHandler });
+    return true; // keep channel open for async response
+});
