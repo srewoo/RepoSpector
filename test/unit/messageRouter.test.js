@@ -179,6 +179,51 @@ describe('messageRouter — dispatch', () => {
         expect(fn.mock.calls[0][3].isFromPopup).toBe(true);
     });
 
+    it('floating-panel relay: content script with isFromPopup=true bypasses the content-script gate', async () => {
+        // Real-world case: src/content/index.js relays popup messages from
+        // the floating-panel iframe via chrome.runtime.sendMessage with
+        // `isFromPopup: true`. From the SW perspective sender.tab IS set
+        // (the call originated from a tab), but the message is logically a
+        // popup message and the handler must accept it.
+        const fn = jest.fn((m, send) => send({ success: true, ok: 1 }));
+        registerHandler('GET_SETTINGS', fn); // default: allowContentScript=false
+
+        const send = makeSendResponse();
+        await dispatch(
+            { type: 'GET_SETTINGS', isFromPopup: true },
+            {
+                id: 'test-extension-id',
+                tab: { id: 7, url: 'https://gitlab.com/mindtickle/foo/bar' },
+            },
+            send
+        );
+
+        expect(fn).toHaveBeenCalledTimes(1);
+        expect(send).toHaveBeenCalledWith({ success: true, ok: 1 });
+    });
+
+    it('floating-panel relay still enforces origin allow-list', async () => {
+        // isFromPopup must NOT let a malicious page bypass origin validation.
+        const fn = jest.fn();
+        registerHandler('GET_SETTINGS', fn);
+
+        const send = makeSendResponse();
+        await dispatch(
+            { type: 'GET_SETTINGS', isFromPopup: true },
+            {
+                id: 'test-extension-id',
+                tab: { id: 7, url: 'https://evil.example/page' },
+            },
+            send
+        );
+
+        expect(fn).not.toHaveBeenCalled();
+        expect(send).toHaveBeenCalledWith({
+            success: false,
+            error: expect.stringContaining('Disallowed content-script origin'),
+        });
+    });
+
     it('catches handler exceptions and responds with success:false', async () => {
         const errorHandler = { logError: jest.fn() };
         registerHandler('BOOM', () => {

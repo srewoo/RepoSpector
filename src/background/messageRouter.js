@@ -70,7 +70,7 @@ export function hasHandler(type) {
  * Validate that a message's sender is allowed to invoke a handler.
  * Returns null if allowed, or an error string if rejected.
  */
-function validateSender(sender, entry) {
+function validateSender(message, sender, entry) {
     // Only reject if sender.id is present AND mismatched. Some Chrome versions
     // omit sender.id for messages from the extension's own popup — treating
     // "absent" as "trusted (popup/SW)" matches Chrome's documented behavior.
@@ -78,18 +78,26 @@ function validateSender(sender, entry) {
         return 'Unauthorized sender (foreign extension)';
     }
 
-    // Content-script messages always have sender.tab. Verify the tab origin
-    // matches one of the patterns we ship a content script into.
+    // Content-script messages always have sender.tab. The tab origin still
+    // has to be on the allow-list — but the gate that says "this handler
+    // doesn't accept content-script messages" is bypassed when the message
+    // carries `isFromPopup: true`. That flag is set by content/index.js when
+    // it relays messages from the floating-panel iframe (the popup app
+    // rendered inside the host page). Those messages are popup-equivalent
+    // even though the transport is a content script.
     if (sender && sender.tab && sender.tab.url) {
-        if (!entry.allowContentScript) {
-            return `Handler does not accept content-script messages`;
-        }
+        const isPopupRelay = message && message.isFromPopup === true;
+
         try {
             const origin = new URL(sender.tab.url).origin;
             const ok = ALLOWED_CONTENT_ORIGIN_PATTERNS.some((re) => re.test(origin));
             if (!ok) return `Disallowed content-script origin: ${origin}`;
         } catch {
             return 'Malformed sender.tab.url';
+        }
+
+        if (!entry.allowContentScript && !isPopupRelay) {
+            return `Handler does not accept content-script messages`;
         }
     }
     return null;
@@ -115,7 +123,7 @@ export async function dispatch(message, sender, sendResponse, ctx = {}) {
         return;
     }
 
-    const rejection = validateSender(sender, entry);
+    const rejection = validateSender(message, sender, entry);
     if (rejection) {
         console.warn(`[messageRouter] Rejected ${message.type}: ${rejection}`);
         sendResponse({ success: false, error: rejection });
