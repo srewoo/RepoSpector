@@ -53,7 +53,7 @@ export class LLMService {
      * @returns {Promise<Object>} Response with content property
      */
     async streamChat(messages, options = {}) {
-        const { provider, model, apiKey, stream = false, onChunk, tabId } = options;
+        const { _provider, model, apiKey, stream = false, onChunk, tabId } = options;
 
         const requestData = {
             model: model || 'openai:gpt-4.1-mini',
@@ -294,7 +294,7 @@ export class LLMService {
      * Google Gemini API call
      */
     async callGoogle(requestData, apiKey, options = {}) {
-        const { streaming = false, onChunk = null, tabId = null, timeout = 120000 } = options;
+        const { streaming = false, _onChunk = null, _tabId = null, timeout = 120000 } = options;
         const modelId = requestData.model;
         const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
 
@@ -550,6 +550,7 @@ export class LLMService {
         let chunkCount = 0;
 
         try {
+            // eslint-disable-next-line no-constant-condition -- SSE reader loop, exits via break/return
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
@@ -606,6 +607,7 @@ export class LLMService {
         let chunkCount = 0;
 
         try {
+            // eslint-disable-next-line no-constant-condition -- SSE reader loop, exits via break/return
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
@@ -661,6 +663,7 @@ export class LLMService {
         let chunkCount = 0;
 
         try {
+            // eslint-disable-next-line no-constant-condition -- SSE reader loop, exits via break/return
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;

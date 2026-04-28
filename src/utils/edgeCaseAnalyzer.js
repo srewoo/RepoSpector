@@ -645,7 +645,7 @@ export function analyzeFunction(code) {
  * Build edge case prompt enhancements for test generation
  */
 export function buildEdgeCasePromptEnhancements(codeAnalysis) {
-    const { parameters, edgeCases, recommendations } = codeAnalysis;
+    const { _parameters, edgeCases, recommendations } = codeAnalysis;
 
     let prompt = '\n## Edge Cases to Test\n\n';
 

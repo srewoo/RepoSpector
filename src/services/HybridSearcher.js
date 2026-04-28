@@ -105,7 +105,7 @@ export class HybridSearcher {
             return cached;
         }
 
-        const results = [];
+        const _results = [];
         const expandedLimit = this.config.expandedLimit;
 
         // Perform keyword search (BM25) using text query
@@ -221,7 +221,7 @@ export class HybridSearcher {
         });
 
         // Calculate RRF scores
-        for (const [docId, entry] of fusedMap) {
+        for (const [_docId, entry] of fusedMap) {
             // RRF formula: 1 / (k + rank)
             const keywordRRF = entry.keywordRank
                 ? keywordWeight / (rrfK + entry.keywordRank)
@@ -236,7 +236,7 @@ export class HybridSearcher {
             const boosts = this.calculateBoosts(entry, query, boostFactors);
             entry.boosts = boosts;
 
-            for (const { factor, reason } of boosts) {
+            for (const { factor, _reason } of boosts) {
                 entry.fusedScore *= factor;
             }
         }

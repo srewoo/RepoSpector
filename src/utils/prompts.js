@@ -1401,7 +1401,7 @@ If significant refactoring would help:
 /**
  * Build test automation PR review prompt
  */
-export function buildTestAutomationPRReviewPrompt(prData, options = {}) {
+export function buildTestAutomationPRReviewPrompt(prData, _options = {}) {
     const testFiles = prData.files.filter(f =>
         /\.(test|spec|e2e|integration)\.(js|ts|jsx|tsx|py|java|rb)$/.test(f.filename) ||
         /tests?\//.test(f.filename) ||

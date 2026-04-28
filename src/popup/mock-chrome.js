@@ -11,10 +11,10 @@ if (!window.chrome.runtime) {
             return Promise.resolve({ success: true, data: 'Mock response' });
         },
         onMessage: {
-            addListener: (callback) => {
+            addListener: (_callback) => {
                 console.log('Mock onMessage listener added');
             },
-            removeListener: (callback) => {
+            removeListener: (_callback) => {
                 console.log('Mock onMessage listener removed');
             }
         }

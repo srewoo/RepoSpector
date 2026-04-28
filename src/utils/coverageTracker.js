@@ -116,7 +116,7 @@ export class CoverageTracker {
     /**
      * Validate that all functions have adequate test coverage
      */
-    validateCoverage(testResults) {
+    validateCoverage(_testResults) {
         console.log('🔍 Validating test coverage...');
 
         const missing = [];

@@ -81,7 +81,7 @@ export class BM25Index {
                 .replace(/([a-z])([A-Z])/g, '$1 $2')  // camelCase
                 .replace(/_/g, ' ')                     // snake_case
                 .replace(/\./g, ' ')                    // dot notation
-                .replace(/[{}()\[\];:,]/g, ' ');       // punctuation
+                .replace(/[{}()[\];:,]/g, ' ');       // punctuation
         }
 
         // Convert to lowercase unless preserving case

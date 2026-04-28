@@ -134,7 +134,7 @@ export class RelevanceScorer {
     /**
      * Score keyword/BM25 match (0-1)
      */
-    scoreKeywordMatch(result, query) {
+    scoreKeywordMatch(result, _query) {
         const keywordScore = result.keywordScore || result.bm25Score || 0;
 
         // BM25 scores can be unbounded, normalize

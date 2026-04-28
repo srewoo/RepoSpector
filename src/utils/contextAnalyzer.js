@@ -184,7 +184,7 @@ export class ContextAnalyzer {
         try {
             // GitHub: github.com/owner/repo
             if (platform === 'github' || url.includes('github.com')) {
-                const match = url.match(/github\.com\/([^\/]+)\/([^\/]+)/);
+                const match = url.match(/github\.com\/([^/]+)\/([^/]+)/);
                 if (match) {
                     const owner = match[1];
                     const repo = match[2].split(/[?#]/)[0].replace(/\.git$/, '');
@@ -206,7 +206,7 @@ export class ContextAnalyzer {
 
             // Bitbucket: bitbucket.org/owner/repo
             if (platform === 'bitbucket' || url.includes('bitbucket.org')) {
-                const match = url.match(/bitbucket\.org\/([^\/]+)\/([^\/]+)/);
+                const match = url.match(/bitbucket\.org\/([^/]+)\/([^/]+)/);
                 if (match) {
                     const owner = match[1];
                     const repo = match[2].split(/[?#]/)[0].replace(/\.git$/, '');
@@ -216,7 +216,7 @@ export class ContextAnalyzer {
 
             // Azure DevOps: dev.azure.com/org/project/_git/repo
             if (platform === 'azure' || url.includes('dev.azure.com')) {
-                const match = url.match(/dev\.azure\.com\/([^\/]+)\/([^\/]+)\/_git\/([^\/]+)/);
+                const match = url.match(/dev\.azure\.com\/([^/]+)\/([^/]+)\/_git\/([^/]+)/);
                 if (match) {
                     return `${match[1]}/${match[2]}/${match[3]}`;
                 }

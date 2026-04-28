@@ -358,7 +358,7 @@ export function smartExpand(query, context = {}) {
     const {
         language = 'javascript',
         fileType = null,
-        projectType = null
+        _projectType = null
     } = context;
 
     // Start with basic expansion

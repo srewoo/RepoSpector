@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, _useCallback } from 'react';
 
 // Helper function for mocking responses when not in an extension environment
 const mockResponse = async (type, payload) => {

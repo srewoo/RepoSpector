@@ -44,7 +44,7 @@ class OffscreenEmbeddingWorker {
                     sendResponse({ success: true, messageId: message.messageId });
                     break;
 
-                case 'GENERATE_EMBEDDINGS':
+                case 'GENERATE_EMBEDDINGS': {
                     const embeddings = await this.generateEmbeddings(message.texts);
                     sendResponse({
                         success: true,
@@ -52,6 +52,7 @@ class OffscreenEmbeddingWorker {
                         messageId: message.messageId
                     });
                     break;
+                }
 
                 case 'GET_STATUS':
                     sendResponse({
@@ -190,6 +191,6 @@ class OffscreenEmbeddingWorker {
 }
 
 // Initialize the worker
-const worker = new OffscreenEmbeddingWorker();
+const _worker = new OffscreenEmbeddingWorker();
 
 console.log('🚀 Offscreen embedding worker ready');

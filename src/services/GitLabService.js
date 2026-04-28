@@ -106,7 +106,7 @@ export class GitLabService {
 
         const patterns = [
             // With branch (tree or blob): gitlab.com/path/to/project/-/tree/branch or /-/blob/branch
-            /gitlab\.com\/(.+?)\/-\/(?:tree|blob)\/([^\/]+)/,
+            /gitlab\.com\/(.+?)\/-\/(?:tree|blob)\/([^/]+)/,
             // Without branch but with /-/: gitlab.com/path/to/project/-/
             /gitlab\.com\/(.+?)\/-\//,
             // Simple format: gitlab.com/path/to/project (no /-/)

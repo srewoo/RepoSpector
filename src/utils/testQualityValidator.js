@@ -8,7 +8,7 @@
  * - Best Practices (25 points)
  */
 
-import { validateSyntax, quickValidate } from './syntaxValidator.js';
+import { _validateSyntax, quickValidate } from './syntaxValidator.js';
 
 /**
  * Framework-specific patterns for test detection
@@ -407,7 +407,7 @@ function validateAssertions(code, patterns, result) {
 /**
  * Validate test coverage types
  */
-function validateCoverage(code, patterns, result, targetFunction, expectedCoverage) {
+function validateCoverage(code, patterns, result, _targetFunction, _expectedCoverage) {
     const coverage = result.breakdown.coverage;
 
     // Analyze test names and content for coverage types
@@ -520,14 +520,12 @@ function validateBestPractices(code, patterns, result, framework) {
     // Check test naming
     const testNames = extractTestNames(code, framework);
     let goodNames = 0;
-    let badNames = 0;
 
     for (const name of testNames) {
         const isGood = TEST_NAME_PATTERNS.good.some(p => p.test(name));
         const isBad = TEST_NAME_PATTERNS.bad.some(p => p.test(name));
 
         if (isGood && !isBad) goodNames++;
-        else if (isBad) badNames++;
     }
 
     if (testNames.length > 0) {
@@ -632,7 +630,7 @@ function extractTestContents(code) {
 /**
  * Extract test names
  */
-function extractTestNames(code, framework) {
+function extractTestNames(code, _framework) {
     const names = [];
 
     // JavaScript test names

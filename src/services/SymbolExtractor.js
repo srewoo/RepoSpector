@@ -283,7 +283,7 @@ export class SymbolExtractor {
             const line = lines[i];
 
             // class Name:
-            const classMatch = line.match(/^class\s+(\w+)\s*[\(:]?/);
+            const classMatch = line.match(/^class\s+(\w+)\s*[(:]?/);
             if (classMatch) {
                 const endLine = this._findPythonBlockEnd(lines, i);
                 symbols.push({
@@ -356,7 +356,7 @@ export class SymbolExtractor {
 
             // method declarations: modifiers returnType methodName(
             const methodMatch = trimmed.match(
-                /^(public\s+|private\s+|protected\s+)?(static\s+)?(final\s+)?(async\s+)?[\w<>\[\],\s]+\s+(\w+)\s*\([^)]*\)\s*(\{|throws)/
+                /^(public\s+|private\s+|protected\s+)?(static\s+)?(final\s+)?(async\s+)?[\w<>[\],\s]+\s+(\w+)\s*\([^)]*\)\s*(\{|throws)/
             );
             if (methodMatch && !trimmed.startsWith('if') && !trimmed.startsWith('return') &&
                 !trimmed.startsWith('new') && !trimmed.startsWith('for')) {
@@ -555,7 +555,7 @@ export class SymbolExtractor {
 
             // method: modifiers returnType MethodName(
             const methodMatch = trimmed.match(
-                /^(public\s+|private\s+|protected\s+|internal\s+)?(static\s+)?(async\s+)?(override\s+|virtual\s+)?[\w<>\[\],?\s]+\s+(\w+)\s*\([^)]*\)/
+                /^(public\s+|private\s+|protected\s+|internal\s+)?(static\s+)?(async\s+)?(override\s+|virtual\s+)?[\w<>[\],?\s]+\s+(\w+)\s*\([^)]*\)/
             );
             if (methodMatch && !trimmed.startsWith('if') && !trimmed.startsWith('return') &&
                 !trimmed.startsWith('var') && !trimmed.startsWith('new') &&

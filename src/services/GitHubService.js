@@ -103,9 +103,9 @@ export class GitHubService {
         console.log('🔍 Parsing GitHub URL:', url);
 
         const patterns = [
-            /github\.com\/([^\/]+)\/([^\/]+)\/blob\/([^\/]+)/,
-            /github\.com\/([^\/]+)\/([^\/]+)\/tree\/([^\/]+)/,
-            /github\.com\/([^\/]+)\/([^\/]+)/
+            /github\.com\/([^/]+)\/([^/]+)\/blob\/([^/]+)/,
+            /github\.com\/([^/]+)\/([^/]+)\/tree\/([^/]+)/,
+            /github\.com\/([^/]+)\/([^/]+)/
         ];
 
         for (const pattern of patterns) {

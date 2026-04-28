@@ -7,7 +7,7 @@ export const PR_SUMMARY_SYSTEM_PROMPT = `You are **RepoSpector**, an AI-powered 
 /**
  * Build prompt for AI-generated PR summary
  */
-export function buildPRSummaryGenerationPrompt(prData, staticSummary, options = {}) {
+export function buildPRSummaryGenerationPrompt(prData, staticSummary, _options = {}) {
     const fileCategories = categorizeFiles(prData.files || []);
     const commitMessages = (prData.commits || []).map(c => c.message).join('\n- ');
 
@@ -423,7 +423,7 @@ export function generateRepoMindmapCode(filePaths, repoId, importGraph) {
         // Large repo: show top N individually, collapse the rest into directory summary nodes
         const topN = totalFiles <= 200 ? 60 : 40;
         rankedFiles = sorted.slice(0, topN);
-        const selectedSet = new Set(rankedFiles);
+        const _selectedSet = new Set(rankedFiles);
 
         for (const fp of sorted.slice(topN)) {
             const parts = fp.split('/');
@@ -437,7 +437,7 @@ export function generateRepoMindmapCode(filePaths, repoId, importGraph) {
         }
     }
 
-    const selectedSet = new Set(rankedFiles);
+    const _selectedSet = new Set(rankedFiles);
 
     // --- Group individually-shown files by directory ---
     const dirGroups = {};
@@ -624,7 +624,7 @@ ${importSummary}
  * Build a condensed import graph summary for LLM context.
  * Shows the top connections without sending full file contents.
  */
-export function buildImportSummary(importGraph, filePaths) {
+export function buildImportSummary(importGraph, _filePaths) {
     if (!importGraph || importGraph.size === 0) return 'No import data available.';
 
     const connections = [];

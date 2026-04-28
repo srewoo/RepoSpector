@@ -8,7 +8,7 @@
 /**
  * Token types for basic lexing
  */
-const TOKEN_TYPES = {
+const _TOKEN_TYPES = {
     STRING: 'STRING',
     TEMPLATE: 'TEMPLATE',
     COMMENT: 'COMMENT',
@@ -24,7 +24,7 @@ const TOKEN_TYPES = {
 /**
  * JavaScript keywords
  */
-const KEYWORDS = new Set([
+const _KEYWORDS = new Set([
     'break', 'case', 'catch', 'continue', 'debugger', 'default', 'delete',
     'do', 'else', 'finally', 'for', 'function', 'if', 'in', 'instanceof',
     'new', 'return', 'switch', 'this', 'throw', 'try', 'typeof', 'var',
@@ -51,7 +51,7 @@ const CLOSING_BRACKETS = new Set(Object.values(BRACKET_PAIRS));
  */
 export function validateSyntax(code, options = {}) {
     const {
-        language = 'javascript',
+        _language = 'javascript',
         allowJSX = true,
         allowTypeScript = true,
         strictMode = false
@@ -237,7 +237,7 @@ function checkBracketMatching(code, result) {
  */
 function checkStringQuotes(code, result) {
     // Check for common quote issues
-    const mixedQuotes = /(['"])[^'"]*\1.*(['"])[^'"]*\2/g;
+    const _mixedQuotes = /(['"])[^'"]*\1.*(['"])[^'"]*\2/g;
     let singleQuoteCount = 0;
     let doubleQuoteCount = 0;
 
@@ -289,7 +289,7 @@ function checkSemicolons(code, result, strictMode) {
 
         // Check if line should end with semicolon
         if (/^(const|let|var|return|throw|break|continue)\b/.test(trimmed) ||
-            /^[a-zA-Z_$][a-zA-Z0-9_$]*\s*[=\(]/.test(trimmed)) {
+            /^[a-zA-Z_$][a-zA-Z0-9_$]*\s*[=(]/.test(trimmed)) {
             if (!trimmed.endsWith(';') && !trimmed.endsWith('{')) {
                 result.warnings.push({
                     type: 'MISSING_SEMICOLON',
@@ -311,7 +311,7 @@ function checkCommonSyntaxErrors(code, result) {
             check: (match, code, pos) => {
                 // Anonymous function without assignment
                 const before = code.slice(Math.max(0, pos - 50), pos);
-                return !/[=(\[,:][\s\n]*$/.test(before);
+                return !/[=([,:][\s\n]*$/.test(before);
             },
             error: 'Anonymous function without assignment',
             type: 'SYNTAX_ERROR'
@@ -532,7 +532,7 @@ function validateWithFunctionConstructor(code, result) {
     // Strip TypeScript-specific syntax for validation
     let jsCode = code
         // Remove type annotations
-        .replace(/:\s*[\w<>\[\]|&]+(?=\s*[,)=])/g, '')
+        .replace(/:\s*[\w<>[\]|&]+(?=\s*[,)=])/g, '')
         // Remove interface/type declarations
         .replace(/^(interface|type)\s+\w+.*?[};]/gms, '')
         // Remove generic parameters

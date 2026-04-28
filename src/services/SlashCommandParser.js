@@ -293,7 +293,7 @@ export class SlashCommandParser {
      */
     static buildPayload(parsed, context = {}) {
         const { command, handler, args, subcommand, options } = parsed;
-        const { repoId, tabUrl, tabId, isRepoIndexed, isPRPage } = context;
+        const { repoId, tabUrl, tabId, isRepoIndexed, _isPRPage } = context;
 
         switch (handler) {
             case 'GENERATE_REPO_MINDMAP':

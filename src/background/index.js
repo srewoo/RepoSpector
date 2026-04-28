@@ -427,20 +427,10 @@ class BackgroundService {
                             setTimeout(() => reject(new Error('Code extraction timed out after 10 seconds')), 10000);
                         });
 
-                        const extractionPromise = (async () => {
-                            let extractionResult;
-                            try {
-                                extractionResult = await chrome.tabs.sendMessage(tabId, {
-                                    type: 'EXTRACT_CODE',
-                                    options: {
-                                        contextLevel: options.contextLevel || 'smart'
-                                    }
-                                });
-                                return extractionResult;
-                            } catch (contentScriptError) {
-                                throw contentScriptError;
-                            }
-                        })();
+                        const extractionPromise = chrome.tabs.sendMessage(tabId, {
+                            type: 'EXTRACT_CODE',
+                            options: { contextLevel: options.contextLevel || 'smart' }
+                        });
 
                         return Promise.race([extractionPromise, timeoutPromise]);
                     };
@@ -1283,7 +1273,7 @@ class BackgroundService {
 
         // Detect if this is diff content (has + or - line prefixes indicating additions/deletions)
         const isDiffContent = processedCode.includes('\n+') || processedCode.includes('\n-') ||
-            processedCode.match(/^[\+\-]/m);
+            processedCode.match(/^[+-]/m);
 
         if (isDiffContent) {
             // Add the comprehensive code review prompt for diffs
@@ -1859,7 +1849,7 @@ Provide ONLY test descriptions and scenarios for ALL applicable test types. Orga
 Do NOT include actual test code implementation.`;
     }
 
-    buildAllTypesImplementationPrompt(options) {
+    buildAllTypesImplementationPrompt(_options) {
         return `
 **RESPONSE FORMAT:**
 Provide complete, runnable test code for ALL applicable test types using the appropriate testing framework for the detected language.
@@ -2148,6 +2138,7 @@ Return only the complete test code with proper syntax for the detected language,
         console.log('📍 handleStreamingResponse | isFromPopup:', options.isFromPopup, '| tabId:', tabId, '| requestId:', requestId);
 
         try {
+            // eslint-disable-next-line no-constant-condition -- streaming reader loop, exits via break/return
             while (true) {
                 const { done, value } = await reader.read();
 
@@ -3984,7 +3975,7 @@ Return only the complete test code with proper syntax for the detected language,
      */
     async handleGetOrCreateThread(message, sendResponse) {
         try {
-            const { sessionId, prIdentifier, finding } = message.data || message.payload || {};
+            const { _sessionId, prIdentifier, finding } = message.data || message.payload || {};
 
             if (!prIdentifier || !finding) {
                 sendResponse({ success: false, error: 'PR identifier and finding are required' });
@@ -4208,7 +4199,7 @@ Return only the complete test code with proper syntax for the detected language,
 
         // Check for unbalanced brackets in non-ER diagrams
         if (expectedType !== 'er') {
-            const opens = (code.match(/[\[({]/g) || []).length;
+            const opens = (code.match(/[[({]/g) || []).length;
             const closes = (code.match(/[\])}]/g) || []).length;
             if (Math.abs(opens - closes) > 2) {
                 errors.push(`Unbalanced brackets (${opens} opens vs ${closes} closes)`);
@@ -4281,13 +4272,13 @@ Return only the complete test code with proper syntax for the detected language,
             line = line.replace(/(-->|---|-\.->|==>)\|([^|]*?)(\s+\w+\s*$)/, '$1|$2|$3');
 
             // Skip edge-only lines (e.g. "A --> B")
-            if (/^\s*\w+\s*(-->|---|-\.->|==>|-.->|--)\s*\w+/.test(line) && !/[\[({\"]/.test(line)) {
+            if (/^\s*\w+\s*(-->|---|-\.->|==>|-.->|--)\s*\w+/.test(line) && !/[[({"]/.test(line)) {
                 return line;
             }
 
             // Fix node definitions where labels contain Mermaid-special characters.
             return line.replace(
-                /(\b[A-Za-z_]\w*)\s*([\[({])(\({0,2})(.*?)(\){0,2})([\])}])/g,
+                /(\b[A-Za-z_]\w*)\s*([[({])(\({0,2})(.*?)(\){0,2})([\])}])/g,
                 (match, id, open, extraOpen, label, extraClose, close) => {
                     if (label.startsWith('"') && label.endsWith('"')) return match;
                     const fullLabel = `${extraOpen}${label}${extraClose}`;
@@ -5122,7 +5113,7 @@ ${typeInstructions[type] || typeInstructions.sequence}
      * Handle repo documentation generation
      */
     async handleGenerateRepoDocs(message, sendResponse) {
-        const { repoId, url, docType = 'overview' } = message.payload || message.data || {};
+        const { repoId, _url, docType = 'overview' } = message.payload || message.data || {};
 
         try {
             if (!repoId) throw new Error('Repository ID is required');

@@ -91,7 +91,7 @@ function generateHeader(repoId) {
 > All information is extracted from indexed source code — no AI was used to generate this document.`;
 }
 
-function generateOverview(filePaths, fileContents, importGraph) {
+function generateOverview(filePaths, fileContents, _importGraph) {
     const totalFiles = filePaths.length;
     let totalLines = 0;
     const langCount = {};
@@ -559,7 +559,7 @@ function generateAPIReference(fileContents) {
     return md;
 }
 
-function generateEventSystem(fileContents, filePaths) {
+function generateEventSystem(fileContents, _filePaths) {
     const events = { topics: new Set(), producers: [], consumers: [], callbacks: [], eventClasses: [] };
 
     for (const [filePath, content] of fileContents) {
@@ -774,7 +774,7 @@ function generateDBSchemas(fileContents, filePaths) {
     return md.trim();
 }
 
-function generateExternalServices(fileContents, filePaths) {
+function generateExternalServices(fileContents, _filePaths) {
     const services = [];
     const urlPatterns = new Set();
 
@@ -983,7 +983,7 @@ function generateFileDependencyGraph(importGraph, filePaths) {
     return md.trim();
 }
 
-function generateConstantsAndEnums(fileContents, filePaths) {
+function generateConstantsAndEnums(fileContents, _filePaths) {
     const constants = [];
 
     for (const [filePath, content] of fileContents) {
@@ -1034,7 +1034,7 @@ function generateConstantsAndEnums(fileContents, filePaths) {
     return md.trim();
 }
 
-function generateErrorHandling(fileContents, filePaths) {
+function generateErrorHandling(fileContents, _filePaths) {
     const exceptions = [];
 
     for (const [filePath, content] of fileContents) {
@@ -1306,7 +1306,7 @@ function generateConfiguration(fileContents, filePaths) {
     for (const [, content] of fileContents) {
         if (!content) continue;
         for (const m of content.matchAll(/process\.env\.(\w+)/g)) envVars.add(m[1]);
-        for (const m of content.matchAll(/os\.(?:environ|getenv)\s*[\[(]\s*['"](\w+)['"]/g)) envVars.add(m[1]);
+        for (const m of content.matchAll(/os\.(?:environ|getenv)\s*[[(]\s*['"](\w+)['"]/g)) envVars.add(m[1]);
         for (const m of content.matchAll(/os\.environ\.get\s*\(\s*['"](\w+)['"]/g)) envVars.add(m[1]);
         for (const m of content.matchAll(/import\.meta\.env\.(\w+)/g)) envVars.add(m[1]);
     }
@@ -1425,7 +1425,7 @@ export function buildExtractedDataSummary(fileContents, importGraph, repoId) {
     if (importGraph) {
         for (const [fp, data] of importGraph) {
             if (!data?.imports) continue;
-            for (const imp of data.imports) {
+            for (const _imp of data.imports) {
                 connectionCount[fp] = (connectionCount[fp] || 0) + 1;
             }
         }

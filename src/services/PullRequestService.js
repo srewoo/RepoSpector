@@ -89,7 +89,7 @@ export class PullRequestService {
      */
     parsePullRequestUrl(url) {
         // GitHub PR: https://github.com/owner/repo/pull/123
-        const githubMatch = url.match(/github\.com\/([^\/]+)\/([^\/]+)\/pull\/(\d+)/);
+        const githubMatch = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
         if (githubMatch) {
             return {
                 platform: 'github',
@@ -100,7 +100,7 @@ export class PullRequestService {
         }
 
         // GitLab MR: https://gitlab.com/owner/repo/-/merge_requests/123
-        const gitlabMatch = url.match(/gitlab\.com\/([^\/]+)\/([^\/]+)\/-\/merge_requests\/(\d+)/);
+        const gitlabMatch = url.match(/gitlab\.com\/([^/]+)\/([^/]+)\/-\/merge_requests\/(\d+)/);
         if (gitlabMatch) {
             return {
                 platform: 'gitlab',

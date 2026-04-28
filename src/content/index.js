@@ -2573,7 +2573,7 @@ class FloatingPanelManager {
 }
 
 // Initialize floating panel manager
-const panelManager = new FloatingPanelManager();
+const _panelManager = new FloatingPanelManager();
 
 // Phase 2: inline PR-diff overlays. Inits only on PR/MR pages; no-ops elsewhere.
 try {

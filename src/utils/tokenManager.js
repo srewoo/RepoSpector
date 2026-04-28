@@ -73,7 +73,7 @@ export class TokenManager {
         let chars = text.length;
 
         // Code typically has more tokens per character due to syntax
-        const codePatterns = /[{}()\[\];,.]|function|const|let|var|class|import|export/g;
+        const codePatterns = /[{}()[\];,.]|function|const|let|var|class|import|export/g;
         const codeMatches = text.match(codePatterns);
         if (codeMatches && codeMatches.length > chars * 0.05) {
             // Likely code - use higher token ratio

@@ -687,11 +687,10 @@ export class BatchProcessor {
         }
 
         // Process items and yield as they complete
-        let processedCount = 0;
         const inFlight = new Set();
 
         for (const { item, batchIndex, itemIndex } of allItems) {
-            const { id, promise } = await processItem(item, batchIndex, itemIndex);
+            const { id, _promise } = await processItem(item, batchIndex, itemIndex);
             inFlight.add(id);
 
             // If at concurrency limit, wait for one to complete and yield it
@@ -700,8 +699,6 @@ export class BatchProcessor {
                 const result = await pendingPromises.get(completedId).promise;
                 pendingPromises.delete(completedId);
                 inFlight.delete(completedId);
-                processedCount++;
-
                 // Adjust concurrency based on performance
                 this.adjustConcurrency();
 
@@ -714,7 +711,6 @@ export class BatchProcessor {
             const completedId = await this.waitForAny(pendingPromises);
             const result = await pendingPromises.get(completedId).promise;
             pendingPromises.delete(completedId);
-            processedCount++;
             yield result;
         }
 

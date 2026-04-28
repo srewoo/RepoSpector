@@ -83,7 +83,7 @@ export class SemgrepAnalyzer {
         const lines = code.split('\n');
 
         // Run each enabled rule
-        for (const [ruleId, rule] of Object.entries(this.rules)) {
+        for (const [_ruleId, rule] of Object.entries(this.rules)) {
             if (!this.enabledCategories.has(rule.category)) continue;
 
             const ruleFindings = this.runSecurityRule(rule, code, lines, filePath, language);
@@ -166,7 +166,7 @@ export class SemgrepAnalyzer {
     /**
      * Calculate security-specific confidence score
      */
-    calculateSecurityConfidence(rule, patternDef, match, lineContent, fullCode, language) {
+    calculateSecurityConfidence(rule, patternDef, match, lineContent, fullCode, _language) {
         let confidence = SEVERITY_WEIGHTS[rule.severity] || 0.5;
 
         // Taint analysis: check for user input sources
@@ -283,7 +283,7 @@ export class SemgrepAnalyzer {
     /**
      * Enhance findings with data flow information
      */
-    enhanceWithDataFlow(findings, code, lines) {
+    enhanceWithDataFlow(findings, _code, _lines) {
         for (const finding of findings) {
             if (finding.taint.hasUserInput && finding.taint.sinks.length > 0) {
                 // Increase confidence for tainted data reaching sinks
@@ -315,7 +315,7 @@ export class SemgrepAnalyzer {
     /**
      * Get remediation advice for a finding
      */
-    getRemediation(ruleId, message) {
+    getRemediation(ruleId, _message) {
         const remediations = {
             'broken-access-control': 'Implement server-side authorization checks. Never trust client-side access control.',
             'weak-crypto': 'Use SHA-256 or better for hashing. Use AES-256-GCM for encryption. Use crypto.randomBytes() for random values.',

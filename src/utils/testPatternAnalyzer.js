@@ -178,7 +178,7 @@ function analyzeTestData(code) {
     const dataPatterns = [];
 
     // Factory functions
-    const factoryPatterns = /(?:const|function)\s+(create|make|build|generate)\w*\s*[=\(]/g;
+    const factoryPatterns = /(?:const|function)\s+(create|make|build|generate)\w*\s*[=(]/g;
     let match;
     while ((match = factoryPatterns.exec(code)) !== null) {
         dataPatterns.push({

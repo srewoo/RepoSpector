@@ -79,8 +79,6 @@ export class CustomRulesService {
         const lines = content.split('\n');
         let currentKey = null;
         let currentArray = null;
-        let currentObject = null;
-        let indent = 0;
 
         for (const rawLine of lines) {
             const line = rawLine.replace(/\r$/, '');
@@ -88,7 +86,7 @@ export class CustomRulesService {
             // Skip comments and empty lines
             if (line.trim().startsWith('#') || line.trim() === '') continue;
 
-            const lineIndent = line.search(/\S/);
+            const _lineIndent = line.search(/\S/);
 
             // Array item
             if (line.trim().startsWith('- ')) {
@@ -117,7 +115,6 @@ export class CustomRulesService {
                 if (kvIndent === 0) {
                     // Top-level key
                     currentKey = key;
-                    currentObject = null;
 
                     if (value.trim()) {
                         result[key] = this.parseValue(value.trim());
@@ -127,7 +124,6 @@ export class CustomRulesService {
                         result[key] = {};
                         currentArray = null;
                     }
-                    indent = 0;
                 } else if (kvIndent > 0 && currentKey) {
                     // Nested key
                     if (value.trim()) {

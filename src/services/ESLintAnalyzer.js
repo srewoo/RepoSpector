@@ -135,7 +135,7 @@ export class ESLintAnalyzer {
     /**
      * Calculate confidence score for a specific finding
      */
-    calculateRuleConfidence(rule, match, lineContent, fullCode) {
+    calculateRuleConfidence(rule, match, lineContent, _fullCode) {
         let confidence = SEVERITY_WEIGHTS[rule.severity] || 0.5;
 
         // Reduce confidence if in a comment

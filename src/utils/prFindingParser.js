@@ -11,7 +11,7 @@
  * @param {Object} prData - PR data for context
  * @returns {Array} Parsed findings
  */
-export function parseLLMAnalysis(analysisText, prData = {}) {
+export function parseLLMAnalysis(analysisText, _prData = {}) {
     if (!analysisText) return [];
 
     const findings = [];

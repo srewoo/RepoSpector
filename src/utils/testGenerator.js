@@ -81,7 +81,7 @@ export class TestGenerator {
     /**
      * Enhanced generateTestSuite with Smart AST Analysis, Multi-Framework Support, and Pattern Learning
      */
-    async generateEnhancedTestSuite(codeAnalysis, options = {}, context = {}) {
+    async generateEnhancedTestSuite(codeAnalysis, options = {}, _context = {}) {
         try {
             const {
                 testTypes = ['unit'],
@@ -512,7 +512,7 @@ export class TestGenerator {
      * Actual test generation happens via LLM in background service:
      * buildTestGenerationPrompt -> callOpenAI -> streaming response
      */
-    async generateExhaustiveFunctionTests(func, analysis, framework, options = {}) {
+    async generateExhaustiveFunctionTests(func, analysis, framework, _options = {}) {
         try {
             // Build comprehensive context for the function
             const context = this.buildFunctionTestContext(func, analysis);
@@ -1884,7 +1884,7 @@ async def test_${func.name}_async_performance():
         const testCases = [];
         const name = func.name;
         const params = func.params || [];
-        const paramList = params.map(p => p.name || p).join(', ');
+        const _paramList = params.map(p => p.name || p).join(', ');
 
         if (framework === 'pytest') {
             // Basic call test
@@ -2069,7 +2069,7 @@ async def test_${func.name}_async_performance():
         return imports;
     }
 
-    async generateTestUtilities(analysis, framework) {
+    async generateTestUtilities(_analysis, _framework) {
         return [
             '// Test utility functions',
             'function createMockData() { return {}; }',
@@ -2094,7 +2094,7 @@ async def test_${func.name}_async_performance():
         console.log('🔧 Attempting to improve test quality...');
 
         const functions = analysis.functions || [];
-        const classes = analysis.classes || [];
+        const _classes = analysis.classes || [];
         const framework = testSuite.framework || 'jest';
 
         // Collect existing test names to avoid duplicates
@@ -2175,35 +2175,35 @@ async def test_${func.name}_async_performance():
         };
     }
 
-    async generateTemplateBasedTests(func, context, framework) {
+    async generateTemplateBasedTests(_func, _context, _framework) {
         // DEPRECATED: Template-based tests removed
         // All tests must come from LLM via background service
         console.warn('⚠️ generateTemplateBasedTests called but template generation is disabled - use LLM');
         return [];
     }
 
-    generateEdgeCaseTests(func, context, framework) {
+    generateEdgeCaseTests(_func, _context, _framework) {
         // DEPRECATED: Template-based tests removed
         // All tests must come from LLM via background service
         console.warn('⚠️ generateEdgeCaseTests called but template generation is disabled - use LLM');
         return [];
     }
 
-    generateSecurityTests(func, context, framework) {
+    generateSecurityTests(_func, _context, _framework) {
         // DEPRECATED: Template-based tests removed
         // All tests must come from LLM via background service
         console.warn('⚠️ generateSecurityTests called but template generation is disabled - use LLM');
         return [];
     }
 
-    generatePerformanceTests(func, context, framework) {
+    generatePerformanceTests(_func, _context, _framework) {
         // DEPRECATED: Template-based tests removed
         // All tests must come from LLM via background service
         console.warn('⚠️ generatePerformanceTests called but template generation is disabled - use LLM');
         return [];
     }
 
-    generateMinimalTest(func, testType, framework) {
+    generateMinimalTest(func, testType, _framework) {
         // DEPRECATED: Template-based tests removed
         // All tests must come from LLM via background service
         console.warn('⚠️ generateMinimalTest called but template generation is disabled - use LLM');

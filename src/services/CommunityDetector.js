@@ -168,7 +168,7 @@ export class CommunityDetector {
                     if (candidateComm === currentComm) continue;
 
                     // Simplified modularity gain calculation
-                    const sumIn = this._communityInternalWeight(candidateComm, community, adj);
+                    const _sumIn = this._communityInternalWeight(candidateComm, community, adj);
                     const sumTot = this._communityTotalDegree(candidateComm, community, adj);
                     const kiIn = edgesToComm;
 
