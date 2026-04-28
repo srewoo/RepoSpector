@@ -5,6 +5,10 @@
  * Supports custom rules, ignore patterns, and severity overrides.
  */
 
+// Severity ordering used by the threshold filter. Lower index = lower
+// severity. Anything below the configured threshold is dropped.
+const SEVERITY_ORDER = ['info', 'low', 'medium', 'high', 'critical'];
+
 export class CustomRulesService {
     constructor() {
         this.configFileNames = ['.repospector.yaml', '.repospector.yml'];
@@ -186,9 +190,32 @@ export class CustomRulesService {
             rules: Array.isArray(config.rules) ? config.rules : [],
             settings: {
                 minConfidence: config.settings?.minConfidence || null,
-                severityThreshold: config.settings?.severityThreshold || null
+                // Findings below this severity are filtered out.
+                // One of: critical, high, medium, low, info.
+                severityThreshold: config.settings?.severityThreshold || null,
+                // Pin the LLM provider/model for this repo, e.g. "openai:gpt-4.1-mini".
+                // Overrides the user's global setting when present.
+                model: config.settings?.model || null,
+                // Enable diff-anchored review (default true). Setting to false
+                // restores whole-file review behavior. Almost no one wants this.
+                diffAnchored: config.settings?.diffAnchored !== false
             }
         };
+    }
+
+    /**
+     * Filter findings whose severity is below the configured threshold.
+     */
+    applySeverityThreshold(findings, config) {
+        const threshold = config?.settings?.severityThreshold;
+        if (!threshold) return findings;
+        const order = SEVERITY_ORDER;
+        const min = order.indexOf(String(threshold).toLowerCase());
+        if (min < 0) return findings;
+        return findings.filter((f) => {
+            const idx = order.indexOf(String(f.severity || 'info').toLowerCase());
+            return idx >= min;
+        });
     }
 
     /**
@@ -293,6 +320,9 @@ export class CustomRulesService {
         if (config.settings?.minConfidence) {
             result = result.filter(f => (f.confidence || 0) >= config.settings.minConfidence);
         }
+
+        // Apply severity floor (drop findings below threshold)
+        result = this.applySeverityThreshold(result, config);
 
         return result;
     }

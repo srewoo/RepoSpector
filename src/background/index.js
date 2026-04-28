@@ -67,6 +67,7 @@ import { CodeGraphPipeline } from '../services/CodeGraphPipeline.js';
 import { ReviewMetricsService } from '../services/ReviewMetricsService.js';
 import { PRComplianceChecker } from '../services/PRComplianceChecker.js';
 import { FindingCache } from '../services/FindingCache.js';
+import { TelemetryService } from '../services/TelemetryService.js';
 import { dispatch, registerHandlers } from './messageRouter.js';
 
 class BackgroundService {
@@ -101,6 +102,7 @@ class BackgroundService {
             this.eolService = new EOLService({ cacheTTL: 604800000 });
             this.adaptiveLearningService = new AdaptiveLearningService();
             this.findingCache = new FindingCache();
+            this.telemetry = new TelemetryService();
             this.customRulesService = new CustomRulesService();
             this.pullRequestService = new PullRequestService();
             this.staticAnalysisService = new StaticAnalysisService({
@@ -2854,6 +2856,7 @@ Return only the complete test code with proper syntax for the detected language,
      * Analyze a Pull Request with comprehensive code review
      */
     async handleAnalyzePullRequest(message, sendResponse) {
+        const startedAt = Date.now();
         try {
             const { prUrl, options = {} } = message.data || message.payload || {};
 
@@ -2946,6 +2949,13 @@ Return only the complete test code with proper syntax for the detected language,
             // Get LLM settings
             const settings = await this.getStoredSettings();
 
+            // Apply repo-pinned model from .repospector.yaml if present.
+            const pinnedModel = options.customConfig?.settings?.model;
+            const effectiveModel = pinnedModel || settings.model;
+            if (pinnedModel && pinnedModel !== settings.model) {
+                console.log(`🎯 Using model pinned by .repospector.yaml: ${pinnedModel}`);
+            }
+
             // Stream the analysis
             const response = await this.llmService.streamChat(
                 [
@@ -2954,11 +2964,22 @@ Return only the complete test code with proper syntax for the detected language,
                 ],
                 {
                     provider: settings.provider,
-                    model: settings.model,
+                    model: effectiveModel,
                     apiKey: settings.apiKey,
                     stream: false // For now, return full response
                 }
             );
+
+            // Telemetry: record this run (no-op when telemetry is disabled).
+            try {
+                await this.telemetry.record({
+                    kind: 'pr_review',
+                    durationMs: Date.now() - startedAt,
+                    tokensIn: response.usage?.prompt_tokens || 0,
+                    tokensOut: response.usage?.completion_tokens || 0,
+                    model: effectiveModel,
+                });
+            } catch (e) { /* never let telemetry break a review */ }
 
             sendResponse({
                 success: true,
@@ -4739,6 +4760,40 @@ ${typeInstructions[type] || typeInstructions.sequence}
         }
     }
 
+    // ─── Phase 6: telemetry (opt-in, local-only) ────────────────────────────
+
+    async handleGetTelemetry(message, sendResponse) {
+        try {
+            const enabled = await this.telemetry.isEnabled();
+            const summary = await this.telemetry.getSummary();
+            sendResponse({ success: true, data: { enabled, summary } });
+        } catch (error) {
+            this.errorHandler.logError('Get telemetry', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
+    async handleSetTelemetryEnabled(message, sendResponse) {
+        try {
+            const { enabled } = message.payload || message.data || {};
+            await this.telemetry.setEnabled(!!enabled);
+            sendResponse({ success: true });
+        } catch (error) {
+            this.errorHandler.logError('Set telemetry enabled', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
+    async handleClearTelemetry(message, sendResponse) {
+        try {
+            await this.telemetry.clear();
+            sendResponse({ success: true });
+        } catch (error) {
+            this.errorHandler.logError('Clear telemetry', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
     // ─── Phase 3: incremental review cache ──────────────────────────────────
 
     async handleLookupFindingCache(message, sendResponse) {
@@ -4826,6 +4881,11 @@ ${typeInstructions[type] || typeInstructions.sequence}
                 filePath,
                 findingMessage
             });
+
+            // Telemetry: bump the FP-rate proxy when a finding is dismissed.
+            if (action === 'dismissed') {
+                try { await this.telemetry.recordDismissal('pr_review'); } catch { /* ignore */ }
+            }
 
             sendResponse({ success: true });
         } catch (error) {
@@ -5479,6 +5539,11 @@ registerHandlers({
     LOOKUP_FINDING_CACHE: (m, send) => svc.handleLookupFindingCache(m, send),
     PUT_FINDING_CACHE: (m, send) => svc.handlePutFindingCache(m, send),
     CLEAR_FINDING_CACHE: (m, send) => svc.handleClearFindingCache(m, send),
+
+    // Phase 6: telemetry (opt-in, local-only)
+    GET_TELEMETRY: (m, send) => svc.handleGetTelemetry(m, send),
+    SET_TELEMETRY_ENABLED: (m, send) => svc.handleSetTelemetryEnabled(m, send),
+    CLEAR_TELEMETRY: (m, send) => svc.handleClearTelemetry(m, send),
 });
 
 // ─── Single onMessage listener ───────────────────────────────────────────────
