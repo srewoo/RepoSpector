@@ -6,7 +6,10 @@ import { CodePreview } from './CodePreview';
 import { TokenUsageIndicator } from './TokenUsageIndicator';
 import { TypingIndicator } from './TypingIndicator';
 import { MarkdownRenderer } from './ui/MarkdownRenderer';
-import { MermaidDiagram } from './ui/MermaidDiagram';
+// Lazy: keeps mermaid + react-zoom-pan-pinch out of the popup's first paint.
+const MermaidDiagram = React.lazy(() =>
+    import('./ui/MermaidDiagram').then((m) => ({ default: m.MermaidDiagram }))
+);
 import { cn } from '@/lib/utils';
 import { useExtension } from '@/hooks/useExtension';
 import { conversationHistory } from '@/services/conversationHistory';
@@ -1233,7 +1236,9 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                             {/* Mermaid mindmap rendering */}
                             {msg.type === 'mindmap' && msg.mermaidCode && (
                                 <div className="animate-fade-in mt-2">
-                                    <MermaidDiagram code={msg.mermaidCode} fallbackCode={msg.fallbackCode} className="rounded-lg" />
+                                    <React.Suspense fallback={<div className="text-xs text-textMuted p-2">Loading diagram…</div>}>
+                                        <MermaidDiagram code={msg.mermaidCode} fallbackCode={msg.fallbackCode} className="rounded-lg" />
+                                    </React.Suspense>
                                 </div>
                             )}
 

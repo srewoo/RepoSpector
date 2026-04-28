@@ -11,12 +11,19 @@ const STORAGE_KEY = 'repospector_conversation_history';
 const SESSION_KEY = 'repospector_session_id';
 
 export class ConversationHistoryManager {
-    constructor() {
+    /**
+     * @param {object} [opts]
+     * @param {number} [opts.maxContextTokens] - Override for the prune budget.
+     *   Defaults to MAX_CONTEXT_TOKENS. Useful in tests so a small fixture
+     *   can exercise the pruning path without generating 32K of text.
+     */
+    constructor(opts = {}) {
         this.currentHistory = [];
         this.sessionId = null;
         this.codeContext = null;
         this.initialized = false;
         this.tokenizer = encodingForModel('gpt-4.1-mini');
+        this.maxContextTokens = opts.maxContextTokens ?? MAX_CONTEXT_TOKENS;
     }
 
     /**
@@ -191,19 +198,22 @@ export class ConversationHistoryManager {
     pruneHistoryByTokens(history) {
         let totalTokens = 0;
         const pruned = [];
+        const limit = this.maxContextTokens;
 
-        // Process from most recent to oldest
+        // Process from most recent to oldest. Stop the moment we'd exceed
+        // the budget — earlier code "skipped" individual messages but kept
+        // walking, which let smaller older messages sneak in after a large
+        // recent one and silently push the total above the limit.
         for (let i = history.length - 1; i >= 0; i--) {
             const msg = history[i];
             const msgTokens = this.countTokens(msg.content);
 
-            if (totalTokens + msgTokens <= MAX_CONTEXT_TOKENS) {
-                pruned.unshift(msg);
-                totalTokens += msgTokens;
-            } else {
-                // Skip this message if adding it would exceed token limit
-                console.log(`⚠️ Pruning message ${msg.id} to stay within token limit`);
+            if (totalTokens + msgTokens > limit) {
+                console.log(`⚠️ Pruning at message ${msg.id}: token budget reached (${totalTokens}/${limit})`);
+                break;
             }
+            pruned.unshift(msg);
+            totalTokens += msgTokens;
         }
 
         return pruned;

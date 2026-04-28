@@ -44,31 +44,25 @@ describe('ConversationHistoryManager', () => {
         expect(tokens).toBeLessThan(10);
     });
 
-    // FIXME: pruning currently leaves ~9.6k tokens against an 8k budget.
-    // Pre-existing bug uncovered when CI was added (Phase 1). Tracked as a
-    // follow-up — re-enable once the pruner respects the limit strictly.
-    test.skip('should prune history based on token limit', async () => {
-        await manager.initialize();
+    test('should prune history based on token limit', async () => {
+        // Use a small budget so the test doesn't need to generate 32K of
+        // text to exercise the pruning path.
+        const tightManager = new ConversationHistoryManager({ maxContextTokens: 8000 });
+        await tightManager.initialize();
 
-        // Create a long message that exceeds the limit if repeated enough
-        const longText = "This is a test message. ".repeat(100); // ~500 tokens
-        const msgTokens = manager.countTokens(longText);
-
-        // Add enough messages to exceed 8000 tokens
+        const longText = 'This is a test message. '.repeat(100); // ~500 tokens
+        const msgTokens = tightManager.countTokens(longText);
         const numMessages = Math.ceil(8000 / msgTokens) + 2;
 
         for (let i = 0; i < numMessages; i++) {
-            await manager.addMessage({
-                id: i,
-                role: 'user',
-                content: longText
-            });
+            await tightManager.addMessage({ id: i, role: 'user', content: longText });
         }
 
-        const formattedHistory = manager.getFormattedHistory(false);
-
-        // Calculate total tokens in formatted history
-        const totalTokens = formattedHistory.reduce((sum, msg) => sum + manager.countTokens(msg.content), 0);
+        const formattedHistory = tightManager.getFormattedHistory(false);
+        const totalTokens = formattedHistory.reduce(
+            (sum, msg) => sum + tightManager.countTokens(msg.content),
+            0
+        );
 
         expect(totalTokens).toBeLessThanOrEqual(8000);
         expect(formattedHistory.length).toBeLessThan(numMessages);

@@ -29,7 +29,10 @@ import { FindingThread } from './FindingThread';
 import { StaticAnalysisResults } from './StaticAnalysisResults';
 import { PRQuickActions } from './QuickActions';
 import { MarkdownRenderer } from './ui/MarkdownRenderer';
-import { MermaidDiagram } from './ui/MermaidDiagram';
+// Lazy: keeps mermaid + react-zoom-pan-pinch out of the popup's first paint.
+const MermaidDiagram = React.lazy(() =>
+    import('./ui/MermaidDiagram').then((m) => ({ default: m.MermaidDiagram }))
+);
 import { copyToClipboard } from '../utils/clipboard';
 
 export function PRReviewInterface({
@@ -885,7 +888,9 @@ export function PRReviewInterface({
                                     </div>
                                 </CardHeader>
                                 <CardContent>
-                                    <MermaidDiagram code={generatedMermaid} />
+                                    <React.Suspense fallback={<div className="text-xs text-textMuted p-2">Loading diagram…</div>}>
+                                        <MermaidDiagram code={generatedMermaid} />
+                                    </React.Suspense>
                                 </CardContent>
                             </Card>
                         )}

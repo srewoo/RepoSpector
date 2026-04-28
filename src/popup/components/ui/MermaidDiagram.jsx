@@ -1,12 +1,28 @@
-import React, { useEffect, useRef, useState } from 'react';
-import mermaid from 'mermaid';
+import React, { useEffect, useRef, useState, Suspense, lazy } from 'react';
 import { Download, ZoomIn, ZoomOut, Maximize } from 'lucide-react';
-import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch';
+
+// Lazy-load mermaid (~2 MB) and react-zoom-pan-pinch only when this component
+// actually renders. Without these dynamic imports, every popup open paid for
+// the diagram libraries even when no diagram was on screen.
+const TransformWrapper = lazy(() =>
+    import('react-zoom-pan-pinch').then((m) => ({ default: m.TransformWrapper }))
+);
+const TransformComponent = lazy(() =>
+    import('react-zoom-pan-pinch').then((m) => ({ default: m.TransformComponent }))
+);
+
+let mermaidPromise = null;
+function getMermaid() {
+    if (!mermaidPromise) {
+        mermaidPromise = import('mermaid').then((m) => m.default || m);
+    }
+    return mermaidPromise;
+}
 
 let mermaidInitialized = false;
-
-function initMermaid() {
+async function initMermaid() {
     if (mermaidInitialized) return;
+    const mermaid = await getMermaid();
     mermaid.initialize({
         startOnLoad: false,
         theme: 'dark',
@@ -172,6 +188,8 @@ export function MermaidDiagram({ code, fallbackCode, className = '' }) {
             try {
                 setError(null);
                 setUsedFallback(false);
+                await initMermaid();
+                const mermaid = await getMermaid();
                 const id = `mermaid-${++renderCounter}`;
                 const sanitized = sanitizeMermaidCode(code.trim());
                 const { svg } = await mermaid.render(id, sanitized);
@@ -181,6 +199,7 @@ export function MermaidDiagram({ code, fallbackCode, className = '' }) {
                 // Automatic fallback to code-generated version
                 if (fallbackCode) {
                     try {
+                        const mermaid = await getMermaid();
                         const fbId = `mermaid-${++renderCounter}`;
                         const fbSanitized = sanitizeMermaidCode(fallbackCode.trim());
                         const { svg } = await mermaid.render(fbId, fbSanitized);
@@ -206,6 +225,7 @@ export function MermaidDiagram({ code, fallbackCode, className = '' }) {
         <div className={className}>
             {svgContent ? (
                 <div className="relative rounded-lg bg-[#0f172a] overflow-hidden group border border-[#334155]">
+                  <Suspense fallback={<div className="p-6 text-textMuted text-sm">Loading viewer…</div>}>
                     <TransformWrapper
                         initialScale={1}
                         minScale={0.1}
@@ -236,6 +256,7 @@ export function MermaidDiagram({ code, fallbackCode, className = '' }) {
                             </>
                         )}
                     </TransformWrapper>
+                  </Suspense>
                 </div>
             ) : error ? (
                 <div className="space-y-2">
