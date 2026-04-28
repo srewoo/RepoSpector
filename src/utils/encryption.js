@@ -55,14 +55,28 @@ export class EncryptionService {
             // Check if we have a stored salt
             const stored = await chrome.storage.local.get(['encryptionSalt', 'keyVersion']);
             let salt = stored.encryptionSalt;
+            const storedVersion = stored.keyVersion || 0;
 
-            if (!salt) {
-                // Generate new salt
+            // keyVersion 3 = stable fingerprint (no timezone/UA/screen). Older
+            // versions had unstable fingerprints; rotate the salt when we see
+            // an old version so we re-derive cleanly. Existing ciphertext
+            // becomes un-decryptable, but it was already lost the moment the
+            // user crossed a DST boundary or updated Chrome. The
+            // self-healing decrypt path clears the broken blobs and prompts
+            // the user to re-enter their key.
+            const TARGET_VERSION = 3;
+            if (!salt || storedVersion < TARGET_VERSION) {
                 salt = this.generateSecureRandom(32);
                 await chrome.storage.local.set({
                     encryptionSalt: Array.from(salt),
-                    keyVersion: 2 // New encryption version
+                    keyVersion: TARGET_VERSION,
                 });
+                if (storedVersion > 0 && storedVersion < TARGET_VERSION) {
+                    console.warn(
+                        `[encryption] Migrating keyVersion ${storedVersion} → ${TARGET_VERSION}. ` +
+                        `Stored credentials will need to be re-entered once.`
+                    );
+                }
             } else {
                 salt = new Uint8Array(salt);
             }
@@ -111,61 +125,42 @@ export class EncryptionService {
     }
 
     /**
-     * Generate comprehensive browser fingerprint
+     * Generate a stable browser fingerprint for key derivation.
+     *
+     * IMPORTANT: every component included here participates in the master
+     * key. If any of them changes after credentials have been encrypted, the
+     * stored ciphertext can never be decrypted again. Past versions of this
+     * code included `Date.getTimezoneOffset()` and `screen.width/height`
+     * which silently rotated the master key on DST transitions and on
+     * resolution changes — corrupting users' stored API keys twice a year.
+     *
+     * What we keep:
+     *   - `navigator.platform` — stable per device
+     *   - `navigator.language` — stable per profile
+     *   - A constant version tag so future fingerprint changes can be
+     *     migrated cleanly via `keyVersion` in storage.
+     *
+     * What we removed (do NOT add back without a migration plan):
+     *   - `Date.getTimezoneOffset()` — changes with DST
+     *   - `screen.*` — changes when the user plugs in a monitor
+     *   - `navigator.userAgent` — changes with Chrome auto-updates
+     *   - Canvas / WebGL fingerprints — vary between DOM and SW contexts
+     *
+     * Result: low-entropy on purpose. The salt (`encryptionSalt`, 32 bytes)
+     * provides the actual entropy. The fingerprint just pins the key to
+     * "this profile on this device" so the salt alone isn't sufficient.
      */
     async generateBrowserFingerprint() {
-        const components = [];
+        const components = [
+            'rs-fp-v3',
+            navigator.platform || 'unknown',
+            navigator.language || 'en',
+        ];
 
-        // Basic browser info
-        components.push(navigator.userAgent || 'unknown');
-        components.push(navigator.language || 'en');
-        components.push(navigator.platform || 'unknown');
-        components.push((typeof screen !== 'undefined' ? screen.width + 'x' + screen.height : '1920x1080'));
-        components.push(new Date().getTimezoneOffset().toString());
-
-        // Canvas fingerprinting (if available and in DOM context)
-        try {
-            if (typeof document !== 'undefined') {
-                const canvas = document.createElement('canvas');
-                const ctx = canvas.getContext('2d');
-                ctx.textBaseline = 'top';
-                ctx.font = '14px Arial';
-                ctx.fillText('RepoSpector fingerprint', 2, 2);
-                components.push(canvas.toDataURL());
-            } else {
-                components.push('canvas-serviceworker');
-            }
-        } catch (error) {
-            components.push('canvas-unavailable');
-        }
-
-        // WebGL fingerprinting (if available and in DOM context)
-        try {
-            if (typeof document !== 'undefined') {
-                const canvas = document.createElement('canvas');
-                const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-                if (gl) {
-                    const renderer = gl.getParameter(gl.RENDERER);
-                    const vendor = gl.getParameter(gl.VENDOR);
-                    components.push(`${vendor}-${renderer}`);
-                } else {
-                    components.push('webgl-unavailable');
-                }
-            } else {
-                components.push('webgl-serviceworker');
-            }
-        } catch (error) {
-            components.push('webgl-unavailable');
-        }
-
-        const fingerprint = components.join('|');
-
-        // Hash the fingerprint for consistency
         const encoder = new TextEncoder();
-        const data = encoder.encode(fingerprint);
+        const data = encoder.encode(components.join('|'));
         const hashBuffer = await this.getCrypto().subtle.digest('SHA-256', data);
         const hashArray = Array.from(new Uint8Array(hashBuffer));
-
         return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
     }
 
@@ -282,8 +277,17 @@ export class EncryptionService {
             return result;
 
         } catch (error) {
-            console.error('AES decryption failed:', error);
-            this.logAuditEvent('decrypt_failed', { error: error.message });
+            // OperationError here is overwhelmingly "the master key changed"
+            // (Chrome update, DST transition on old fingerprint, manual
+            // settings clear, …). It is not a programmer error and we have
+            // a recovery path: getStoredSettings catches this and clears
+            // the offending key. So we downgrade to a single-line warn with
+            // an actionable message, instead of a noisy console.error stack.
+            const reason = error?.name === 'OperationError'
+                ? 'master key changed since this value was encrypted (re-enter API keys in Settings)'
+                : (error?.message || 'unknown error');
+            console.warn('[encryption] decrypt failed —', reason);
+            this.logAuditEvent('decrypt_failed', { error: reason });
             throw error;
         }
     }

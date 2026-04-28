@@ -2394,16 +2394,37 @@ Return only the complete test code with proper syntax for the detected language,
         // Decrypt all sensitive keys
         const sensitiveKeys = ['apiKey', 'githubToken', 'gitlabToken', 'anthropicApiKey', 'googleApiKey', 'cohereApiKey', 'mistralApiKey', 'groqApiKey', 'huggingfaceApiKey'];
 
+        // Track keys whose ciphertext is unreadable so we can wipe them from
+        // storage in one write. Without this, every getStoredSettings() call
+        // re-attempts decryption of the same bad blob and re-logs the
+        // failure forever.
+        const corruptKeys = [];
+
         for (const key of sensitiveKeys) {
             if (settings[key]) {
                 try {
                     const decrypted = await this.encryptionService.decrypt(settings[key]);
-                    console.log(`✅ Decrypted ${key}, length: ${decrypted?.length || 0}`);
                     settings[key] = decrypted;
-                } catch (decryptError) {
-                    console.warn(`❌ Failed to decrypt ${key} in getStoredSettings, clearing it`, decryptError);
+                } catch (_decryptError) {
+                    // Already logged once by EncryptionService at warn level
+                    // with an actionable reason. Self-heal: drop the value.
                     settings[key] = '';
+                    corruptKeys.push(key);
                 }
+            }
+        }
+
+        if (corruptKeys.length > 0) {
+            console.warn(
+                `[settings] Cleared ${corruptKeys.length} unreadable credential(s): ${corruptKeys.join(', ')}. ` +
+                `Re-enter them in Settings.`
+            );
+            const persisted = { ...(result.aiRepoSpectorSettings || {}) };
+            for (const k of corruptKeys) delete persisted[k];
+            try {
+                await chrome.storage.local.set({ aiRepoSpectorSettings: persisted });
+            } catch (e) {
+                console.warn('[settings] Failed to persist cleared credentials:', e?.message);
             }
         }
 
