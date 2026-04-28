@@ -172,6 +172,57 @@ export class AdaptiveLearningService {
     }
 
     /**
+     * Summarise rules the user has repeatedly dismissed in a repo, suitable
+     * for inclusion in an LLM prompt as soft "deprioritise these" guidance.
+     *
+     * Returns at most `limit` entries, sorted by dismissal count desc. Each
+     * entry includes the most recent dismissed-finding message as a sample
+     * so the model can recognise the pattern beyond the rule ID alone.
+     *
+     * Threshold matches `dismissalThreshold` so we only surface rules the
+     * user has explicitly flagged as noise (default ≥ 3).
+     */
+    async getDismissedRulesSummary(repoId, limit = 10) {
+        await this.initialize();
+
+        return new Promise((resolve, reject) => {
+            const tx = this.db.transaction(this.storeName, 'readonly');
+            const store = tx.objectStore(this.storeName);
+            const index = store.index('repoId');
+            const range = IDBKeyRange.only(repoId);
+
+            const byRule = new Map(); // ruleId → { count, lastSample, lastTs }
+            const request = index.openCursor(range);
+
+            request.onsuccess = (event) => {
+                const cursor = event.target.result;
+                if (cursor) {
+                    if (cursor.value.action === 'dismissed') {
+                        const k = cursor.value.ruleId;
+                        const entry = byRule.get(k) || { count: 0, sample: null, lastTs: 0 };
+                        entry.count++;
+                        if ((cursor.value.timestamp || 0) > entry.lastTs) {
+                            entry.lastTs = cursor.value.timestamp || 0;
+                            entry.sample = cursor.value.findingMessage || entry.sample;
+                        }
+                        byRule.set(k, entry);
+                    }
+                    cursor.continue();
+                } else {
+                    const out = [...byRule.entries()]
+                        .filter(([, v]) => v.count >= this.dismissalThreshold)
+                        .sort((a, b) => b[1].count - a[1].count)
+                        .slice(0, limit)
+                        .map(([ruleId, v]) => ({ ruleId, count: v.count, sample: v.sample }));
+                    resolve(out);
+                }
+            };
+
+            request.onerror = (e) => reject(e.target.error);
+        });
+    }
+
+    /**
      * Get statistics for a repo
      */
     async getStats(repoId) {

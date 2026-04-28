@@ -673,7 +673,13 @@ export function buildPRAnalysisPrompt(prData, options = {}) {
         includeTestAnalysis = true,
         ragContext = null,
         repoDocumentation = null,
-        repoDocSources = []
+        repoDocSources = [],
+        // Adaptive learning: rules the user has repeatedly dismissed in this
+        // repo. We tell the model to deprioritise (not suppress) them so it
+        // doesn't drown the review in patterns the team has already rejected.
+        // Suppression is too aggressive — false positives often cluster, and
+        // a one-line nudge in the prompt outperforms a hard filter.
+        dismissedRules = []
     } = options;
 
     // Prioritize files by risk score before truncating
@@ -704,8 +710,16 @@ ${f.patch || 'No patch available'}
         ).join('\n')
         : 'No inline comments yet';
 
-    let prompt = `## Pull Request Analysis
+    // Adaptive-learning context: list rules the user has repeatedly dismissed
+    // in this repo. Top of prompt (high salience) but framed as a soft signal.
+    const dismissedSection = dismissedRules.length > 0
+        ? `\n### Repo Reviewer Preferences (from past feedback)
+The following rule patterns have been **dismissed ${dismissedRules.map(r => r.count).join('+')} times** in this repository. The team has reviewed and rejected these. Deprioritise findings of these types — only flag if you are highly confident this specific instance is a real, novel issue (severity ≥ high). Do not suppress entirely:
+${dismissedRules.map(r => `- \`${r.ruleId}\`${r.sample ? ` (e.g. "${r.sample.substring(0, 80)}")` : ''} — dismissed ${r.count}×`).join('\n')}\n`
+        : '';
 
+    let prompt = `## Pull Request Analysis
+${dismissedSection}
 ### PR Information
 - **Title**: ${prData.title}
 - **Author**: ${prData.author?.login || 'Unknown'}

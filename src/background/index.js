@@ -2904,6 +2904,20 @@ Return only the complete test code with proper syntax for the detected language,
                 }
             }
 
+            // Adaptive-learning context: rules the user has dismissed in this
+            // repo. Passed to the prompt so the model deprioritises patterns
+            // the team has already rejected.
+            let dismissedRules = [];
+            try {
+                dismissedRules = await this.adaptiveLearningService
+                    .getDismissedRulesSummary(repoId, 10);
+                if (dismissedRules.length > 0) {
+                    console.log(`🧠 AdaptiveLearning: ${dismissedRules.length} dismissed rule patterns for ${repoId}`);
+                }
+            } catch (e) {
+                console.warn('AdaptiveLearning summary unavailable:', e.message);
+            }
+
             // Detect if this is a test automation repo/PR
             const isTestAutomationPR = this.isTestAutomationPR(prData);
 
@@ -2914,7 +2928,8 @@ Return only the complete test code with proper syntax for the detected language,
             const contextWithDocs = {
                 ragContext,
                 repoDocumentation: repoDocumentation?.found ? repoDocumentation.content : null,
-                repoDocSources: repoDocumentation?.found ? repoDocumentation.sources : []
+                repoDocSources: repoDocumentation?.found ? repoDocumentation.sources : [],
+                dismissedRules
             };
 
             if (isTestAutomationPR && options.mode !== 'general') {
@@ -3301,12 +3316,21 @@ Return only the complete test code with proper syntax for the detected language,
                 systemPrompt = PR_ANALYSIS_SYSTEM_PROMPT;
                 userPrompt = buildSecurityReviewPrompt(prData, highRiskFiles);
             } else {
+                // Adaptive-learning context (same as standard analyze path).
+                let dismissedRules = [];
+                try {
+                    dismissedRules = await this.adaptiveLearningService
+                        .getDismissedRulesSummary(repoId, 10);
+                } catch (e) {
+                    console.warn('AdaptiveLearning summary unavailable:', e.message);
+                }
                 systemPrompt = PR_ANALYSIS_SYSTEM_PROMPT;
                 userPrompt = buildPRAnalysisPrompt(prData, {
                     focusAreas: options.focusAreas || ['security', 'bugs', 'performance', 'style'],
                     maxFilesToReview: options.maxFiles || 100,
                     includeTestAnalysis: options.includeTestAnalysis !== false,
-                    ragContext
+                    ragContext,
+                    dismissedRules
                 });
             }
 
