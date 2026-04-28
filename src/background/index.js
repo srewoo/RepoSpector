@@ -66,6 +66,7 @@ import { MultiPassReviewEngine } from '../services/MultiPassReviewEngine.js';
 import { CodeGraphPipeline } from '../services/CodeGraphPipeline.js';
 import { ReviewMetricsService } from '../services/ReviewMetricsService.js';
 import { PRComplianceChecker } from '../services/PRComplianceChecker.js';
+import { FindingCache } from '../services/FindingCache.js';
 import { dispatch, registerHandlers } from './messageRouter.js';
 
 class BackgroundService {
@@ -99,6 +100,7 @@ class BackgroundService {
             this.osvService = new OSVService({ cacheTTL: 86400000 });
             this.eolService = new EOLService({ cacheTTL: 604800000 });
             this.adaptiveLearningService = new AdaptiveLearningService();
+            this.findingCache = new FindingCache();
             this.customRulesService = new CustomRulesService();
             this.pullRequestService = new PullRequestService();
             this.staticAnalysisService = new StaticAnalysisService({
@@ -4722,6 +4724,57 @@ ${typeInstructions[type] || typeInstructions.sequence}
         }
     }
 
+    // ─── Phase 3: incremental review cache ──────────────────────────────────
+
+    async handleLookupFindingCache(message, sendResponse) {
+        try {
+            const { prInfo, hunks } = message.payload || message.data || {};
+            if (!prInfo || !Array.isArray(hunks)) {
+                sendResponse({ success: false, error: 'prInfo and hunks[] required' });
+                return;
+            }
+            const { hits, misses } = await this.findingCache.lookup(prInfo, hunks);
+            // Map<string, findings[]> isn't structured-cloneable in some
+            // runtimes — convert to a plain object before responding.
+            const hitsObj = {};
+            hits.forEach((v, k) => { hitsObj[k] = v; });
+            sendResponse({ success: true, data: { hits: hitsObj, misses } });
+        } catch (error) {
+            this.errorHandler.logError('Lookup finding cache', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
+    async handlePutFindingCache(message, sendResponse) {
+        try {
+            const { prInfo, entries } = message.payload || message.data || {};
+            if (!prInfo || !Array.isArray(entries)) {
+                sendResponse({ success: false, error: 'prInfo and entries[] required' });
+                return;
+            }
+            await this.findingCache.putMany(prInfo, entries);
+            sendResponse({ success: true });
+        } catch (error) {
+            this.errorHandler.logError('Put finding cache', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
+    async handleClearFindingCache(message, sendResponse) {
+        try {
+            const { prInfo } = message.payload || message.data || {};
+            if (!prInfo) {
+                sendResponse({ success: false, error: 'prInfo required' });
+                return;
+            }
+            await this.findingCache.clearPR(prInfo);
+            sendResponse({ success: true });
+        } catch (error) {
+            this.errorHandler.logError('Clear finding cache', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
     async handlePostInlineComment(message, sendResponse) {
         try {
             const { prUrl, path, line, body } = message.payload || message.data || {};
@@ -5406,6 +5459,11 @@ registerHandlers({
     EXPLAIN_HUNK: { fn: (m, send) => svc.handleExplainHunk(m, send), allowContentScript: true },
     SUGGEST_FIX_HUNK: { fn: (m, send) => svc.handleSuggestFixHunk(m, send), allowContentScript: true },
     POST_INLINE_COMMENT: { fn: (m, send) => svc.handlePostInlineComment(m, send), allowContentScript: true },
+
+    // Phase 3: incremental review cache
+    LOOKUP_FINDING_CACHE: (m, send) => svc.handleLookupFindingCache(m, send),
+    PUT_FINDING_CACHE: (m, send) => svc.handlePutFindingCache(m, send),
+    CLEAR_FINDING_CACHE: (m, send) => svc.handleClearFindingCache(m, send),
 });
 
 // ─── Single onMessage listener ───────────────────────────────────────────────
