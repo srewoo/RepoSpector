@@ -75,6 +75,7 @@ PRs. Last updated: 2026-04-28.
 | Task | Notes |
 |---|---|
 | Floating-panel popup relay rejected by router | Origin gate added in Phase 1 was rejecting popup-relay messages (the floating panel renders the popup React app inside a host page and relays via `chrome.runtime.sendMessage` with `isFromPopup: true`). Reported on `gitlab.com/mindtickle/...` as "Failed to load settings" at popup.js:372. Fix: `validateSender` now treats `isFromPopup: true` as bypassing the per-handler `allowContentScript` gate, while still enforcing the origin allow-list so a malicious page can't escalate. 2 new router tests cover both branches. |
+| AES master key rotating on DST / Chrome updates | User saw "AES decryption failed: [object DOMException]" after the extension had been working. The PBKDF2 fingerprint feeding the master key included `Date.getTimezoneOffset()` (flips twice a year), `navigator.userAgent` (every Chrome auto-update), `screen.*` (any monitor change), and Canvas/WebGL (different in DOM vs SW). Any of those changing silently invalidated every stored credential. Fix: stabilized the fingerprint to `{platform, language, version-tag}` with the 32-byte salt providing entropy; bumped `keyVersion` to 3 with a one-time migration warning; downgraded the noisy `console.error` to a `console.warn` with an actionable "re-enter your API keys" message; made `getStoredSettings` self-heal by deleting unreadable ciphertext from storage so the failure stops repeating. |
 
 ### Phase 1 follow-ups ✅
 
