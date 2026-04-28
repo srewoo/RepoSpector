@@ -70,6 +70,12 @@ PRs. Last updated: 2026-04-28.
 | Telemetry wired into the analyze path | Every PR review records a run; every dismissal bumps the most-recent `pr_review` run's `dismissed` counter. Errors swallowed — telemetry never breaks a review. |
 | Three telemetry handlers | `GET_TELEMETRY`, `SET_TELEMETRY_ENABLED`, `CLEAR_TELEMETRY`. |
 
+### Hotfixes ✅
+
+| Task | Notes |
+|---|---|
+| Floating-panel popup relay rejected by router | Origin gate added in Phase 1 was rejecting popup-relay messages (the floating panel renders the popup React app inside a host page and relays via `chrome.runtime.sendMessage` with `isFromPopup: true`). Reported on `gitlab.com/mindtickle/...` as "Failed to load settings" at popup.js:372. Fix: `validateSender` now treats `isFromPopup: true` as bypassing the per-handler `allowContentScript` gate, while still enforcing the origin allow-list so a malicious page can't escalate. 2 new router tests cover both branches. |
+
 ### Phase 1 follow-ups ✅
 
 | Task | Notes |
