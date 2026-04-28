@@ -7,6 +7,7 @@ import { CodeChunker } from '../utils/chunking.js';
 import { DiffParser } from '../utils/diffParser.js';
 import { CODE_SELECTORS, SUPPORTED_LANGUAGES as _SUPPORTED_LANGUAGES } from '../utils/constants.js';
 import { Sanitizer } from '../utils/sanitizer.js';
+import { initDiffOverlay } from './diffOverlay.js';
 
 // Note: Services are now initialized as instance properties in the ContentExtractor class
 
@@ -2572,4 +2573,15 @@ class FloatingPanelManager {
 }
 
 // Initialize floating panel manager
-const panelManager = new FloatingPanelManager(); 
+const panelManager = new FloatingPanelManager();
+
+// Phase 2: inline PR-diff overlays. Inits only on PR/MR pages; no-ops elsewhere.
+try {
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => initDiffOverlay());
+    } else {
+        initDiffOverlay();
+    }
+} catch (e) {
+    console.warn('[RepoSpector] diff overlay init failed:', e);
+} 

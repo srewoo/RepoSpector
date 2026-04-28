@@ -4669,6 +4669,79 @@ ${typeInstructions[type] || typeInstructions.sequence}
         }
     }
 
+    // ─── Phase 2: hunk-level actions invoked by content-script overlay ──────
+
+    async _runHunkPrompt(systemPrompt, userPrompt) {
+        const settings = await this.getStoredSettings();
+        const response = await this.llmService.streamChat(
+            [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: userPrompt }
+            ],
+            {
+                provider: settings.provider,
+                model: settings.model,
+                apiKey: settings.apiKey,
+                stream: false
+            }
+        );
+        return response.content || response;
+    }
+
+    async handleExplainHunk(message, sendResponse) {
+        try {
+            const { code, language, file } = message.payload || message.data || {};
+            if (!code) {
+                sendResponse({ success: false, error: 'code is required' });
+                return;
+            }
+            const sys = 'You are a senior code reviewer. Explain what a code change does in 3-5 sentences. Focus on intent, side effects, and risk. Plain prose, no headings.';
+            const user = `File: ${file || 'unknown'}\nLanguage: ${language || 'unknown'}\n\nDiff hunk:\n\`\`\`\n${code}\n\`\`\`\n\nExplain this change.`;
+            const text = await this._runHunkPrompt(sys, user);
+            sendResponse({ success: true, text });
+        } catch (error) {
+            this.errorHandler.logError('Explain hunk', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
+    async handleSuggestFixHunk(message, sendResponse) {
+        try {
+            const { code, language, file } = message.payload || message.data || {};
+            if (!code) {
+                sendResponse({ success: false, error: 'code is required' });
+                return;
+            }
+            const sys = 'You are a senior code reviewer. Identify the single most important issue in this diff hunk and propose a concrete fix. Format: 1-line problem statement, then a minimal corrected code snippet, then 1-line rationale. If there is no real issue, say "No issues found." and stop.';
+            const user = `File: ${file || 'unknown'}\nLanguage: ${language || 'unknown'}\n\nDiff hunk:\n\`\`\`\n${code}\n\`\`\``;
+            const text = await this._runHunkPrompt(sys, user);
+            sendResponse({ success: true, text });
+        } catch (error) {
+            this.errorHandler.logError('Suggest fix hunk', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
+    async handlePostInlineComment(message, sendResponse) {
+        try {
+            const { prUrl, path, line, body } = message.payload || message.data || {};
+            if (!prUrl || !path || !body || !line) {
+                sendResponse({ success: false, error: 'prUrl, path, line, body all required' });
+                return;
+            }
+            await this.updatePRServiceTokens();
+            const result = await this.pullRequestService.postReview(prUrl, {
+                summary: '',
+                inlineComments: [{ path, line, body }],
+                event: 'COMMENT'
+            });
+            sendResponse({ success: true, data: result });
+        } catch (error) {
+            this.errorHandler.logError('Post inline comment', error);
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
     async handleRecordFindingAction(message, sendResponse) {
         try {
             const { ruleId, repoId, action, filePath, findingMessage } = message.data || message.payload || {};
@@ -5327,6 +5400,12 @@ registerHandlers({
     RETRIEVE_CONTEXT: handleRetrieveContext,
     CHECK_INDEXED: handleCheckIndexed,
     AUTO_INDEX_REPO: handleAutoIndexRepo,
+
+    // Phase 2: content-script-invoked hunk actions. allowContentScript=true
+    // because these are triggered by the inline overlay on PR pages.
+    EXPLAIN_HUNK: { fn: (m, send) => svc.handleExplainHunk(m, send), allowContentScript: true },
+    SUGGEST_FIX_HUNK: { fn: (m, send) => svc.handleSuggestFixHunk(m, send), allowContentScript: true },
+    POST_INLINE_COMMENT: { fn: (m, send) => svc.handlePostInlineComment(m, send), allowContentScript: true },
 });
 
 // ─── Single onMessage listener ───────────────────────────────────────────────
