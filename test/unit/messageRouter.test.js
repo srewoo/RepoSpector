@@ -202,6 +202,54 @@ describe('messageRouter — dispatch', () => {
         expect(send).toHaveBeenCalledWith({ success: true, ok: 1 });
     });
 
+    it('extension-page iframe (sender.url = chrome-extension://OUR_ID/...) is trusted even without isFromPopup flag', async () => {
+        // The floating panel embeds the popup page as a chrome-extension://
+        // iframe inside a host page. Chrome sets sender.tab on messages from
+        // that iframe even though it's our own page. Trusting sender.url is
+        // what lets handlers like SAVE_SETTINGS work without every caller
+        // remembering to add isFromPopup: true.
+        const fn = jest.fn((m, send) => send({ success: true }));
+        registerHandler('SAVE_SETTINGS', fn); // default: allowContentScript=false
+
+        const send = makeSendResponse();
+        await dispatch(
+            { type: 'SAVE_SETTINGS', data: { settings: {} } },
+            {
+                id: 'test-extension-id',
+                tab: { id: 7, url: 'https://gitlab.com/foo/bar' },
+                url: 'chrome-extension://test-extension-id/src/popup/index.html?mode=iframe',
+            },
+            send
+        );
+
+        expect(fn).toHaveBeenCalledTimes(1);
+        expect(send).toHaveBeenCalledWith({ success: true });
+    });
+
+    it('a forged sender.url to a foreign extension is rejected by the id check before the URL trust path', async () => {
+        // Defense in depth: the id check fires first, so even if Chrome
+        // somehow populated a foreign sender.url we'd still reject because
+        // sender.id mismatches. This test pins that ordering.
+        const fn = jest.fn();
+        registerHandler('SAVE_SETTINGS', fn);
+
+        const send = makeSendResponse();
+        await dispatch(
+            { type: 'SAVE_SETTINGS' },
+            {
+                id: 'evil-extension',
+                url: 'chrome-extension://test-extension-id/src/popup/index.html', // forged
+            },
+            send
+        );
+
+        expect(fn).not.toHaveBeenCalled();
+        expect(send).toHaveBeenCalledWith({
+            success: false,
+            error: expect.stringContaining('Unauthorized sender'),
+        });
+    });
+
     it('floating-panel relay still enforces origin allow-list', async () => {
         // isFromPopup must NOT let a malicious page bypass origin validation.
         const fn = jest.fn();

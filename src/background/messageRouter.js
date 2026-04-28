@@ -78,13 +78,25 @@ function validateSender(message, sender, entry) {
         return 'Unauthorized sender (foreign extension)';
     }
 
-    // Content-script messages always have sender.tab. The tab origin still
-    // has to be on the allow-list — but the gate that says "this handler
-    // doesn't accept content-script messages" is bypassed when the message
-    // carries `isFromPopup: true`. That flag is set by content/index.js when
-    // it relays messages from the floating-panel iframe (the popup app
-    // rendered inside the host page). Those messages are popup-equivalent
-    // even though the transport is a content script.
+    // ── Extension-page origin trust ───────────────────────────────────────
+    // If the message originates from our own extension's URL space (popup,
+    // options, embedded iframe like the floating panel), it is fully
+    // trusted regardless of `sender.tab`. Chrome populates `sender.tab` for
+    // extension pages embedded as iframes inside host pages, which used to
+    // make those messages look like content-script messages and trip the
+    // per-handler gate below. Checking `sender.url` is the canonical way to
+    // distinguish our own pages from arbitrary content scripts.
+    const ownOrigin = `chrome-extension://${chrome.runtime.id}/`;
+    if (sender && typeof sender.url === 'string' && sender.url.startsWith(ownOrigin)) {
+        return null;
+    }
+
+    // Content-script messages always have sender.tab AND a non-extension URL.
+    // The tab origin still has to be on the allow-list — but the gate that
+    // says "this handler doesn't accept content-script messages" is bypassed
+    // when the message carries `isFromPopup: true`. That flag is set by
+    // content/index.js when it relays messages from the floating-panel
+    // iframe (older path, kept for backwards compatibility).
     if (sender && sender.tab && sender.tab.url) {
         const isPopupRelay = message && message.isFromPopup === true;
 
