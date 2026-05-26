@@ -815,32 +815,40 @@ export function Settings({ onClose }) {
 
                     {enableTelemetry && (
                         <div className="space-y-3">
-                            {telemetrySummary ? (
+                            {telemetrySummary && telemetrySummary.runs > 0 ? (
                                 <div className="bg-surface rounded-lg p-3 space-y-2 text-xs">
                                     <div className="grid grid-cols-2 gap-2">
                                         <div>
                                             <p className="text-textMuted">Total Reviews</p>
-                                            <p className="font-medium text-text">{telemetrySummary.totalRuns ?? 0}</p>
+                                            <p className="font-medium text-text">{telemetrySummary.runs ?? 0}</p>
                                         </div>
                                         <div>
                                             <p className="text-textMuted">Total Cost</p>
-                                            <p className="font-medium text-text">${(telemetrySummary.totalCostUsd ?? 0).toFixed(4)}</p>
+                                            <p className="font-medium text-text">${(telemetrySummary.costUsd ?? 0).toFixed(4)}</p>
                                         </div>
                                         <div>
                                             <p className="text-textMuted">Latency p50</p>
-                                            <p className="font-medium text-text">{telemetrySummary.p50Ms != null ? `${(telemetrySummary.p50Ms / 1000).toFixed(1)}s` : '—'}</p>
+                                            <p className="font-medium text-text">{telemetrySummary.latency?.p50 > 0 ? `${(telemetrySummary.latency.p50 / 1000).toFixed(1)}s` : '—'}</p>
                                         </div>
                                         <div>
                                             <p className="text-textMuted">Latency p95</p>
-                                            <p className="font-medium text-text">{telemetrySummary.p95Ms != null ? `${(telemetrySummary.p95Ms / 1000).toFixed(1)}s` : '—'}</p>
+                                            <p className="font-medium text-text">{telemetrySummary.latency?.p95 > 0 ? `${(telemetrySummary.latency.p95 / 1000).toFixed(1)}s` : '—'}</p>
                                         </div>
                                         <div>
                                             <p className="text-textMuted">FP Rate</p>
-                                            <p className="font-medium text-text">{telemetrySummary.fpRate != null ? `${(telemetrySummary.fpRate * 100).toFixed(0)}%` : '—'}</p>
+                                            <p className="font-medium text-text">{(telemetrySummary.findings?.dismissed ?? 0) > 0 ? `${((telemetrySummary.findings.fpRate ?? 0) * 100).toFixed(0)}%` : '—'}</p>
                                         </div>
                                         <div>
                                             <p className="text-textMuted">Findings Kept</p>
-                                            <p className="font-medium text-text">{telemetrySummary.totalFindingsKept ?? 0}</p>
+                                            <p className="font-medium text-text">{telemetrySummary.findings?.kept ?? 0}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-textMuted">Tokens (in / out)</p>
+                                            <p className="font-medium text-text">{(telemetrySummary.tokens?.in ?? 0).toLocaleString()} / {(telemetrySummary.tokens?.out ?? 0).toLocaleString()}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-textMuted">Dismissed</p>
+                                            <p className="font-medium text-text">{telemetrySummary.findings?.dismissed ?? 0}</p>
                                         </div>
                                     </div>
                                 </div>

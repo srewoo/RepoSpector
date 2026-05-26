@@ -205,7 +205,13 @@ export class LLMService {
             }
 
             const data = await response.json();
-            return data.choices[0]?.message?.content || '';
+            return {
+                content: data.choices[0]?.message?.content || '',
+                usage: {
+                    input: data.usage?.prompt_tokens ?? 0,
+                    output: data.usage?.completion_tokens ?? 0,
+                },
+            };
         } finally {
             if (options.requestId) {
                 this.activeRequests.delete(options.requestId);
@@ -282,7 +288,13 @@ export class LLMService {
             const data = await response.json();
             // Anthropic returns content as an array of content blocks
             const textBlocks = data.content?.filter(block => block.type === 'text') || [];
-            return textBlocks.map(block => block.text).join('') || '';
+            return {
+                content: textBlocks.map(block => block.text).join('') || '',
+                usage: {
+                    input: data.usage?.input_tokens ?? 0,
+                    output: data.usage?.output_tokens ?? 0,
+                },
+            };
         } finally {
             if (options.requestId) {
                 this.activeRequests.delete(options.requestId);
@@ -354,11 +366,18 @@ export class LLMService {
 
             const data = await response.json();
             const candidates = data.candidates || [];
+            const usage = {
+                input: data.usageMetadata?.promptTokenCount ?? 0,
+                output: data.usageMetadata?.candidatesTokenCount ?? 0,
+            };
             if (candidates.length > 0 && candidates[0].content) {
                 const parts = candidates[0].content.parts || [];
-                return parts.map(part => part.text || '').join('');
+                return {
+                    content: parts.map(part => part.text || '').join(''),
+                    usage,
+                };
             }
-            return '';
+            return { content: '', usage };
         } finally {
             if (options.requestId) {
                 this.activeRequests.delete(options.requestId);
@@ -410,7 +429,13 @@ export class LLMService {
             }
 
             const data = await response.json();
-            return data.choices[0]?.message?.content || '';
+            return {
+                content: data.choices[0]?.message?.content || '',
+                usage: {
+                    input: data.usage?.prompt_tokens ?? 0,
+                    output: data.usage?.completion_tokens ?? 0,
+                },
+            };
         } finally {
             if (options.requestId) {
                 this.activeRequests.delete(options.requestId);
@@ -462,7 +487,13 @@ export class LLMService {
             }
 
             const data = await response.json();
-            return data.choices[0]?.message?.content || '';
+            return {
+                content: data.choices[0]?.message?.content || '',
+                usage: {
+                    input: data.usage?.prompt_tokens ?? 0,
+                    output: data.usage?.completion_tokens ?? 0,
+                },
+            };
         } finally {
             if (options.requestId) {
                 this.activeRequests.delete(options.requestId);

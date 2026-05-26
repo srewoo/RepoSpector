@@ -96,7 +96,14 @@ export class MultiPassReviewEngine {
                         }
                     );
 
-                    return this._parsePerFileResponse(response.content || response, unit);
+                    // Carry the per-call token usage out alongside the parsed
+                    // result so the engine can accumulate the totals. Field is
+                    // named `parsed` (not `findings`) because the parsed object
+                    // itself has a nested .findings array — avoid the collision.
+                    return {
+                        parsed: this._parsePerFileResponse(response.content || response, unit),
+                        usage: response.usage || { input: 0, output: 0 },
+                    };
                 },
                 (progress) => {
                     onProgress?.({
@@ -109,7 +116,18 @@ export class MultiPassReviewEngine {
                 }
             );
 
-            const perFileFindings = results.successful.map(r => r.data);
+            // Unpack {parsed, usage} from each successful unit. `parsed` is
+            // the per-file result object (with its own nested findings array).
+            // Accumulate input/output tokens across the per-file pass; the
+            // aggregation call adds to this at the end.
+            const perFileFindings = results.successful.map(r => r.data.parsed);
+            const accumulatedTokens = results.successful.reduce(
+                (acc, r) => ({
+                    input: acc.input + (r.data.usage?.input ?? 0),
+                    output: acc.output + (r.data.usage?.output ?? 0),
+                }),
+                { input: 0, output: 0 },
+            );
             const failedFiles = results.failed.map(f => {
                 const unitIndex = f.index;
                 return reviewUnits[unitIndex]?.primaryFile || `unit-${unitIndex}`;
@@ -145,12 +163,20 @@ export class MultiPassReviewEngine {
 
             onProgress?.({ phase: 'complete', message: 'Review complete.' });
 
+            // Add aggregation-call usage to the accumulator built during the
+            // per-file pass above.
+            const tokenUsage = {
+                input: accumulatedTokens.input + (aggregationResponse.usage?.input ?? 0),
+                output: accumulatedTokens.output + (aggregationResponse.usage?.output ?? 0),
+            };
+
             return {
                 analysis: aggregationResponse.content || aggregationResponse,
                 perFileFindings,
                 failedFiles,
                 reviewUnits: reviewUnits.length,
                 processingTime: Date.now() - startTime,
+                tokenUsage,
                 isMultiPass: true
             };
 
