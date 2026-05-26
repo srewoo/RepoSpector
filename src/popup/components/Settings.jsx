@@ -80,6 +80,10 @@ export function Settings({ onClose }) {
     const [enableUpdatePRDescription, setEnableUpdatePRDescription] = useState(false);
     const [enablePostInlineComments, setEnablePostInlineComments] = useState(false);
 
+    // Experimental — orchestrated review pipeline (skip rules + chunking +
+    // assigned-hunks normalization). Opt-in until validated on real PRs.
+    const [enableOrchestratedReview, setEnableOrchestratedReview] = useState(false);
+
     // Telemetry (#16a)
     const [enableTelemetry, setEnableTelemetry] = useState(false);
     const [telemetrySummary, setTelemetrySummary] = useState(null);
@@ -114,6 +118,7 @@ export function Settings({ onClose }) {
                         setEnableAutoPostReview(settings.reviewSettings.enableAutoPostReview === true);
                         setEnableUpdatePRDescription(settings.reviewSettings.enableUpdatePRDescription === true);
                         setEnablePostInlineComments(settings.reviewSettings.enablePostInlineComments === true);
+                        setEnableOrchestratedReview(settings.reviewSettings.orchestratedReview === true);
                     }
 
                     // Load model selection
@@ -234,7 +239,8 @@ export function Settings({ onClose }) {
                             enablePRComments: enablePRComments,
                             enableAutoPostReview: enableAutoPostReview,
                             enableUpdatePRDescription: enableUpdatePRDescription,
-                            enablePostInlineComments: enablePostInlineComments
+                            enablePostInlineComments: enablePostInlineComments,
+                            orchestratedReview: enableOrchestratedReview
                         }
                     }
                 }
@@ -646,6 +652,30 @@ export function Settings({ onClose }) {
                             />
                         </button>
                     </div>
+
+                    <div className="flex items-center justify-between pt-3 border-t border-border">
+                        <div className="space-y-0.5">
+                            <p className="text-sm font-medium text-text">
+                                Orchestrated Review <span className="text-xs text-yellow-500">(experimental)</span>
+                            </p>
+                            <p className="text-xs text-textMuted">
+                                New pipeline: skip rules · MR chunking · two-phase review · hunk-scoped findings
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => setEnableOrchestratedReview(!enableOrchestratedReview)}
+                            className={`relative w-11 h-6 rounded-full transition-colors ${
+                                enableOrchestratedReview ? 'bg-primary' : 'bg-surface'
+                            }`}
+                        >
+                            <span
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                                    enableOrchestratedReview ? 'translate-x-5' : 'translate-x-0'
+                                }`}
+                            />
+                        </button>
+                    </div>
+
 
                     <div className="flex items-center justify-between pt-3 border-t border-border">
                         <div className="space-y-0.5">

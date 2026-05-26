@@ -14,7 +14,10 @@ import {
     CheckCircle,
     XCircle,
     Copy,
-    Check
+    Check,
+    MessageCircle,
+    Wrench,
+    Loader2
 } from 'lucide-react';
 import { copyToClipboard } from '../utils/clipboard';
 import { Card, CardContent } from './ui/Card';
@@ -70,6 +73,30 @@ export function FindingCard({ finding, onDismiss, onMarkResolved, compact = fals
     const [isExpanded, setIsExpanded] = useState(false);
     const [showGrouped, setShowGrouped] = useState(false);
     const [copied, setCopied] = useState(false);
+    // Per-finding follow-up state (explain / suggest fix)
+    const [followup, setFollowup] = useState({ kind: null, content: null, loading: false, error: null });
+
+    const requestFollowup = async (kind) => {
+        // Toggle off if already showing this kind.
+        if (followup.kind === kind && followup.content) {
+            setFollowup({ kind: null, content: null, loading: false, error: null });
+            return;
+        }
+        setFollowup({ kind, content: null, loading: true, error: null });
+        try {
+            const response = await chrome.runtime.sendMessage({
+                type: kind === 'fix' ? 'SUGGEST_FIX' : 'EXPLAIN_FINDING',
+                data: { finding, code: finding.codeSnippet || finding.evidence || null },
+            });
+            if (response?.success) {
+                setFollowup({ kind, content: response.data?.content || '(no response)', loading: false, error: null });
+            } else {
+                setFollowup({ kind, content: null, loading: false, error: response?.error || 'Request failed' });
+            }
+        } catch (err) {
+            setFollowup({ kind, content: null, loading: false, error: err.message });
+        }
+    };
 
     const groupCount = finding.groupCount || 1;
     const groupedFindings = finding.groupedFindings || [];
@@ -315,7 +342,31 @@ export function FindingCard({ finding, onDismiss, onMarkResolved, compact = fals
                             )}
 
                             {/* Actions */}
-                            <div className="mt-4 flex items-center gap-2">
+                            <div className="mt-4 flex items-center gap-2 flex-wrap">
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => requestFollowup('explain')}
+                                    className="text-xs"
+                                    disabled={followup.loading}
+                                >
+                                    {followup.loading && followup.kind === 'explain'
+                                        ? <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                                        : <MessageCircle className="w-3 h-3 mr-1" />}
+                                    {followup.kind === 'explain' && followup.content ? 'Hide explanation' : 'Why?'}
+                                </Button>
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => requestFollowup('fix')}
+                                    className="text-xs"
+                                    disabled={followup.loading}
+                                >
+                                    {followup.loading && followup.kind === 'fix'
+                                        ? <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                                        : <Wrench className="w-3 h-3 mr-1" />}
+                                    {followup.kind === 'fix' && followup.content ? 'Hide fix' : 'Suggest fix'}
+                                </Button>
                                 {onMarkResolved && (
                                     <Button
                                         variant="outline"
@@ -339,6 +390,25 @@ export function FindingCard({ finding, onDismiss, onMarkResolved, compact = fals
                                     </Button>
                                 )}
                             </div>
+
+                            {/* Follow-up panel — explanation or suggested fix */}
+                            {(followup.content || followup.error) && (
+                                <div className={`mt-3 p-3 rounded border text-xs ${
+                                    followup.error ? 'border-red-500/30 bg-red-500/5 text-red-400'
+                                                   : 'border-primary/30 bg-primary/5'
+                                }`}>
+                                    <div className="flex items-center gap-2 mb-2 text-textMuted">
+                                        {followup.kind === 'fix' ? <Wrench className="w-3 h-3" /> : <MessageCircle className="w-3 h-3" />}
+                                        <span className="font-medium">
+                                            {followup.kind === 'fix' ? 'Suggested fix' : 'Explanation'}
+                                        </span>
+                                    </div>
+                                    {followup.error
+                                        ? <p>{followup.error}</p>
+                                        : <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed">{followup.content}</pre>
+                                    }
+                                </div>
+                            )}
 
                             {/* Grouped Similar Findings */}
                             {groupCount > 1 && (

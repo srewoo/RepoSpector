@@ -58,12 +58,26 @@ function AppContent() {
         return () => chrome.runtime.onMessage.removeListener(listener);
     }, []);
 
-    // Listen for multi-pass PR review progress
+    // Listen for multi-pass PR review progress. Streaming findings from the
+    // orchestrator arrive as `step === 'chunk_findings'` events with a
+    // findings array — accumulate them into a running list so the review
+    // view can render incrementally.
     useEffect(() => {
         const progressListener = (message) => {
-            if (message.type === 'PR_REVIEW_PROGRESS') {
-                setPrProgress(message.data);
-            }
+            if (message.type !== 'PR_REVIEW_PROGRESS') return;
+            const data = message.data ?? {};
+            setPrProgress((prev) => {
+                // Streaming chunk: append to the running findings list.
+                if (data.step === 'chunk_findings' && Array.isArray(data.findings)) {
+                    const accumulated = [
+                        ...(prev?.streamedFindings ?? []),
+                        ...data.findings,
+                    ];
+                    return { ...prev, ...data, streamedFindings: accumulated };
+                }
+                // Otherwise replace state but preserve any accumulated findings.
+                return { ...data, streamedFindings: prev?.streamedFindings ?? [] };
+            });
         };
         chrome.runtime.onMessage.addListener(progressListener);
         return () => chrome.runtime.onMessage.removeListener(progressListener);

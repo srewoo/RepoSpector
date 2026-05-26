@@ -1,0 +1,35 @@
+{
+  "name": "@repospector/api",
+  "version": "0.1.0",
+  "description": "Aegis — RepoSpector backend service. Fastify API + BullMQ worker.",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "worker": "node src/workers/reviewWorker.js",
+    "migrate": "node-pg-migrate --migrations-dir migrations -j esm",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "@fastify/cors": "^9.0.1",
+    "@fastify/helmet": "^11.1.1",
+    "@fastify/jwt": "^8.0.1",
+    "@fastify/rate-limit": "^9.1.0",
+    "bullmq": "^5.12.0",
+    "fastify": "^4.28.1",
+    "ioredis": "^5.4.1",
+    "pg": "^8.12.0",
+    "pino": "^9.3.2",
+    "pino-pretty": "^11.2.2",
+    "simple-git": "^3.25.0",
+    "stripe": "^16.6.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "node-pg-migrate": "^7.6.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

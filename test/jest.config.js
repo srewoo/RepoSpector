@@ -48,7 +48,8 @@ module.exports = {
     testPathIgnorePatterns: [
         '/node_modules/',
         '/dist/',
-        '/build/'
+        '/build/',
+        '/apps/api/'
     ],
     
     // Module file extensions

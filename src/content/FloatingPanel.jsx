@@ -1,16 +1,53 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { X, Minimize2, Maximize2 } from 'lucide-react';
 import { ChatInterface } from '../popup/components/ChatInterface';
 import { Settings } from '../popup/components/Settings';
 import { Button } from '../popup/components/ui/Button';
 import { Card, CardContent } from '../popup/components/ui/Card';
-import { Sparkles, Code2, FileCode } from 'lucide-react';
+import { Sparkles, Code2, FileCode, GitPullRequest } from 'lucide-react';
+
+// Match GitHub PR, GitLab MR, Bitbucket PR URLs.
+const PR_URL_RE = /\/(?:[^/]+\/[^/]+\/(?:pull|pull-requests)\/\d+|.*?\/-\/merge_requests\/\d+)/i;
 
 export function FloatingPanel({ onClose }) {
     const [view, setView] = useState('home'); // 'home', 'settings', 'chat'
     const [testType, setTestType] = useState(null); // 'unit', 'integration', or null
     const [isMinimized, setIsMinimized] = useState(false);
     const [isMaximized, setIsMaximized] = useState(false);
+    // Detect PR pages so we can surface a one-click review CTA. The content
+    // script runs on the page so window.location is the source of truth.
+    const [isPRPage, setIsPRPage] = useState(false);
+    const [reviewStatus, setReviewStatus] = useState(null); // null | 'running' | 'done' | 'error'
+
+    useEffect(() => {
+        setIsPRPage(typeof window !== 'undefined' && PR_URL_RE.test(window.location?.href ?? ''));
+    }, []);
+
+    const handleReviewThisPR = async () => {
+        if (reviewStatus === 'running') return;
+        setReviewStatus('running');
+        try {
+            const response = await chrome.runtime.sendMessage({
+                type: 'ANALYZE_PULL_REQUEST',
+                data: {
+                    prUrl: window.location.href,
+                    options: {
+                        contextLevel: 'smart',
+                        // Defaults that match the recommended pipeline. These
+                        // travel as `options` to the orchestrator branch, which
+                        // only kicks in when the user has enabled the flag.
+                        focusAreas: ['security', 'bugs', 'performance', 'style'],
+                    },
+                },
+            });
+            setReviewStatus(response?.success ? 'done' : 'error');
+            // Pop open the popup so the streaming UI is visible. The popup
+            // will pick up the same PR via its own page detection.
+            try { chrome.runtime.sendMessage({ type: 'OPEN_POPUP' }); } catch { /* best-effort */ }
+        } catch {
+            setReviewStatus('error');
+        }
+    };
 
     const handleSettingsClick = () => {
         setView(view === 'settings' ? 'home' : 'settings');
@@ -87,12 +124,28 @@ export function FloatingPanel({ onClose }) {
                                 <Sparkles className="w-8 h-8 text-primary animate-pulse-slow" />
                             </div>
                             <h2 className="text-2xl font-bold text-text">
-                                Ready to verify?
+                                {isPRPage ? 'PR detected' : 'Ready to verify?'}
                             </h2>
                             <p className="text-textMuted max-w-[280px] mx-auto">
-                                Let AI generate comprehensive test cases for this code.
+                                {isPRPage
+                                    ? 'One click and RepoSpector reviews this PR end-to-end.'
+                                    : 'Let AI generate comprehensive test cases for this code.'}
                             </p>
                         </div>
+
+                        {isPRPage && (
+                            <Button
+                                onClick={handleReviewThisPR}
+                                disabled={reviewStatus === 'running'}
+                                className="w-full h-12 text-base shadow-xl shadow-primary/20 bg-gradient-to-r from-primary to-indigo-600 hover:from-indigo-500 hover:to-primary transition-all duration-300"
+                            >
+                                <GitPullRequest className="w-5 h-5 mr-2" />
+                                {reviewStatus === 'running' ? 'Reviewing this PR…'
+                                    : reviewStatus === 'done' ? 'Reviewed — open popup for findings'
+                                    : reviewStatus === 'error' ? 'Review failed — open popup'
+                                    : 'Review this PR'}
+                            </Button>
+                        )}
 
                         <div className="grid grid-cols-2 gap-4">
                             <Card className="group hover:border-primary/50 transition-colors cursor-pointer glass-hover" onClick={() => handleGenerateTests('unit')}>

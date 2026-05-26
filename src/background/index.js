@@ -63,6 +63,10 @@ import {
 import { generateRepoInfo, buildExtractedDataSummary, insertAfterHeader } from '../utils/repoInfoGenerator.js';
 import { REPO_INFO_ENRICHMENT_SYSTEM_PROMPT, buildRepoInfoEnrichmentPrompt } from '../utils/repoInfoPrompts.js';
 import { MultiPassReviewEngine } from '../services/MultiPassReviewEngine.js';
+import { ReviewOrchestrator } from '../services/ReviewOrchestrator.js';
+import { VERDICT } from '../services/reviewSchema.js';
+import { AegisClient } from '../services/AegisClient.js';
+import { FindingFollowupService } from '../services/FindingFollowupService.js';
 import { CodeGraphPipeline } from '../services/CodeGraphPipeline.js';
 import { ReviewMetricsService } from '../services/ReviewMetricsService.js';
 import { PRComplianceChecker } from '../services/PRComplianceChecker.js';
@@ -70,6 +74,52 @@ import { FindingCache } from '../services/FindingCache.js';
 import { TelemetryService } from '../services/TelemetryService.js';
 import { dispatch, registerHandlers } from './messageRouter.js';
 import { detectLanguages, buildStandardsBlock } from '../utils/standardsLoader.js';
+
+/**
+ * Adapter: ReviewOrchestrator emits the canonical VerdictReport
+ * { schemaVersion, verdict, findings[], summary, counts, meta }.
+ * Legacy callers (sendResponse, ReviewMetricsService.recordReview,
+ * the popup's CodeReviewView) expect the MultiPassReviewEngine shape
+ * { analysis, perFileFindings, failedFiles, reviewUnits, processingTime }.
+ *
+ * Lossy on purpose — the rich phase/severity/normalization detail is
+ * preserved on result._orchestrated for callers that want it.
+ */
+function adaptOrchestratorReport(report) {
+    const SEVERITY_BACK = {
+        blocking: 'high',     // map canonical → legacy so downstream
+        suggestion: 'medium', // verdict logic (critical|high gating) keeps
+        nitpick: 'low',       // working unchanged
+    };
+    const perFileFindings = (report.findings || []).map((f) => ({
+        id: f.id,
+        severity: SEVERITY_BACK[f.severity] ?? 'medium',
+        type: f.category,
+        title: f.title || (f.suggestion || '').split('\n', 1)[0].slice(0, 80),
+        message: f.suggestion || '',
+        file: f.file,
+        line: f.line,
+        source: f.source,
+        phase: f.phase,
+        codeSnippet: f.evidence || null,
+    }));
+    const analysisParts = [];
+    if (report.summary?.deep)      analysisParts.push(`## Deep Review\n\n${report.summary.deep}`);
+    if (report.summary?.standards) analysisParts.push(`## Standards Review\n\n${report.summary.standards}`);
+    if (report.verdict === VERDICT.SKIP)  analysisParts.push(`\n_Review skipped: ${report.meta?.gate?.reason || 'see meta.gate'}_`);
+    if (report.verdict === VERDICT.DEFER) analysisParts.push(`\n_Review deferred: ${report.meta?.gate?.reason || 'see meta.gate'}_`);
+
+    return {
+        analysis: analysisParts.join('\n\n'),
+        perFileFindings,
+        failedFiles: (report.meta?.failedChunks || [])
+            .flatMap((c) => c.failedFiles || (c.error ? [{ chunk: c.chunk, error: c.error }] : [])),
+        reviewUnits: report.meta?.chunkSummary?.totalChunks ?? 1,
+        processingTime: report.meta?.durationMs ?? 0,
+        isMultiPass: true,
+        verdict: report.verdict,
+    };
+}
 
 class BackgroundService {
     constructor() {
@@ -2337,6 +2387,46 @@ Return only the complete test code with proper syntax for the detected language,
         }
     }
 
+    /**
+     * EXPLAIN_FINDING / SUGGEST_FIX — per-finding follow-up actions. The
+     * popup invokes these when the user clicks "Why is this a problem?" or
+     * "Suggest fix" on a finding card.
+     */
+    async handleFindingFollowup(message, sendResponse, kind) {
+        try {
+            const { finding, code } = message.data || {};
+            if (!finding) {
+                sendResponse({ success: false, error: 'finding required' });
+                return;
+            }
+            const settings = await this.getStoredSettings();
+            if (!settings?.apiKey) {
+                sendResponse({ success: false, error: 'LLM API key not configured' });
+                return;
+            }
+            if (!this.findingFollowupService) {
+                this.findingFollowupService = new FindingFollowupService({
+                    llmService: this.llmService,
+                });
+            }
+            const args = {
+                finding,
+                code,
+                settings: {
+                    provider: settings.provider,
+                    model: settings.model,
+                    apiKey: settings.apiKey,
+                },
+            };
+            const result = kind === 'fix'
+                ? await this.findingFollowupService.suggestFix(args)
+                : await this.findingFollowupService.explain(args);
+            sendResponse({ success: true, data: result });
+        } catch (error) {
+            sendResponse({ success: false, error: this.getErrorMessage(error) });
+        }
+    }
+
     async handleGetSettings(message, sendResponse) {
         try {
             const settings = await this.getStoredSettings();
@@ -3572,32 +3662,62 @@ Return only the complete test code with proper syntax for the detected language,
                 console.log(`🎯 Using model pinned by .repospector.yaml: ${multiPassPinnedModel}`);
             }
 
-            // Execute multi-pass review
+            // Execute review — orchestrated pipeline (Bastion-style: skip rules +
+            // chunking + assigned-hunks normalization) when the feature flag is on,
+            // legacy multi-pass otherwise. The flag is opt-in for now so the new
+            // pipeline can be validated against real PRs side-by-side before
+            // becoming the default.
             const engine = new MultiPassReviewEngine({
                 llmService: this.llmService,
                 ragService: this.ragService
             });
 
-            const result = await engine.execute(
-                prData,
-                {
-                    ragContext,
-                    repoDocumentation: repoDocumentation?.found ? repoDocumentation.content : null,
-                    staticFindings: staticResult.findings,
-                    isTestAutomationPR: this.isTestAutomationPR(prData)
-                },
-                {
-                    provider: settings.provider,
-                    model: multiPassModel,
-                    apiKey: settings.apiKey
-                },
-                {
-                    focusAreas: options.focusAreas || ['security', 'bugs', 'performance', 'style'],
-                    maxConcurrent: options.maxConcurrent || 3,
-                    maxFilesToReview: options.maxFiles || 50
-                },
-                onProgress
-            );
+            const useOrchestrator = settings.experimental?.orchestratedReview === true
+                || reviewSettings.orchestratedReview === true;
+
+            const reviewContext = {
+                ragContext,
+                repoDocumentation: repoDocumentation?.found ? repoDocumentation.content : null,
+                staticFindings: staticResult.findings,
+                isTestAutomationPR: this.isTestAutomationPR(prData)
+            };
+            const reviewSettings_ = {
+                provider: settings.provider,
+                model: multiPassModel,
+                apiKey: settings.apiKey
+            };
+            const reviewOptions = {
+                focusAreas: options.focusAreas || ['security', 'bugs', 'performance', 'style'],
+                maxConcurrent: options.maxConcurrent || 3,
+                maxFilesToReview: options.maxFiles || 50
+            };
+
+            // Backend dispatch (Aegis) is currently disabled — the third-party
+            // backend surface is hidden from the UI and the dispatch logic
+            // removed. `AegisClient` import + `apps/api` remain in the
+            // repository for future re-enable; see docs/adr/0001-backend-service.md.
+            let result;
+
+            if (!result) {
+                if (useOrchestrator) {
+                    console.log('🧭 Orchestrator path: skip-rules → chunking → deep+standards → normalize');
+                    const orchestrator = new ReviewOrchestrator({
+                        multiPassEngine: engine,
+                        findingCache: this.findingCache,
+                        telemetry: this.telemetry
+                    });
+                    const report = await orchestrator.review(
+                        prData, reviewContext, reviewSettings_, reviewOptions, onProgress
+                    );
+                    result = adaptOrchestratorReport(report);
+                    result._orchestrated = report;
+                    onProgress?.({ phase: 'complete', message: 'Review complete.', orchestrated: true });
+                } else {
+                    result = await engine.execute(
+                        prData, reviewContext, reviewSettings_, reviewOptions, onProgress
+                    );
+                }
+            }
 
             // Generate AI summary
             let aiSummary = null;
@@ -5574,6 +5694,10 @@ registerHandlers({
     VALIDATE_API_KEY: (m, send) => svc.handleValidateApiKey(m, send),
     SAVE_SETTINGS: (m, send) => svc.handleSaveSettings(m, send),
     GET_SETTINGS: (m, send) => svc.handleGetSettings(m, send),
+
+    // Per-finding follow-ups
+    EXPLAIN_FINDING: (m, send) => svc.handleFindingFollowup(m, send, 'explain'),
+    SUGGEST_FIX:    (m, send) => svc.handleFindingFollowup(m, send, 'fix'),
 
     // Context & diff
     ANALYZE_CONTEXT: (m, send) => svc.handleAnalyzeContext(m, send),

@@ -1094,6 +1094,10 @@ pre::-webkit-scrollbar-thumb:hover {
   height: 100%;
 }
 
+.max-h-32 {
+  max-height: 8rem;
+}
+
 .max-h-48 {
   max-height: 12rem;
 }
@@ -1108,6 +1112,10 @@ pre::-webkit-scrollbar-thumb:hover {
 
 .min-h-screen {
   min-height: 100vh;
+}
+
+.w-1\.5 {
+  width: 0.375rem;
 }
 
 .w-1\/2 {
@@ -1835,6 +1843,10 @@ pre::-webkit-scrollbar-thumb:hover {
 
 .bg-red-500\/10 {
   background-color: rgb(239 68 68 / 0.1);
+}
+
+.bg-red-500\/5 {
+  background-color: rgb(239 68 68 / 0.05);
 }
 
 .bg-secondary {

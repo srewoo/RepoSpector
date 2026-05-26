@@ -137,5 +137,34 @@ describe('FindingCache', () => {
             expect(hits.size).toBe(1);
             expect(misses).toHaveLength(1);
         });
+
+        it('tracks hit/miss/put stats and resets cleanly', async () => {
+            await cache.put(prInfo, 'a.js', 'aaaa', [{ id: 1 }]);
+            await cache.lookup(prInfo, [
+                { file: 'a.js', hunkHash: 'aaaa' },   // hit
+                { file: 'a.js', hunkHash: 'zzzz' },   // miss
+                { file: 'b.js', hunkHash: 'bbbb' },   // miss
+            ]);
+            const s = cache.getStats();
+            expect(s.hits).toBe(1);
+            expect(s.misses).toBe(2);
+            expect(s.puts).toBe(1);
+            expect(s.lookups).toBe(1);
+            expect(s.hitRate).toBeCloseTo(1 / 3, 5);
+
+            cache.resetStats();
+            expect(cache.getStats()).toEqual({
+                hits: 0, misses: 0, puts: 0, lookups: 0, hitRate: 0,
+            });
+        });
+
+        it('counts putMany correctly', async () => {
+            await cache.putMany(prInfo, [
+                { file: 'a.js', hunkHash: 'h1', findings: [] },
+                { file: 'b.js', hunkHash: 'h2', findings: [] },
+                { file: 'c.js', hunkHash: 'h3', findings: [] },
+            ]);
+            expect(cache.getStats().puts).toBe(3);
+        });
     });
 });

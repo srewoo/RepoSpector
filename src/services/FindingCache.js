@@ -38,6 +38,24 @@ export class FindingCache {
             throw new Error('FindingCache requires chrome.storage.local or an injected storage');
         }
         this.now = opts.now || Date.now;
+        // In-memory hit/miss counters since last resetStats(). Cheap, used
+        // by callers to fold cache effectiveness into TelemetryService runs.
+        this._stats = { hits: 0, misses: 0, puts: 0, lookups: 0 };
+    }
+
+    /** Snapshot the in-memory counters. Does NOT reset. */
+    getStats() {
+        const s = this._stats;
+        const total = s.hits + s.misses;
+        return {
+            ...s,
+            hitRate: total > 0 ? s.hits / total : 0,
+        };
+    }
+
+    /** Reset counters — typically called at the start of a review run. */
+    resetStats() {
+        this._stats = { hits: 0, misses: 0, puts: 0, lookups: 0 };
     }
 
     /**
@@ -130,10 +148,13 @@ export class FindingCache {
             const entry = partition[k];
             if (entry && entry.timestamp >= cutoff) {
                 hits.set(k, entry.findings || []);
+                this._stats.hits++;
             } else {
                 misses.push(h);
+                this._stats.misses++;
             }
         }
+        this._stats.lookups++;
         return { hits, misses };
     }
 
@@ -148,6 +169,7 @@ export class FindingCache {
             findings: Array.isArray(findings) ? findings : [],
             timestamp: this.now(),
         };
+        this._stats.puts++;
         await this._writeRoot(root);
     }
 
@@ -169,6 +191,7 @@ export class FindingCache {
                 timestamp: ts,
             };
         }
+        this._stats.puts += entries.length;
         await this._writeRoot(root);
     }
 

@@ -119,11 +119,24 @@ export function PRReviewInterface({
         setPostResult(null);
 
         try {
+            // Build the unified findings list: orchestrator/multi-pass findings
+            // (from analysisResult) + static-analysis findings. Both are in the
+            // legacy { severity, file, line, message } shape because the
+            // adapter normalizes them.
+            const orchestratorFindings = analysisResult?.perFileFindings ?? [];
+            const staticAnalysisFindings = staticAnalysisResult?.findings
+                ?? staticFindings
+                ?? [];
+            const unifiedFindings = [...orchestratorFindings, ...staticAnalysisFindings];
+
             const response = await chrome.runtime.sendMessage({
                 type: 'POST_PR_REVIEW',
                 data: {
                     prUrl,
-                    analysisResult: staticAnalysisResult || { findings: staticFindings },
+                    analysisResult: {
+                        ...(staticAnalysisResult ?? {}),
+                        findings: unifiedFindings,
+                    },
                     aiSummary,
                     options: {
                         includeInlineComments: true,
@@ -150,7 +163,7 @@ export function PRReviewInterface({
             // Clear result after 5 seconds
             setTimeout(() => setPostResult(null), 5000);
         }
-    }, [prUrl, staticAnalysisResult, staticFindings, aiSummary, postingReview]);
+    }, [prUrl, analysisResult, staticAnalysisResult, staticFindings, aiSummary, postingReview, reviewEvent]);
 
     // Generate PR description
     const handleGenerateDescription = useCallback(async (apply = false) => {
@@ -692,12 +705,29 @@ export function PRReviewInterface({
                 <div className="fixed inset-0 bg-background/50 flex items-center justify-center z-50">
                     <Card className="p-6 flex flex-col items-center gap-3 max-w-sm w-full mx-4">
                         <RefreshCw className="w-5 h-5 animate-spin text-primary" />
-                        {progress && progress.phase ? (
+                        {progress && (progress.phase || progress.step) ? (
                             <>
                                 <span className="text-sm font-medium">
-                                    {progress.message || 'Analyzing PR...'}
+                                    {progress.message
+                                        || (progress.step === 'chunk_findings'
+                                            ? `Reviewing chunk ${progress.chunkIndex}/${progress.totalChunks}…`
+                                            : 'Analyzing PR...')}
                                 </span>
-                                {progress.totalUnits > 0 && (
+                                {progress.totalChunks > 0 && (
+                                    <div className="w-full">
+                                        <div className="flex justify-between text-xs text-textMuted mb-1">
+                                            <span>Chunks</span>
+                                            <span>{progress.chunkIndex || 0}/{progress.totalChunks}</span>
+                                        </div>
+                                        <div className="w-full bg-surface rounded-full h-1.5">
+                                            <div
+                                                className="bg-primary rounded-full h-1.5 transition-all duration-300"
+                                                style={{ width: `${((progress.chunkIndex || 0) / progress.totalChunks) * 100}%` }}
+                                            />
+                                        </div>
+                                    </div>
+                                )}
+                                {progress.totalUnits > 0 && !progress.totalChunks && (
                                     <div className="w-full">
                                         <div className="flex justify-between text-xs text-textMuted mb-1">
                                             <span>File groups</span>
@@ -709,6 +739,25 @@ export function PRReviewInterface({
                                                 style={{ width: `${progress.percentage || 0}%` }}
                                             />
                                         </div>
+                                    </div>
+                                )}
+                                {progress.streamedFindings?.length > 0 && (
+                                    <div className="w-full pt-2 border-t border-border">
+                                        <p className="text-xs text-textMuted mb-1">
+                                            {progress.streamedFindings.length} finding(s) so far
+                                        </p>
+                                        <ul className="text-xs space-y-0.5 max-h-32 overflow-y-auto">
+                                            {progress.streamedFindings.slice(-5).map((f, i) => (
+                                                <li key={i} className="truncate text-text">
+                                                    <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1.5 ${
+                                                        f.severity === 'blocking' ? 'bg-red-500'
+                                                        : f.severity === 'suggestion' ? 'bg-yellow-500'
+                                                        : 'bg-blue-500'
+                                                    }`} />
+                                                    {f.file}:{f.line} — {(f.title || f.suggestion || '').slice(0, 60)}
+                                                </li>
+                                            ))}
+                                        </ul>
                                     </div>
                                 )}
                             </>

@@ -1,0 +1,19 @@
+{
+  "name": "@repospector/review-core",
+  "version": "0.1.0",
+  "description": "Shared review orchestration: schema, skip rules, chunker, normalizer, orchestrator. Imported by both the Chrome extension and the Aegis backend.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./schema": "./src/reviewSchema.js",
+    "./skip-rules": "./src/SkipRuleEngine.js",
+    "./chunker": "./src/MRChunker.js",
+    "./normalizer": "./src/FindingsNormalizer.js",
+    "./orchestrator": "./src/ReviewOrchestrator.js"
+  },
+  "scripts": {
+    "test": "echo 'tests live in the repo root suite — see test/unit/'"
+  },
+  "license": "UNLICENSED"
+}

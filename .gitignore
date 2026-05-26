@@ -163,3 +163,4 @@ build/
 .vscode/
 .qodo
 .claude
+graphify-out/
