@@ -243,6 +243,38 @@ async function buildPopup() {
     }
 }
 
+// Grammars bundled for tree-sitter parsing — must match EXT_TO_LANG in
+// src/services/treeSitterLangConfig.js.
+const TREE_SITTER_GRAMMARS = [
+    'javascript', 'typescript', 'tsx', 'python', 'java', 'go',
+    'rust', 'c', 'cpp', 'c_sharp', 'ruby', 'php'
+];
+
+function copyTreeSitterAssets() {
+    const runtimeSrc = 'node_modules/web-tree-sitter/tree-sitter.wasm';
+    if (!fs.existsSync(runtimeSrc)) {
+        log('tree-sitter.wasm not found — skipping (regex fallback will be used)', 'warning');
+        return;
+    }
+
+    fs.mkdirSync('dist/assets/grammars', { recursive: true });
+    fs.copyFileSync(runtimeSrc, 'dist/assets/tree-sitter.wasm');
+
+    let copied = 0;
+    let totalBytes = fs.statSync(runtimeSrc).size;
+    for (const grammar of TREE_SITTER_GRAMMARS) {
+        const src = `node_modules/tree-sitter-wasms/out/tree-sitter-${grammar}.wasm`;
+        if (!fs.existsSync(src)) {
+            log(`Grammar missing: ${grammar} (files of this language use regex)`, 'warning');
+            continue;
+        }
+        fs.copyFileSync(src, `dist/assets/grammars/tree-sitter-${grammar}.wasm`);
+        totalBytes += fs.statSync(src).size;
+        copied++;
+    }
+    log(`Tree-sitter assets copied: runtime + ${copied} grammars (${(totalBytes / 1048576).toFixed(1)} MB)`, 'success');
+}
+
 async function copyAssets() {
     log('Copying manifest and assets...');
 
@@ -281,6 +313,9 @@ async function copyAssets() {
         log('Offscreen HTML copied', 'success');
     }
 
+    // Copy tree-sitter WASM runtime + grammars (loaded at runtime in offscreen doc)
+    copyTreeSitterAssets();
+
     // Copy mock-chrome.js for popup (used in development mode)
     if (fs.existsSync('src/popup/mock-chrome.js')) {
         fs.copyFileSync('src/popup/mock-chrome.js', 'dist/src/popup/mock-chrome.js');
@@ -304,7 +339,10 @@ async function buildOffscreenScript() {
             format: 'esm',
             platform: 'browser',
             target: 'es2020',
-            external: [],
+            // web-tree-sitter has Node-only branches (guarded by runtime env checks
+            // that never execute in the browser) which import these built-ins.
+            // Mark them external so esbuild doesn't try to resolve them.
+            external: ['fs', 'fs/promises', 'path', 'module', 'url', 'node:*'],
             define: {
                 'process.env.NODE_ENV': '"production"'
             }

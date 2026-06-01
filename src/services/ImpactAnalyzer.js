@@ -14,6 +14,8 @@
  * Inspired by GitNexus's impact() tool.
  */
 
+import { isTestFile } from './testFileUtils.js';
+
 const CONFIDENCE_LABELS = {
     high: { min: 0.8, label: 'WILL BREAK' },
     medium: { min: 0.5, label: 'LIKELY AFFECTED' },
@@ -105,6 +107,7 @@ export class ImpactAnalyzer {
         const depthGroups = {};
         let queue = [{ id: startId, depth: 0, confidence: 1.0 }];
         let totalAffected = 0;
+        let untestedCount = 0;
 
         while (queue.length > 0) {
             const nextQueue = [];
@@ -132,6 +135,9 @@ export class ImpactAnalyzer {
                     visited.add(neighborId);
                     totalAffected++;
 
+                    const isTested = node.properties?.isTested === true;
+                    if (!isTested) untestedCount++;
+
                     const depthKey = depth + 1;
                     if (!depthGroups[depthKey]) depthGroups[depthKey] = [];
 
@@ -142,7 +148,8 @@ export class ImpactAnalyzer {
                         startLine: node.properties?.startLine,
                         confidence: combinedConfidence,
                         confidenceLabel: this._getConfidenceLabel(combinedConfidence),
-                        reason: neighbor.reason || 'calls'
+                        reason: neighbor.reason || 'calls',
+                        isTested
                     });
 
                     nextQueue.push({ id: neighborId, depth: depthKey, confidence: combinedConfidence });
@@ -154,8 +161,36 @@ export class ImpactAnalyzer {
 
         return {
             totalAffected,
+            untestedCount,
             depthGroups,
             maxDepthReached: Object.keys(depthGroups).length
+        };
+    }
+
+    /**
+     * Untested symbols in a change's blast radius — the highest-signal input for
+     * test generation. Returns the upstream-affected symbols that have no test
+     * coverage, so callers can prioritise writing tests where a change is risky.
+     */
+    findUntestedInBlastRadius(targetName, options = {}) {
+        const result = this.analyze(targetName, {
+            direction: 'upstream',
+            maxDepth: options.maxDepth || 3,
+            minConfidence: options.minConfidence ?? 0.3
+        });
+        if (!result.found || !result.upstream) return { found: result.found, untested: [] };
+
+        const untested = [];
+        for (const items of Object.values(result.upstream.depthGroups)) {
+            for (const item of items) {
+                if (!item.isTested) untested.push(item);
+            }
+        }
+        return {
+            found: true,
+            target: result.target,
+            totalAffected: result.upstream.totalAffected,
+            untested
         };
     }
 
@@ -185,12 +220,7 @@ export class ImpactAnalyzer {
     }
 
     _isTestFile(filePath) {
-        const lower = filePath.toLowerCase();
-        return lower.includes('test') || lower.includes('spec') ||
-               lower.includes('__tests__') || lower.includes('__mocks__') ||
-               lower.endsWith('.test.js') || lower.endsWith('.spec.js') ||
-               lower.endsWith('.test.ts') || lower.endsWith('.spec.ts') ||
-               lower.endsWith('_test.py') || lower.endsWith('_test.go');
+        return isTestFile(filePath);
     }
 
     _buildSummary(result) {
@@ -222,14 +252,19 @@ export class ImpactAnalyzer {
         prompt += `**RISK LEVEL**: ${result.riskLevel.toUpperCase()}\n\n`;
 
         if (result.upstream && result.upstream.totalAffected > 0) {
-            prompt += `### UPSTREAM — What will break if this changes (${result.upstream.totalAffected} symbols):\n`;
+            prompt += `### UPSTREAM — What will break if this changes (${result.upstream.totalAffected} symbols`;
+            if (result.upstream.untestedCount > 0) {
+                prompt += `, ${result.upstream.untestedCount} UNTESTED`;
+            }
+            prompt += `):\n`;
 
             for (const [depth, items] of Object.entries(result.upstream.depthGroups)) {
                 prompt += `\n**Depth ${depth}**:\n`;
 
                 for (const item of items.slice(0, 15)) {
                     const conf = (item.confidence * 100).toFixed(0);
-                    prompt += `- \`${item.name}\` [${item.type}] → ${item.filePath}:${item.startLine || '?'} (${conf}% confidence — ${item.confidenceLabel})\n`;
+                    const cov = item.isTested ? '' : ' ⚠️ UNTESTED';
+                    prompt += `- \`${item.name}\` [${item.type}] → ${item.filePath}:${item.startLine || '?'} (${conf}% confidence — ${item.confidenceLabel})${cov}\n`;
                 }
 
                 if (items.length > 15) {

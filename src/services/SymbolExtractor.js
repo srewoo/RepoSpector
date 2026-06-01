@@ -28,8 +28,11 @@ export class SymbolExtractor {
      * Extract all symbols from a set of files and populate the knowledge graph
      * @param {KnowledgeGraphService} graph
      * @param {Array<{path: string, content: string}>} files
+     * @param {import('./TreeSitterParser.js').TreeSitterParser} [tsParser] - when a
+     *   grammar is loaded for a file, tree-sitter AST extraction is used; otherwise
+     *   the regex path runs. Output shape is identical either way.
      */
-    extractAll(graph, files) {
+    extractAll(graph, files, tsParser = null) {
         this.symbolTable.clear();
         this.globalIndex.clear();
 
@@ -46,7 +49,9 @@ export class SymbolExtractor {
                 properties: { name: file.path.split('/').pop(), filePath: file.path, language }
             });
 
-            const symbols = this.extractSymbols(file.content, language, file.path);
+            const symbols = (tsParser && tsParser.isReadyForPath(file.path)
+                ? tsParser.getSymbols(file.content, file.path)
+                : null) || this.extractSymbols(file.content, language, file.path);
 
             for (const sym of symbols) {
                 const nodeId = KnowledgeGraphService.generateId(sym.label, `${file.path}:${sym.name}`);

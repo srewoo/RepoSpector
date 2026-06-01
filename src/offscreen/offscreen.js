@@ -4,6 +4,24 @@
  */
 
 import { pipeline, env } from '@xenova/transformers';
+import * as TreeSitter from 'web-tree-sitter';
+import { TreeSitterParser } from '../services/TreeSitterParser.js';
+
+// Tree-sitter runs here (module context) for the same reason embeddings do:
+// MV3 service workers can't load the WASM runtime, but offscreen documents can.
+// The parser instance is module-scoped so loaded grammars persist across batches.
+const _tsParser = new TreeSitterParser({ module: TreeSitter });
+
+async function handleTreeSitterAnalyze(files) {
+    await _tsParser.preloadFromFiles(files);
+    const analyses = {};
+    for (const file of files) {
+        if (!file.content || !_tsParser.isReadyForPath(file.path)) continue;
+        const a = _tsParser._analyze(file.content, file.path);
+        if (a) analyses[file.path] = a;
+    }
+    return { available: _tsParser.available, analyses };
+}
 
 // Configure Transformers.js for Chrome extension environment
 env.allowLocalModels = false;  // Skip local /models/ path lookups — go straight to HF CDN
@@ -63,6 +81,12 @@ class OffscreenEmbeddingWorker {
                         messageId: message.messageId
                     });
                     break;
+
+                case 'TS_ANALYZE_FILES': {
+                    const result = await handleTreeSitterAnalyze(message.files || []);
+                    sendResponse({ success: true, ...result, messageId: message.messageId });
+                    break;
+                }
 
                 default:
                     // Unknown message type for offscreen worker

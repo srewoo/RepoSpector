@@ -2671,10 +2671,11 @@ Return only the complete test code with proper syntax for the detected language,
 
             console.log('✅ Repository indexed successfully:', result);
 
-            // Build Knowledge Graph (GitNexus-inspired: symbols, calls, communities, flows)
+            // Build/refresh Knowledge Graph (symbols, calls, coverage, communities, flows).
+            // updateGraph re-parses only changed files (full build on first run).
             let graphStats = null;
             try {
-                graphStats = await this.codeGraphPipeline.buildGraph(repoId, files, (progress) => {
+                graphStats = await this.codeGraphPipeline.updateGraph(repoId, files, (progress) => {
                     console.log('🧠 Graph:', progress.message);
                     if (tabId) {
                         chrome.tabs.sendMessage(tabId, {

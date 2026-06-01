@@ -6,11 +6,15 @@
  * IMPLEMENTS edges — so the LLM can say "this belongs to the Auth cluster"
  * instead of just listing file paths.
  *
- * No external dependencies. Adapted from the Louvain method:
+ * No external dependencies. Louvain pass:
  *   Blondel, V.D. et al. (2008) "Fast unfolding of communities in large networks"
+ * followed by a Leiden-style refinement:
+ *   Traag, V.A. et al. (2019) "From Louvain to Leiden: guaranteeing
+ *   well-connected communities"
  *
- * GitNexus uses graphology + Leiden; we use a lighter Louvain to avoid
- * adding ~30KB of dependencies for the Chrome extension.
+ * GitNexus uses graphology + full Leiden; we run Louvain plus the well-connected
+ * refinement (split disconnected communities into connected components) to get
+ * Leiden's key correctness guarantee without the ~30KB dependency.
  */
 
 import { KnowledgeGraphService } from './KnowledgeGraphService.js';
@@ -44,8 +48,12 @@ export class CommunityDetector {
             return { communities: [], memberships: new Map(), stats: { totalCommunities: 0, modularity: 0 } };
         }
 
-        // Step 2: Run Louvain
-        const { communities: communityMap, modularity } = this._louvain(adj, nodeSet);
+        // Step 2: Run Louvain, then apply Leiden-style refinement so every
+        // community is internally connected (Louvain can leave a community split
+        // into pieces that aren't actually linked — Leiden's key correctness fix).
+        const { communities: louvainMap } = this._louvain(adj, nodeSet);
+        const communityMap = this._refineCommunities(louvainMap, adj);
+        const modularity = this._calculateModularity(communityMap, adj, this._totalEdgeWeight(adj, nodeSet));
 
         // Step 3: Group by community, skip singletons
         const communityMembers = new Map();
@@ -200,6 +208,54 @@ export class CommunityDetector {
         const modularity = this._calculateModularity(renumbered, adj, totalWeight);
 
         return { communities: renumbered, modularity };
+    }
+
+    /**
+     * Leiden-style refinement: split each Louvain community into its internally
+     * connected components (using only intra-community edges). Guarantees every
+     * resulting community is connected — Louvain does not. Pure-JS, deterministic.
+     *
+     * @param {Map<string, number>} community - node → community id
+     * @param {Map<string, Map<string, number>>} adj - undirected adjacency
+     * @returns {Map<string, number>} refined node → community id
+     */
+    _refineCommunities(community, adj) {
+        const byComm = new Map();
+        for (const [node, comm] of community) {
+            if (!byComm.has(comm)) byComm.set(comm, []);
+            byComm.get(comm).push(node);
+        }
+
+        const refined = new Map();
+        let nextId = 0;
+
+        for (const members of byComm.values()) {
+            const memberSet = new Set(members);
+            const visited = new Set();
+
+            for (const start of members) {
+                if (visited.has(start)) continue;
+
+                // BFS over intra-community edges → one connected component.
+                const componentId = nextId++;
+                const queue = [start];
+                visited.add(start);
+
+                while (queue.length) {
+                    const node = queue.pop();
+                    refined.set(node, componentId);
+                    const neighbors = adj.get(node) || new Map();
+                    for (const neighbor of neighbors.keys()) {
+                        if (memberSet.has(neighbor) && !visited.has(neighbor)) {
+                            visited.add(neighbor);
+                            queue.push(neighbor);
+                        }
+                    }
+                }
+            }
+        }
+
+        return refined;
     }
 
     // --- Graph building ---

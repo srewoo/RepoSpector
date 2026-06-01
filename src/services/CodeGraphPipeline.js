@@ -25,14 +25,26 @@ import { CallGraphBuilder } from './CallGraphBuilder.js';
 import { ImpactAnalyzer } from './ImpactAnalyzer.js';
 import { ProcessTracer } from './ProcessTracer.js';
 import { CommunityDetector } from './CommunityDetector.js';
+import { TestCoverageBuilder } from './TestCoverageBuilder.js';
+import { OffscreenGraphParser } from './OffscreenGraphParser.js';
+import { PrecomputedAnalysis } from './PrecomputedAnalysis.js';
+import { GraphAnalysisCache } from './GraphAnalysisCache.js';
+import { hashContent } from './IndexManifest.js';
 
 export class CodeGraphPipeline {
-    constructor() {
-        this.graph = new KnowledgeGraphService();
+    constructor(opts = {}) {
+        this.graph = opts.graph || new KnowledgeGraphService();
         this.symbolExtractor = new SymbolExtractor();
+        // Tree-sitter parsing runs in the offscreen document (MV3 SWs can't load
+        // the WASM runtime). It's a progressive enhancement: any failure falls
+        // back transparently to the regex extraction path.
+        this.offscreenParser = opts.offscreenParser || new OffscreenGraphParser();
+        // Per-repo cache of file hashes + tree-sitter analyses for incremental rebuilds.
+        this.analysisCache = opts.analysisCache || new GraphAnalysisCache();
         this.impactAnalyzer = null;
         this.processTracer = null;
         this.communityDetector = null;
+        this.testCoverageBuilder = null;
         this._lastBuildStats = null;
     }
 
@@ -46,23 +58,101 @@ export class CodeGraphPipeline {
      */
     async buildGraph(repoId, files, onProgress) {
         const startTime = performance.now();
+        const parseStart = performance.now();
+
+        // Tree-sitter analysis for ALL files in the offscreen document (best-effort).
+        let tsAnalyses = null;
+        try {
+            const analyses = await this.offscreenParser.analyzeFiles(files);
+            if (analyses && analyses.size > 0) tsAnalyses = analyses;
+        } catch (_e) {
+            tsAnalyses = null;
+        }
+
+        return this._assembleAndPersist(repoId, files, tsAnalyses, { startTime, parseStart, onProgress });
+    }
+
+    /**
+     * Incremental rebuild: re-parse ONLY changed files (the expensive offscreen
+     * step), reuse cached analyses for unchanged files, then reassemble the full
+     * graph (assembly is cheap and keeps cross-file call resolution correct).
+     * Falls back to a full buildGraph when no cache/graph exists yet.
+     */
+    async updateGraph(repoId, files, onProgress) {
+        const startTime = performance.now();
+        const parseStart = performance.now();
+
+        const [cache, hasGraph] = await Promise.all([
+            this.analysisCache.get(repoId),
+            this.graph.hasGraph(repoId).catch(() => false)
+        ]);
+
+        if (!cache || !hasGraph) {
+            return this.buildGraph(repoId, files, onProgress); // cold start
+        }
+
+        const prevHashes = cache.fileHashes || {};
+        const prevTs = cache.tsAnalyses || {};
+        const changed = files.filter(f => hashContent(f.content) !== prevHashes[f.path]);
+        const changedSet = new Set(changed.map(f => f.path));
+
+        onProgress?.({
+            phase: 'graph_symbols',
+            message: `Incremental: ${changed.length} changed, ${files.length - changed.length} reused`
+        });
+
+        // Parse only changed files in the offscreen document.
+        let freshTs = null;
+        if (changed.length > 0) {
+            try { freshTs = await this.offscreenParser.analyzeFiles(changed); } catch (_e) { freshTs = null; }
+        }
+
+        // Merge: fresh analyses for changed files, cached analyses for the rest.
+        const mergedTs = new Map();
+        for (const f of files) {
+            if (changedSet.has(f.path)) {
+                if (freshTs && freshTs.has(f.path)) mergedTs.set(f.path, freshTs.get(f.path));
+            } else if (prevTs[f.path]) {
+                mergedTs.set(f.path, prevTs[f.path]);
+            }
+        }
+
+        const stats = await this._assembleAndPersist(
+            repoId, files, mergedTs.size > 0 ? mergedTs : null, { startTime, parseStart, onProgress }
+        );
+        stats.incremental = {
+            changedFiles: changed.length,
+            reusedFiles: files.length - changed.length
+        };
+        return stats;
+    }
+
+    /**
+     * Assemble the full graph from files + (optional) tree-sitter analyses, run
+     * coverage/community/process phases, persist graph + analysis cache, and
+     * return build stats. Shared by buildGraph and updateGraph.
+     */
+    async _assembleAndPersist(repoId, files, tsAnalyses, { startTime, parseStart, onProgress }) {
+        const tsAdapter = tsAnalyses ? new PrecomputedAnalysis(tsAnalyses) : null;
+        const tsReady = !!tsAnalyses;
 
         onProgress?.({ phase: 'graph_symbols', message: 'Extracting code symbols...' });
 
         // Phase 1: Extract symbols (functions, classes, methods)
         this.graph.clear();
-        this.symbolExtractor.extractAll(this.graph, files);
+        this.symbolExtractor.extractAll(this.graph, files, tsAdapter);
 
         const symbolStats = this.graph.getStats();
         onProgress?.({
             phase: 'graph_symbols',
-            message: `Extracted ${symbolStats.nodeCount} symbols from ${files.length} files`
+            message: `Extracted ${symbolStats.nodeCount} symbols from ${files.length} files` +
+                (tsReady ? ' (tree-sitter AST)' : ' (regex)')
         });
 
         // Phase 2–4: Build call graph (imports + calls + heritage)
         onProgress?.({ phase: 'graph_calls', message: 'Resolving function calls and imports...' });
 
-        const callGraphBuilder = new CallGraphBuilder(this.graph, this.symbolExtractor);
+        const callGraphBuilder = new CallGraphBuilder(this.graph, this.symbolExtractor, tsAdapter);
         callGraphBuilder.build(files);
 
         const callStats = this.graph.getStats();
@@ -71,6 +161,16 @@ export class CodeGraphPipeline {
         onProgress?.({
             phase: 'graph_calls',
             message: `Resolved ${callEdges} call edges, ${importEdges} import edges`
+        });
+
+        // Phase 4b: Test coverage edges (TESTED_BY) — which symbols are exercised by tests
+        onProgress?.({ phase: 'graph_coverage', message: 'Mapping test coverage...' });
+        this.testCoverageBuilder = new TestCoverageBuilder(this.graph);
+        const coverageStats = this.testCoverageBuilder.build();
+        onProgress?.({
+            phase: 'graph_coverage',
+            message: `Test coverage: ${coverageStats.testedSymbols}/${coverageStats.coverableSymbols} symbols ` +
+                `(${Math.round(coverageStats.coverageRatio * 100)}%), ${coverageStats.untestedSymbols} untested`
         });
 
         // Phase 5: Community detection
@@ -98,9 +198,17 @@ export class CodeGraphPipeline {
         // Phase 7: Initialize analyzers
         this.impactAnalyzer = new ImpactAnalyzer(this.graph);
 
-        // Phase 8: Persist to IndexedDB
+        // Phase 8: Persist to IndexedDB (graph + incremental analysis cache)
         onProgress?.({ phase: 'graph_saving', message: 'Saving knowledge graph...' });
         await this.graph.save(repoId);
+
+        const fileHashes = {};
+        for (const f of files) fileHashes[f.path] = hashContent(f.content);
+        const tsCacheObj = {};
+        if (tsAdapter) {
+            for (const [path, analysis] of tsAdapter.analyses) tsCacheObj[path] = analysis;
+        }
+        await this.analysisCache.set(repoId, { fileHashes, tsAnalyses: tsCacheObj });
 
         const elapsed = Math.round(performance.now() - startTime);
         const finalStats = this.graph.getStats();
@@ -115,7 +223,10 @@ export class CodeGraphPipeline {
             processes: processResult.stats.totalProcesses,
             crossCommunityProcesses: processResult.stats.crossCommunityCount,
             modularity: communityResult.stats.modularity,
-            buildTimeMs: elapsed
+            buildTimeMs: elapsed,
+            parserEngine: tsReady ? 'tree-sitter' : 'regex',
+            parseTimeMs: Math.round(performance.now() - parseStart),
+            coverage: coverageStats
         };
 
         onProgress?.({
@@ -155,6 +266,7 @@ export class CodeGraphPipeline {
      * Delete a repo's graph
      */
     async deleteGraph(repoId) {
+        await this.analysisCache.delete(repoId).catch(() => {});
         return this.graph.delete(repoId);
     }
 
@@ -365,6 +477,16 @@ export class CodeGraphPipeline {
     safetyCheck(symbolName) {
         if (!this.impactAnalyzer) return null;
         return this.impactAnalyzer.quickSafetyCheck(symbolName);
+    }
+
+    /**
+     * Untested symbols in the blast radius of a change — the primary signal for
+     * prioritising test generation (RepoSpector's core job). Backed by TESTED_BY
+     * edges; works after both buildGraph and loadGraph (isTested is persisted).
+     */
+    getUntestedInBlastRadius(symbolName, options = {}) {
+        if (!this.impactAnalyzer) return null;
+        return this.impactAnalyzer.findUntestedInBlastRadius(symbolName, options);
     }
 
     /**

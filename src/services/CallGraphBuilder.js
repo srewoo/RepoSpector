@@ -49,11 +49,20 @@ export class CallGraphBuilder {
     /**
      * @param {KnowledgeGraphService} graph
      * @param {import('./SymbolExtractor.js').SymbolExtractor} symbolExtractor
+     * @param {import('./TreeSitterParser.js').TreeSitterParser} [tsParser] - when a
+     *   grammar is loaded for a file, tree-sitter AST extraction is used for
+     *   imports/calls/heritage; otherwise the regex path runs.
      */
-    constructor(graph, symbolExtractor) {
+    constructor(graph, symbolExtractor, tsParser = null) {
         this.graph = graph;
         this.symbolExtractor = symbolExtractor;
+        this.tsParser = tsParser;
         this.importMap = new Map(); // filePath → Set<importedFilePath>
+    }
+
+    /** Tree-sitter when ready for this file, else null. */
+    _ts(file) {
+        return (this.tsParser && this.tsParser.isReadyForPath(file.path)) ? this.tsParser : null;
     }
 
     /**
@@ -79,7 +88,8 @@ export class CallGraphBuilder {
             const language = this.symbolExtractor.detectLanguage(file.path);
             if (!language || language === 'unknown') continue;
 
-            const imports = this._parseImports(file.content, language);
+            const imports = this._ts(file)?.getImports(file.content, file.path)
+                || this._parseImports(file.content, language);
             const resolvedFiles = new Set();
 
             for (const imp of imports) {
@@ -119,7 +129,8 @@ export class CallGraphBuilder {
             const language = this.symbolExtractor.detectLanguage(file.path);
             if (!language || language === 'unknown') continue;
 
-            const calls = this._extractCalls(file.content, language);
+            const calls = this._ts(file)?.getCalls(file.content, file.path)
+                || this._extractCalls(file.content, language);
 
             for (const call of calls) {
                 if (BUILT_INS.has(call.name)) continue;
@@ -157,7 +168,8 @@ export class CallGraphBuilder {
             const language = this.symbolExtractor.detectLanguage(file.path);
             if (!language || language === 'unknown') continue;
 
-            const heritage = this._extractHeritage(file.content, language);
+            const heritage = this._ts(file)?.getHeritage(file.content, file.path)
+                || this._extractHeritage(file.content, language);
 
             for (const { childName, parentName, type } of heritage) {
                 const childId = this.symbolExtractor.lookupExact(file.path, childName);
