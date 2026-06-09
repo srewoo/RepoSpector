@@ -10,17 +10,28 @@ import { TreeSitterParser } from '../services/TreeSitterParser.js';
 // Tree-sitter runs here (module context) for the same reason embeddings do:
 // MV3 service workers can't load the WASM runtime, but offscreen documents can.
 // The parser instance is module-scoped so loaded grammars persist across batches.
-const _tsParser = new TreeSitterParser({ module: TreeSitter });
+//
+// Created lazily inside a guard: if TreeSitterParser construction throws, it must
+// NOT abort module evaluation — otherwise the onMessage listener below never
+// registers and every embedding request fails with "message port closed".
+let _tsParser = null;
+function getTsParser() {
+    if (!_tsParser) {
+        _tsParser = new TreeSitterParser({ module: TreeSitter });
+    }
+    return _tsParser;
+}
 
 async function handleTreeSitterAnalyze(files) {
-    await _tsParser.preloadFromFiles(files);
+    const parser = getTsParser();
+    await parser.preloadFromFiles(files);
     const analyses = {};
     for (const file of files) {
-        if (!file.content || !_tsParser.isReadyForPath(file.path)) continue;
-        const a = _tsParser._analyze(file.content, file.path);
+        if (!file.content || !parser.isReadyForPath(file.path)) continue;
+        const a = parser._analyze(file.content, file.path);
         if (a) analyses[file.path] = a;
     }
-    return { available: _tsParser.available, analyses };
+    return { available: parser.available, analyses };
 }
 
 // Configure Transformers.js for Chrome extension environment
@@ -57,6 +68,14 @@ class OffscreenEmbeddingWorker {
 
         try {
             switch (message.type) {
+                case 'OFFSCREEN_PING':
+                    // Readiness handshake: the service worker polls this before
+                    // sending INIT_MODEL, because createDocument() resolves before
+                    // this 1.5MB module finishes evaluating and registers its
+                    // listener. Answering proves the listener is live.
+                    sendResponse({ success: true, ready: true, messageId: message.messageId });
+                    break;
+
                 case 'INIT_MODEL':
                     await this.initModel(message.modelName);
                     sendResponse({ success: true, messageId: message.messageId });

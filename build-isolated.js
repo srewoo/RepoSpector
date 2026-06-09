@@ -328,6 +328,32 @@ async function copyAssets() {
     }
 }
 
+/**
+ * esbuild plugin that resolves Node built-in module imports to an empty
+ * CommonJS module. Used for the browser-targeted offscreen bundle, where
+ * dead Node code paths in dependencies still carry static `import 'fs'`-style
+ * statements that the browser would otherwise fail to resolve at load time.
+ * CommonJS (`module.exports = {}`) is used so any named import (e.g.
+ * `import { readFileSync } from 'fs'`) resolves to `undefined` at runtime
+ * instead of failing the build with "No matching export".
+ */
+function stubNodeBuiltinsPlugin() {
+    const NODE_BUILTINS = /^(fs|fs\/promises|path|module|url|os|crypto|util|stream|worker_threads|node:.*)$/;
+    return {
+        name: 'stub-node-builtins',
+        setup(build) {
+            build.onResolve({ filter: NODE_BUILTINS }, (args) => ({
+                path: args.path,
+                namespace: 'node-builtin-stub'
+            }));
+            build.onLoad({ filter: /.*/, namespace: 'node-builtin-stub' }, () => ({
+                contents: 'module.exports = {};',
+                loader: 'js'
+            }));
+        }
+    };
+}
+
 async function buildOffscreenScript() {
     log('Building offscreen script...');
 
@@ -339,10 +365,16 @@ async function buildOffscreenScript() {
             format: 'esm',
             platform: 'browser',
             target: 'es2020',
-            // web-tree-sitter has Node-only branches (guarded by runtime env checks
-            // that never execute in the browser) which import these built-ins.
-            // Mark them external so esbuild doesn't try to resolve them.
-            external: ['fs', 'fs/promises', 'path', 'module', 'url', 'node:*'],
+            // web-tree-sitter / transformers.js have Node-only branches (guarded by
+            // runtime env checks that never execute in the browser) that import these
+            // built-ins. They must NOT be marked `external`: in an ESM bundle that
+            // leaves a bare `import "fs"` in the output, and the browser throws
+            // "Failed to resolve module specifier 'fs'" at module-load time —
+            // regardless of whether the guarded code ever runs — which aborts the
+            // whole offscreen script and prevents its message listener from ever
+            // registering. Instead, stub them to empty CommonJS modules so the
+            // imports resolve to harmless no-ops.
+            plugins: [stubNodeBuiltinsPlugin()],
             define: {
                 'process.env.NODE_ENV': '"production"'
             }

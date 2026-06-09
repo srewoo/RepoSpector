@@ -80,6 +80,13 @@ export class OffscreenEmbeddingService {
                 this.offscreenDocumentCreated = true;
             }
 
+            // Wait for the offscreen document's onMessage listener to be live.
+            // createDocument() resolves once the document exists, but the ~1.5MB
+            // offscreen bundle (Transformers.js + tree-sitter) may still be
+            // evaluating, so an INIT_MODEL sent now would hit no listener and fail
+            // with "The message port closed before a response was received".
+            await this.waitForOffscreenReady();
+
             // Initialize the model in the offscreen document
             if (onProgress) {
                 onProgress({
@@ -117,9 +124,45 @@ export class OffscreenEmbeddingService {
     }
 
     /**
-     * Send message to offscreen document and wait for response
+     * Poll the offscreen document until its message listener is live.
+     * Handles the race where createDocument() resolves before the heavy
+     * offscreen bundle finishes evaluating and registers onMessage.
+     *
+     * @param {number} totalTimeoutMs - overall budget to wait for readiness
      */
-    async sendMessage(message) {
+    async waitForOffscreenReady(totalTimeoutMs = 20000) {
+        const start = Date.now();
+        let lastError = null;
+
+        while (Date.now() - start < totalTimeoutMs) {
+            try {
+                const res = await this.sendMessage({ type: 'OFFSCREEN_PING' }, { timeout: 1500 });
+                if (res && res.success) {
+                    console.log('✅ Offscreen document is ready');
+                    return;
+                }
+            } catch (err) {
+                lastError = err;
+                // "message port closed" / "Receiving end does not exist" both mean
+                // the listener isn't up yet — wait briefly and retry.
+            }
+            await new Promise(r => setTimeout(r, 250));
+        }
+
+        throw new Error(
+            `Offscreen document did not become ready within ${totalTimeoutMs}ms` +
+            (lastError ? ` (last error: ${lastError.message})` : '')
+        );
+    }
+
+    /**
+     * Send message to offscreen document and wait for response
+     *
+     * @param {object} message
+     * @param {{ timeout?: number }} [options]
+     */
+    async sendMessage(message, options = {}) {
+        const timeoutMs = options.timeout ?? 300000; // default 5 min for model work
         return new Promise((resolve, reject) => {
             const messageId = this.messageId++;
             const messageWithId = { ...message, messageId };
@@ -131,7 +174,7 @@ export class OffscreenEmbeddingService {
             const timeout = setTimeout(() => {
                 this.pendingMessages.delete(messageId);
                 reject(new Error('Offscreen message timeout'));
-            }, 300000); // 5 minutes for model loading
+            }, timeoutMs);
 
             // Send message to offscreen document
             chrome.runtime.sendMessage(messageWithId, (response) => {
@@ -158,20 +201,41 @@ export class OffscreenEmbeddingService {
         }
 
         try {
-            const response = await this.sendMessage({
-                type: 'GENERATE_EMBEDDINGS',
-                texts: texts
-            });
-
-            if (!response.success) {
-                throw new Error(response.error || 'Failed to generate embeddings');
-            }
-
-            return response.embeddings;
+            return await this._sendGenerate(texts);
         } catch (error) {
+            // The offscreen document can be reclaimed by Chrome between batches.
+            // A closed port / missing receiver is recoverable: reset state, re-init
+            // the document + model, and retry once before giving up on the batch.
+            if (this._isConnectionError(error)) {
+                console.warn('⚠️ Offscreen connection lost — re-initializing and retrying batch...');
+                this.isReady = false;
+                this.offscreenDocumentCreated = false;
+                await this.init();
+                return await this._sendGenerate(texts);
+            }
             console.error('Error generating embeddings:', error);
             throw error;
         }
+    }
+
+    /** Send a GENERATE_EMBEDDINGS request and unwrap the response. */
+    async _sendGenerate(texts) {
+        const response = await this.sendMessage({
+            type: 'GENERATE_EMBEDDINGS',
+            texts: texts
+        });
+
+        if (!response || !response.success) {
+            throw new Error((response && response.error) || 'Failed to generate embeddings');
+        }
+
+        return response.embeddings;
+    }
+
+    /** Whether an error indicates a dead/missing offscreen message port. */
+    _isConnectionError(error) {
+        const msg = (error && error.message) || '';
+        return /message port closed|Receiving end does not exist|No matching message handler/i.test(msg);
     }
 
     /**

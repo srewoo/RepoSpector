@@ -51,18 +51,30 @@ export class RAGService {
         await this.vectorStore.init();
 
         // Initialize local embedding model if using that provider
-        if (this.provider === 'local' && this.embeddingService) {
+        if (this.provider === 'local') {
+            // Self-heal: a previous init() failure used to null out the service,
+            // which made every later generateEmbeddings() call throw
+            // "Cannot read properties of null (reading 'generateEmbeddings')" and
+            // silently lose every chunk. Always ensure a service instance exists
+            // so init() can retry cleanly. OffscreenEmbeddingService has its own
+            // isReady/initPromise guards, so re-calling init() is cheap when ready.
+            if (!this.embeddingService) {
+                this.embeddingService = new OffscreenEmbeddingService();
+            }
+
             try {
                 console.log('🔄 Initializing local embedding model...');
                 await this.embeddingService.init(onProgress);
                 console.log('✅ Local embedding model ready!');
             } catch (error) {
                 console.error('❌ Failed to initialize local embedding service:', error);
-                console.warn('⚠️ Falling back to manual embedding provider selection required');
+                console.warn('⚠️ Local embedding init failed — will retry on next init()');
 
-                // Don't throw immediately - allow graceful degradation
-                // User will need to configure OpenAI provider instead
-                this.embeddingService = null;
+                // NOTE: deliberately do NOT null this.embeddingService here.
+                // Keeping the instance lets a subsequent init() retry, and avoids
+                // the guard above being skipped on the next call. We still throw so
+                // callers fail fast with an actionable message instead of running
+                // the embed loop against a dead service and losing all chunks.
 
                 // Provide helpful error message - safely extract original error
                 const errMsg = error?.message || error?.toString?.() || String(error) || 'Unknown error';
@@ -667,6 +679,14 @@ export class RAGService {
 
         let embeddings;
         if (this.provider === 'local') {
+            // Defense in depth: if the embedding service is missing (e.g. a prior
+            // init failure), recreate and initialize it here rather than throwing
+            // a cryptic "Cannot read properties of null" for every batch.
+            if (!this.embeddingService) {
+                console.warn('⚠️ Local embedding service missing — re-initializing...');
+                this.embeddingService = new OffscreenEmbeddingService();
+                await this.embeddingService.init();
+            }
             // Use local embeddings via offscreen document (free, 100% private)
             console.log(`🔢 Generating ${texts.length} embeddings locally...`);
             embeddings = await this.embeddingService.generateEmbeddings(texts);
