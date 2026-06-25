@@ -52,6 +52,9 @@ export function Settings({ onClose }) {
     const [apiKey, setApiKey] = useState('');
     const [provider, setProvider] = useState(LLM_PROVIDERS.OPENAI);
     const [model, setModel] = useState('openai:gpt-4.1-mini');
+    // Embedding provider for repository indexing / RAG (independent of the chat LLM).
+    // 'local' = bundled Transformers.js model (free, private, offline); 'openai' = OpenAI API.
+    const [embeddingProvider, setEmbeddingProvider] = useState('local');
     const [settingsLoaded, setSettingsLoaded] = useState(false);
     const [showKey, setShowKey] = useState(false);
     const [isLoading, setIsLoading] = useState(false);
@@ -104,6 +107,7 @@ export function Settings({ onClose }) {
                     setHasExistingKey(!!settings.apiKey);
                     setGithubToken(settings.githubToken || '');
                     setGitlabToken(settings.gitlabToken || '');
+                    setEmbeddingProvider(settings.embeddingProvider === 'openai' ? 'openai' : 'local');
 
                     // Load review quality settings
                     if (settings.reviewSettings) {
@@ -228,6 +232,7 @@ export function Settings({ onClose }) {
                         apiKey: apiKey,
                         model: model,
                         provider: provider,
+                        embeddingProvider: embeddingProvider,
                         githubToken: githubToken,
                         gitlabToken: gitlabToken,
                         reviewSettings: {
@@ -454,6 +459,33 @@ export function Settings({ onClose }) {
                             </div>
                         </div>
                     )}
+
+                    {/* Embedding Provider — used for repository indexing / RAG (separate from the chat model) */}
+                    <div className="space-y-2 pt-4 border-t border-border">
+                        <label className="text-sm font-medium text-text">Embedding Provider</label>
+                        <select
+                            value={embeddingProvider}
+                            onChange={(e) => setEmbeddingProvider(e.target.value)}
+                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+                        >
+                            <option value="local">Local — Transformers.js (Free &amp; Private) ⭐</option>
+                            <option value="openai">OpenAI (text-embedding-3-small)</option>
+                        </select>
+                        {embeddingProvider === 'local' ? (
+                            <p className="text-xs text-textMuted">
+                                Runs the all-MiniLM-L6-v2 model bundled inside the extension — 100% local,
+                                works offline and behind firewalls. No API key or network required.
+                            </p>
+                        ) : (
+                            <p className="text-xs text-textMuted">
+                                Uses the OpenAI Embeddings API. Requires an <span className="text-text">OpenAI</span> API
+                                key in the field above. Sends your code to OpenAI for embedding.
+                            </p>
+                        )}
+                        <p className="text-xs text-yellow-500">
+                            Changing this requires re-indexing your repositories (embedding dimensions differ).
+                        </p>
+                    </div>
                 </div>
             </Collapsible>
 
@@ -568,7 +600,7 @@ export function Settings({ onClose }) {
                         </div>
                         <button
                             onClick={() => setGroupFindings(!groupFindings)}
-                            className={`relative w-11 h-6 rounded-full transition-colors ${
+                            className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
                                 groupFindings ? 'bg-primary' : 'bg-surface'
                             }`}
                         >
@@ -599,7 +631,7 @@ export function Settings({ onClose }) {
                         </div>
                         <button
                             onClick={() => setEnableOSV(!enableOSV)}
-                            className={`relative w-11 h-6 rounded-full transition-colors ${
+                            className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
                                 enableOSV ? 'bg-primary' : 'bg-surface'
                             }`}
                         >
@@ -620,7 +652,7 @@ export function Settings({ onClose }) {
                         </div>
                         <button
                             onClick={() => setEnableEOL(!enableEOL)}
-                            className={`relative w-11 h-6 rounded-full transition-colors ${
+                            className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
                                 enableEOL ? 'bg-primary' : 'bg-surface'
                             }`}
                         >
@@ -641,7 +673,7 @@ export function Settings({ onClose }) {
                         </div>
                         <button
                             onClick={() => setEnableAdaptiveLearning(!enableAdaptiveLearning)}
-                            className={`relative w-11 h-6 rounded-full transition-colors ${
+                            className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
                                 enableAdaptiveLearning ? 'bg-primary' : 'bg-surface'
                             }`}
                         >
@@ -664,7 +696,7 @@ export function Settings({ onClose }) {
                         </div>
                         <button
                             onClick={() => setEnableOrchestratedReview(!enableOrchestratedReview)}
-                            className={`relative w-11 h-6 rounded-full transition-colors ${
+                            className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
                                 enableOrchestratedReview ? 'bg-primary' : 'bg-surface'
                             }`}
                         >
@@ -691,7 +723,7 @@ export function Settings({ onClose }) {
                         </div>
                         <button
                             onClick={() => setEnablePRComments(!enablePRComments)}
-                            className={`relative w-11 h-6 rounded-full transition-colors ${
+                            className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
                                 enablePRComments ? 'bg-primary' : 'bg-surface'
                             }`}
                         >
@@ -728,7 +760,7 @@ export function Settings({ onClose }) {
                         </div>
                         <button
                             onClick={() => setEnableAutoPostReview(!enableAutoPostReview)}
-                            className={`relative w-11 h-6 rounded-full transition-colors ${
+                            className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
                                 enableAutoPostReview ? 'bg-primary' : 'bg-surface'
                             }`}
                         >
@@ -749,7 +781,7 @@ export function Settings({ onClose }) {
                         </div>
                         <button
                             onClick={() => setEnableUpdatePRDescription(!enableUpdatePRDescription)}
-                            className={`relative w-11 h-6 rounded-full transition-colors ${
+                            className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
                                 enableUpdatePRDescription ? 'bg-primary' : 'bg-surface'
                             }`}
                         >
@@ -770,7 +802,7 @@ export function Settings({ onClose }) {
                         </div>
                         <button
                             onClick={() => setEnablePostInlineComments(!enablePostInlineComments)}
-                            className={`relative w-11 h-6 rounded-full transition-colors ${
+                            className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
                                 enablePostInlineComments ? 'bg-primary' : 'bg-surface'
                             }`}
                         >
@@ -801,7 +833,7 @@ export function Settings({ onClose }) {
                         </div>
                         <button
                             onClick={() => handleToggleTelemetry(!enableTelemetry)}
-                            className={`relative w-11 h-6 rounded-full transition-colors ${
+                            className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
                                 enableTelemetry ? 'bg-primary' : 'bg-surface'
                             }`}
                         >

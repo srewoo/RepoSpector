@@ -79,10 +79,11 @@ export class RAGService {
                 // Provide helpful error message - safely extract original error
                 const errMsg = error?.message || error?.toString?.() || String(error) || 'Unknown error';
                 const helpfulError = new Error(
-                    `Local embedding initialization failed. This is likely because:\n` +
-                    `1. You're in a service worker context (Transformers.js requires DOM)\n` +
-                    `2. The model download failed\n\n` +
-                    `To fix: Go to Settings and configure OpenAI embedding provider instead.\n\n` +
+                    `Local embedding initialization failed. The model + ONNX runtime are ` +
+                    `bundled with the extension, so this usually means the extension was ` +
+                    `not fully rebuilt/reloaded.\n\n` +
+                    `To fix: rebuild the extension and reload it from chrome://extensions, ` +
+                    `or switch the Embedding Provider to OpenAI in Settings → AI Configuration.\n\n` +
                     `Original error: ${errMsg}`
                 );
                 helpfulError.isRecoverable = true;
@@ -839,9 +840,9 @@ export class RAGService {
      * Get provider info
      */
     getProviderInfo() {
-        if (this.provider === 'transformers') {
+        if (this.provider === 'local' && this.embeddingService) {
             return {
-                provider: 'transformers',
+                provider: 'local',
                 ...this.embeddingService.getModelInfo()
             };
         } else {

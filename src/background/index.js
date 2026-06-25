@@ -2376,6 +2376,10 @@ Return only the complete test code with proper syntax for the detected language,
                 console.warn('Failed to decrypt platform tokens:', error);
             }
 
+            // Apply embedding-provider changes immediately so the next index/retrieve
+            // uses the right RAGService (rebuilds only if the provider actually changed).
+            await this.ensureRagEmbeddingProvider();
+
             console.log('Settings saved successfully with encryption');
             sendResponse({ success: true });
         } catch (error) {
@@ -2466,6 +2470,38 @@ Return only the complete test code with proper syntax for the detected language,
         }
 
         return settings;
+    }
+
+    /**
+     * Ensure `this.ragService` matches the embedding provider chosen in Settings.
+     *
+     * The service is constructed once at startup defaulting to 'local'. When the
+     * user picks a different Embedding Provider (Settings → AI Configuration), the
+     * stored `embeddingProvider` becomes the source of truth — rebuild the RAG
+     * service so indexing AND retrieval use the same provider (mixing providers
+     * produces dimension-mismatched vectors: local=384, OpenAI=1536). Callers must
+     * invoke this before any index/retrieve operation. Switching providers requires
+     * re-indexing, which the Settings UI calls out.
+     */
+    async ensureRagEmbeddingProvider() {
+        try {
+            const settings = await this.getStoredSettings();
+            const desired = settings.embeddingProvider === 'openai' ? 'openai' : 'local';
+            const apiKey = settings.apiKey || null;
+
+            if (!this.ragService || this.ragService.provider !== desired) {
+                console.log(`🔄 Rebuilding RAG service for embedding provider: ${desired}`);
+                this.ragService = new RAGService({ provider: desired, apiKey });
+                if (this.contextAnalyzer) {
+                    this.contextAnalyzer.setRagService(this.ragService);
+                }
+            } else if (desired === 'openai') {
+                // Same provider, but keep the OpenAI key fresh for embedding calls.
+                this.ragService.apiKey = apiKey;
+            }
+        } catch (error) {
+            console.warn('ensureRagEmbeddingProvider failed (keeping existing service):', error?.message);
+        }
     }
 
     async getStoredSettings() {
@@ -2630,7 +2666,8 @@ Return only the complete test code with proper syntax for the detected language,
 
             console.log('✅ Repository identified:', { platform: url.includes('github.com') ? 'GitHub' : 'GitLab', repoId });
 
-            // Initialize RAG service
+            // Honor the embedding provider selected in Settings, then initialize.
+            await this.ensureRagEmbeddingProvider();
             await this.ragService.init();
 
             // Send initial progress
@@ -5570,24 +5607,20 @@ console.log('🚀 BackgroundService initialized at startup');
 // ─── RAG handlers (module-scope; close over `ragService`) ────────────────────
 
 async function handleInitRag(message, sendResponse) {
-    const payload = message.payload || {};
     try {
-        const provider = payload.provider || 'openai';
+        // The Embedding Provider in Settings is the single source of truth — this
+        // keeps chat retrieval on the SAME provider used at index time (mixing
+        // local 384-dim and OpenAI 1536-dim vectors silently breaks search).
+        // Local embeddings now run via the offscreen document with a fully bundled
+        // model + ONNX runtime, so 'local' no longer needs a service-worker DOM.
+        await backgroundServiceInstance.ensureRagEmbeddingProvider();
+        ragService = backgroundServiceInstance.ragService;
 
-        if (provider === 'openai' && !payload.apiKey) {
-            sendResponse({ success: false, error: 'API Key required for OpenAI provider' });
-            return;
-        }
-        if (provider === 'transformers') {
-            console.warn('⚠️ Transformers.js is not supported in service worker context.');
-            sendResponse({
-                success: false,
-                error: 'Transformers.js requires DOM access. Use OpenAI embedding provider, or run via the offscreen document.',
-            });
+        if (ragService.provider === 'openai' && !ragService.apiKey) {
+            sendResponse({ success: false, error: 'OpenAI API key required for the OpenAI embedding provider. Set it in Settings, or switch Embedding Provider to Local.' });
             return;
         }
 
-        ragService = new RAGService({ provider, apiKey: payload.apiKey });
         await ragService.init((progress) => {
             if (progress) {
                 chrome.runtime
@@ -5595,10 +5628,6 @@ async function handleInitRag(message, sendResponse) {
                     .catch(() => {});
             }
         });
-
-        if (backgroundServiceInstance && backgroundServiceInstance.contextAnalyzer) {
-            backgroundServiceInstance.contextAnalyzer.setRagService(ragService);
-        }
 
         sendResponse({ success: true, providerInfo: ragService.getProviderInfo() });
     } catch (error) {

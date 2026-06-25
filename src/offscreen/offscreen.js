@@ -34,9 +34,17 @@ async function handleTreeSitterAnalyze(files) {
     return { available: parser.available, analyses };
 }
 
-// Configure Transformers.js for Chrome extension environment
-env.allowLocalModels = false;  // Skip local /models/ path lookups — go straight to HF CDN
-env.backends.onnx.wasm.numThreads = 1;  // Avoid blob: URL CSP violations from ONNX workers
+// Configure Transformers.js for Chrome extension environment.
+// The model weights + tokenizer AND the ONNX WASM runtime are bundled inside
+// the extension (see vite.config.js copyAssets + manifest web_accessible_resources).
+// This makes local embeddings work fully offline / behind corporate firewalls —
+// the previous `allowLocalModels = false` forced a HuggingFace CDN download that
+// failed with "Failed to fetch" on any network where huggingface.co is blocked.
+env.allowLocalModels = true;                                  // Load model from bundled /models/
+env.allowRemoteModels = false;                                // Never fall back to the HF CDN
+env.localModelPath = chrome.runtime.getURL('models/');        // chrome-extension://<id>/models/
+env.backends.onnx.wasm.numThreads = 1;                        // Avoid blob: URL CSP violations from ONNX workers
+env.backends.onnx.wasm.wasmPaths = chrome.runtime.getURL('wasm/'); // Bundled ONNX runtime, no jsdelivr fetch
 
 class OffscreenEmbeddingWorker {
     constructor() {

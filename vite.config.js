@@ -23,6 +23,16 @@ const copyAssets = () => {
                     { recursive: true }
                 );
             }
+
+            // Copy bundled local embedding assets (model weights + ONNX WASM runtime)
+            // so Transformers.js runs fully offline — no HuggingFace/jsdelivr fetch.
+            // See public/models (Xenova/all-MiniLM-L6-v2) and public/wasm.
+            for (const dir of ['models', 'wasm']) {
+                const srcDir = resolve(__dirname, 'public', dir);
+                if (fs.existsSync(srcDir)) {
+                    fs.cpSync(srcDir, resolve(__dirname, 'dist', dir), { recursive: true });
+                }
+            }
         }
     };
 };

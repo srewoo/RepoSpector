@@ -1,8 +1,8 @@
 {
     "manifest_version": 3,
-    "name": "RepoSpector",
-    "version": "6.3",
-    "description": "AI-powered code analysis and test generation for GitHub, GitLab, and more",
+    "name": "RepoSpector — AI Code Review for GitHub & GitLab",
+    "version": "6.5",
+    "description": "AI code review for GitHub & GitLab pull requests. Chat with your codebase, find bugs & security issues, and generate unit tests.",
     "permissions": [
         "activeTab",
         "storage",
@@ -90,7 +90,9 @@
                 "assets/*",
                 "src/popup/*",
                 "offscreen.html",
-                "offscreen/*"
+                "offscreen/*",
+                "models/*",
+                "wasm/*"
             ],
             "matches": [
                 "<all_urls>"

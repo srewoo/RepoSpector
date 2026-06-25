@@ -1,7 +1,7 @@
 {
   "name": "repospector",
-  "version": "6.3",
-  "description": "AI-powered Chrome extension for generating comprehensive test cases from code",
+  "version": "6.5",
+  "description": "RepoSpector — AI-powered code review Chrome extension for GitHub & GitLab. Reviews pull requests, chats with your codebase using local RAG, detects bugs and security vulnerabilities, scans dependencies (OSV), and generates unit tests.",
   "author": "AI RepoSpector Team",
   "license": "MIT",
   "type": "module",

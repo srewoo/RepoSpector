@@ -275,6 +275,15 @@ function copyTreeSitterAssets() {
     log(`Tree-sitter assets copied: runtime + ${copied} grammars (${(totalBytes / 1048576).toFixed(1)} MB)`, 'success');
 }
 
+function dirSizeBytes(dir) {
+    let total = 0;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = `${dir}/${entry.name}`;
+        total += entry.isDirectory() ? dirSizeBytes(full) : fs.statSync(full).size;
+    }
+    return total;
+}
+
 async function copyAssets() {
     log('Copying manifest and assets...');
 
@@ -311,6 +320,22 @@ async function copyAssets() {
     if (fs.existsSync('src/offscreen.html')) {
         fs.copyFileSync('src/offscreen.html', 'dist/offscreen.html');
         log('Offscreen HTML copied', 'success');
+    }
+
+    // Copy bundled local-embedding assets: the all-MiniLM-L6-v2 model weights +
+    // tokenizer (public/models) and the ONNX WASM runtime (public/wasm). Bundling
+    // these lets Transformers.js run fully offline in the offscreen document — no
+    // HuggingFace/jsdelivr fetch, which is what failed with "Failed to fetch" on
+    // firewalled networks. (Vite's publicDir also copies these during buildPopup;
+    // this explicit copy guarantees it regardless of the popup build config.)
+    for (const dir of ['models', 'wasm']) {
+        if (fs.existsSync(`public/${dir}`)) {
+            fs.cpSync(`public/${dir}`, `dist/${dir}`, { recursive: true });
+            const bytes = dirSizeBytes(`dist/${dir}`);
+            log(`Embedding assets copied: ${dir} (${(bytes / 1048576).toFixed(1)} MB)`, 'success');
+        } else {
+            log(`public/${dir} missing — local embeddings will fail until assets are added`, 'warning');
+        }
     }
 
     // Copy tree-sitter WASM runtime + grammars (loaded at runtime in offscreen doc)
