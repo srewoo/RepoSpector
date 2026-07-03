@@ -10,7 +10,8 @@
     "./skip-rules": "./src/SkipRuleEngine.js",
     "./chunker": "./src/MRChunker.js",
     "./normalizer": "./src/FindingsNormalizer.js",
-    "./orchestrator": "./src/ReviewOrchestrator.js"
+    "./orchestrator": "./src/ReviewOrchestrator.js",
+    "./engine-contract": "./src/engineContract.js"
   },
   "scripts": {
     "test": "echo 'tests live in the repo root suite — see test/unit/'"

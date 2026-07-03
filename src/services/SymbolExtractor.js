@@ -9,14 +9,7 @@
  */
 
 import { KnowledgeGraphService } from './KnowledgeGraphService.js';
-
-const LANGUAGE_MAP = {
-    js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
-    ts: 'typescript', tsx: 'typescript',
-    py: 'python', java: 'java', go: 'go', rb: 'ruby',
-    rs: 'rust', c: 'c', h: 'c', cpp: 'cpp', hpp: 'cpp', cc: 'cpp',
-    cs: 'csharp', php: 'php'
-};
+import { detectLanguageFromPath } from '../utils/languageMap.js';
 
 export class SymbolExtractor {
     constructor() {
@@ -635,9 +628,7 @@ export class SymbolExtractor {
     }
 
     detectLanguage(filename) {
-        if (!filename) return 'unknown';
-        const ext = filename.split('.').pop()?.toLowerCase();
-        return LANGUAGE_MAP[ext] || 'unknown';
+        return detectLanguageFromPath(filename, { fallback: 'unknown' });
     }
 }
 

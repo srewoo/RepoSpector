@@ -8,6 +8,10 @@ import { DiffParser } from '../utils/diffParser.js';
 import { CODE_SELECTORS, SUPPORTED_LANGUAGES as _SUPPORTED_LANGUAGES } from '../utils/constants.js';
 import { Sanitizer } from '../utils/sanitizer.js';
 import { initDiffOverlay } from './diffOverlay.js';
+import {
+    cleanLineNumbers as cleanLineNumbersFn,
+    cleanupExtractedCode as cleanupExtractedCodeFn,
+} from './codeCleaning.js';
 
 // Note: Services are now initialized as instance properties in the ContentExtractor class
 
@@ -879,13 +883,7 @@ class ContentExtractor {
      * Clean line numbers from extracted code
      */
     cleanLineNumbers(code) {
-        // Remove common line number patterns
-        const lines = code.split('\n');
-        const cleanedLines = lines.map(line => {
-            // Remove leading line numbers like "123 " or "123\t"
-            return line.replace(/^\s*\d+[\s\t]+/, '');
-        });
-        return cleanedLines.join('\n');
+        return cleanLineNumbersFn(code);
     }
 
     /**
@@ -1580,37 +1578,7 @@ class ContentExtractor {
      * Clean up extracted code by removing line numbers and other artifacts
      */
     cleanupExtractedCode(code) {
-        if (!code) return code;
-
-        let cleaned = code;
-
-        // Remove line numbers at the beginning of lines (common in GitLab/GitHub)
-        // Matches: "1  some code" or "123  some code"
-        cleaned = cleaned.replace(/^\d+\s{2,}/gm, '');
-
-        // Remove line numbers with tabs or multiple spaces
-        cleaned = cleaned.replace(/^\d+\t/gm, '');
-
-        // Remove line numbers with single space (more aggressive for GitLab)
-        // Only remove if followed by typical code characters
-        cleaned = cleaned.replace(/^(\d+)\s+([a-zA-Z_#@"'$])/gm, '$2');
-
-        // Remove GitLab-specific UI elements
-        cleaned = cleaned.replace(/^\s*Copy\s*$/gm, '');
-        cleaned = cleaned.replace(/^\s*View\s*$/gm, '');
-        cleaned = cleaned.replace(/^\s*Raw\s*$/gm, '');
-        cleaned = cleaned.replace(/^\s*Blame\s*$/gm, '');
-        cleaned = cleaned.replace(/^\s*Edit\s*$/gm, '');
-        cleaned = cleaned.replace(/^\s*Open in Web IDE\s*$/gm, '');
-        cleaned = cleaned.replace(/^\s*Download\s*$/gm, '');
-
-        // Remove excessive empty lines
-        cleaned = cleaned.replace(/\n\s*\n\s*\n/g, '\n\n');
-
-        // Trim whitespace from start and end
-        cleaned = cleaned.trim();
-
-        return cleaned;
+        return cleanupExtractedCodeFn(code);
     }
 
     /**

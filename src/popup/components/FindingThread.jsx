@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { cn } from '@/lib/utils';
-import { motion, AnimatePresence } from 'framer-motion';
+import { MotionDiv, LazyAnimatePresence } from './ui/MotionDiv';
 import {
     MessageSquare,
     Send,
@@ -203,9 +203,9 @@ export function FindingThread({
                 )}
 
                 {/* Messages */}
-                <AnimatePresence mode="popLayout">
+                <LazyAnimatePresence mode="popLayout">
                     {messages.map((msg, index) => (
-                        <motion.div
+                        <MotionDiv
                             key={msg.id || index}
                             initial={{ opacity: 0, y: 10 }}
                             animate={{ opacity: 1, y: 0 }}
@@ -262,13 +262,13 @@ export function FindingThread({
                                     <User className="w-4 h-4 text-textMuted" />
                                 </div>
                             )}
-                        </motion.div>
+                        </MotionDiv>
                     ))}
-                </AnimatePresence>
+                </LazyAnimatePresence>
 
                 {/* Loading indicator */}
                 {sending && (
-                    <motion.div
+                    <MotionDiv
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
                         className="flex gap-3"
@@ -282,7 +282,7 @@ export function FindingThread({
                                 Thinking...
                             </div>
                         </div>
-                    </motion.div>
+                    </MotionDiv>
                 )}
 
                 {/* Suggested questions - show after first response */}

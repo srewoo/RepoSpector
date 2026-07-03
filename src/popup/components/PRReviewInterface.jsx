@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { cn } from '@/lib/utils';
-import { AnimatePresence, motion } from 'framer-motion';
+import { MotionDiv, LazyAnimatePresence } from './ui/MotionDiv';
 import { usePRReview } from '../hooks/usePRReview.js';
 import { parseStandardsChecklist, parseSummaryCounts } from '../utils/findingsParser.js';
 import {
@@ -435,9 +435,9 @@ export function PRReviewInterface({
             </div>
 
             {/* Tab Content */}
-            <AnimatePresence mode="wait">
+            <LazyAnimatePresence mode="wait">
                 {activeTab === 'summary' && (
-                    <motion.div
+                    <MotionDiv
                         key="summary"
                         initial={{ opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
@@ -600,11 +600,11 @@ export function PRReviewInterface({
                                 </CardContent>
                             </Card>
                         )}
-                    </motion.div>
+                    </MotionDiv>
                 )}
 
                 {activeTab === 'overview' && (
-                    <motion.div
+                    <MotionDiv
                         key="overview"
                         initial={{ opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
@@ -643,11 +643,11 @@ export function PRReviewInterface({
                                     ))}
                             </div>
                         )}
-                    </motion.div>
+                    </MotionDiv>
                 )}
 
                 {activeTab === 'findings' && (
-                    <motion.div
+                    <MotionDiv
                         key="findings"
                         initial={{ opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
@@ -680,11 +680,11 @@ export function PRReviewInterface({
                                 </p>
                             </Card>
                         )}
-                    </motion.div>
+                    </MotionDiv>
                 )}
 
                 {activeTab === 'static' && (
-                    <motion.div
+                    <MotionDiv
                         key="static"
                         initial={{ opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
@@ -696,9 +696,9 @@ export function PRReviewInterface({
                             loading={loading}
                             repoId={repoId}
                         />
-                    </motion.div>
+                    </MotionDiv>
                 )}
-            </AnimatePresence>
+            </LazyAnimatePresence>
 
             {/* Loading overlay with progress */}
             {loading && (

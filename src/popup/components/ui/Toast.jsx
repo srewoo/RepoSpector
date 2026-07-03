@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { MotionDiv, LazyAnimatePresence } from './MotionDiv';
 import { CheckCircle, AlertCircle, AlertTriangle, Info, X } from 'lucide-react';
 
 // Toast Context
@@ -44,7 +44,7 @@ function Toast({ id, type = 'info', title, message, duration = 3000, onDismiss }
     }, [id, duration, onDismiss]);
 
     return (
-        <motion.div
+        <MotionDiv
             layout
             initial={{ opacity: 0, y: -20, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -67,7 +67,7 @@ function Toast({ id, type = 'info', title, message, duration = 3000, onDismiss }
             >
                 <X className="w-4 h-4 opacity-60 hover:opacity-100" />
             </button>
-        </motion.div>
+        </MotionDiv>
     );
 }
 
@@ -75,13 +75,13 @@ function Toast({ id, type = 'info', title, message, duration = 3000, onDismiss }
 function ToastContainer({ toasts, onDismiss }) {
     return (
         <div className="fixed top-4 right-4 z-[100] flex flex-col gap-2 pointer-events-none">
-            <AnimatePresence mode="popLayout">
+            <LazyAnimatePresence mode="popLayout">
                 {toasts.map((toast) => (
                     <div key={toast.id} className="pointer-events-auto">
                         <Toast {...toast} onDismiss={onDismiss} />
                     </div>
                 ))}
-            </AnimatePresence>
+            </LazyAnimatePresence>
         </div>
     );
 }

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { MotionDiv, LazyAnimatePresence } from './MotionDiv';
 import { ChevronDown } from 'lucide-react';
 import { cn } from '../../utils/cn';
 
@@ -35,17 +35,17 @@ export function Collapsible({
                         </span>
                     )}
                 </div>
-                <motion.div
+                <MotionDiv
                     animate={{ rotate: isOpen ? 180 : 0 }}
                     transition={{ duration: 0.2 }}
                 >
                     <ChevronDown className="w-4 h-4 text-textMuted" />
-                </motion.div>
+                </MotionDiv>
             </button>
 
-            <AnimatePresence initial={false}>
+            <LazyAnimatePresence initial={false}>
                 {isOpen && (
-                    <motion.div
+                    <MotionDiv
                         initial={{ height: 0, opacity: 0 }}
                         animate={{ height: 'auto', opacity: 1 }}
                         exit={{ height: 0, opacity: 0 }}
@@ -54,9 +54,9 @@ export function Collapsible({
                         <div className="p-4 bg-surface/50">
                             {children}
                         </div>
-                    </motion.div>
+                    </MotionDiv>
                 )}
-            </AnimatePresence>
+            </LazyAnimatePresence>
         </div>
     );
 }

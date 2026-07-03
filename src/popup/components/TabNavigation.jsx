@@ -1,6 +1,6 @@
 import React from 'react';
 import { Home, Database, MessageSquare, Settings, GitPullRequest } from 'lucide-react';
-import { motion } from 'framer-motion';
+import { MotionDiv } from './ui/MotionDiv';
 
 const tabs = [
     { id: 'home', label: 'Home', icon: Home },
@@ -45,7 +45,7 @@ export function TabNavigation({ activeTab, onTabChange, repoCount = 0, isOnPRPag
                                 {tab.label}
                             </span>
                             {isActive && (
-                                <motion.div
+                                <MotionDiv
                                     layoutId="activeTab"
                                     className="absolute top-0 inset-x-0 mx-auto w-8 h-0.5 bg-gradient-to-r from-primary to-secondary rounded-full"
                                     initial={false}

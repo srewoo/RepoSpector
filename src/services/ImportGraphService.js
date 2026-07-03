@@ -5,6 +5,8 @@
  * in changed files to detect cross-file impact and potential breaking changes.
  */
 
+import { detectLanguageFromPath } from '../utils/languageMap.js';
+
 export class ImportGraphService {
     constructor() {
         this.graph = new Map(); // filePath → { imports: [], exports: [] }
@@ -466,15 +468,9 @@ export class ImportGraphService {
      * Detect language from filename
      */
     detectLanguage(filename) {
-        if (!filename) return 'unknown';
-        const ext = filename.split('.').pop()?.toLowerCase();
-        const map = {
-            js: 'javascript', jsx: 'jsx', mjs: 'javascript', cjs: 'javascript',
-            ts: 'typescript', tsx: 'tsx',
-            py: 'python', java: 'java', go: 'go', rb: 'ruby',
-            rs: 'rust', cs: 'csharp', php: 'php'
-        };
-        return map[ext] || 'unknown';
+        // distinguishJsx: this service's import/export parser branches on
+        // 'jsx'/'tsx' as distinct languages (see parseImports/parseExports).
+        return detectLanguageFromPath(filename, { fallback: 'unknown', distinguishJsx: true });
     }
 }
 

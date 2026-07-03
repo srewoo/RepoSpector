@@ -1,175 +1,83 @@
-// Mock the CodeChunker module
-const mockCodeChunker = {
-    chunkCode: jest.fn(),
-    findNaturalBoundary: jest.fn(),
-    addOverlapContext: jest.fn(),
-    estimateTokens: jest.fn(),
-    modelLimits: {
-        'gpt-4-turbo-preview': 128000,
-        'gpt-4': 8192,
-        'gpt-3.5-turbo': 4096
-    }
-};
+/**
+ * Tests for the REAL CodeChunker (src/utils/chunking.js) — no mocks.
+ * Previously this suite jest.mock'd the subject and tested inline fakes with
+ * method names ('chunkCode', 'findNaturalBoundary', 'addOverlapContext') that
+ * do not exist in production.
+ */
 
-jest.mock('../../src/utils/chunking.js', () => ({
-    CodeChunker: jest.fn().mockImplementation(() => mockCodeChunker)
-}));
+const { CodeChunker } = require('../../src/utils/chunking.js');
 
 describe('CodeChunker', () => {
+    let chunker;
     beforeEach(() => {
-        jest.clearAllMocks();
-        
-        // Setup default mock implementations
-        mockCodeChunker.chunkCode.mockImplementation((code, options = {}) => {
-            if (!code) return [''];
-            
-            const maxTokens = options.maxTokensPerChunk || 4000;
-            const estimatedTokens = code.length / 4; // Rough estimate
-            
-            if (estimatedTokens <= maxTokens) {
-                return [code];
-            }
-            
-            // Simple chunking for tests
-            const chunks = [];
-            const chunkSize = maxTokens * 4; // Convert back to characters
-            for (let i = 0; i < code.length; i += chunkSize) {
-                chunks.push(code.slice(i, i + chunkSize));
-            }
-            
-            return chunks;
-        });
-
-        mockCodeChunker.findNaturalBoundary.mockImplementation((code, position) => {
-            // Find nearest function or class boundary
-            const functionMatch = code.indexOf('function', position);
-            const classMatch = code.indexOf('class', position);
-            
-            if (functionMatch !== -1 && (classMatch === -1 || functionMatch < classMatch)) {
-                return functionMatch;
-            } else if (classMatch !== -1) {
-                return classMatch;
-            }
-            
-            // Fall back to newline
-            const newlineMatch = code.indexOf('\n', position);
-            return newlineMatch !== -1 ? newlineMatch + 1 : position;
-        });
-
-        mockCodeChunker.addOverlapContext.mockImplementation((prevChunk, currentChunk, contextSize = 200) => {
-            const context = prevChunk.slice(-contextSize);
-            return context + currentChunk;
-        });
-
-        mockCodeChunker.estimateTokens.mockImplementation((code) => {
-            // Simple token estimation
-            return Math.ceil(code.length / 4);
-        });
-    });
-
-    describe('chunkCode', () => {
-        it('should not chunk small code', () => {
-            const smallCode = 'function test() {\n  return "Hello World";\n}';
-            const chunks = mockCodeChunker.chunkCode(smallCode);
-            expect(chunks).toHaveLength(1);
-            expect(chunks[0]).toBe(smallCode);
-        });
-
-        it('should chunk large code based on token limits', () => {
-            // Create a large code string
-            const functionTemplate = `
-function testFunction$INDEX() {
-    // This is a test function with some content
-    const data = {
-        id: $INDEX,
-        name: "Test $INDEX",
-        description: "This is a longer description to add more tokens to the function"
-    };
-    
-    if (data.id > 0) {
-        console.log("Processing data:", data);
-        return data;
-    }
-    
-    throw new Error("Invalid data");
-}
-`;
-            let largeCode = '';
-            for (let i = 0; i < 100; i++) {
-                largeCode += functionTemplate.replace(/\$INDEX/g, i.toString());
-            }
-
-            const chunks = mockCodeChunker.chunkCode(largeCode, { 
-                model: 'gpt-4-turbo-preview',
-                maxTokensPerChunk: 1000 
-            });
-            
-            expect(chunks.length).toBeGreaterThan(1);
-            chunks.forEach(chunk => {
-                expect(chunk).toBeTruthy();
-                expect(chunk.length).toBeLessThan(largeCode.length);
-            });
-        });
-
-        it('should handle empty or invalid input', () => {
-            expect(mockCodeChunker.chunkCode('')).toEqual(['']);
-            expect(mockCodeChunker.chunkCode(null)).toEqual(['']);
-            expect(mockCodeChunker.chunkCode(undefined)).toEqual(['']);
-        });
-    });
-
-    describe('findNaturalBoundary', () => {
-        it('should find function boundaries', () => {
-            const code = 'function test() {\n  return true;\n}\n\nfunction another() {\n  return false;\n}';
-            const boundary = mockCodeChunker.findNaturalBoundary(code, 30);
-            expect(code.substring(boundary)).toMatch(/^function another/);
-        });
-
-        it('should find class boundaries', () => {
-            const code = 'class First {\n  method() {}\n}\n\nclass Second {\n  method() {}\n}';
-            const boundary = mockCodeChunker.findNaturalBoundary(code, 25);
-            expect(code.substring(boundary)).toMatch(/^class Second/);
-        });
-
-        it('should fall back to newline boundaries', () => {
-            const code = 'const a = 1;\nconst b = 2;\nconst c = 3;';
-            const boundary = mockCodeChunker.findNaturalBoundary(code, 15);
-            expect(code[boundary - 1]).toBe('\n');
-        });
-    });
-
-    describe('addOverlapContext', () => {
-        it('should add context from previous chunk', () => {
-            const prevChunk = 'function helper() {\n  return true;\n}\n\n';
-            const currentChunk = 'function main() {\n  return helper();\n}';
-            const withContext = mockCodeChunker.addOverlapContext(prevChunk, currentChunk);
-            
-            expect(withContext).toContain('helper');
-            expect(withContext).toContain('main');
-        });
-
-        it('should limit context size', () => {
-            const prevChunk = 'a'.repeat(1000);
-            const currentChunk = 'function test() {}';
-            const withContext = mockCodeChunker.addOverlapContext(prevChunk, currentChunk, 100);
-            
-            expect(withContext.length).toBeLessThan(prevChunk.length + currentChunk.length);
-            expect(withContext).toContain('test');
-        });
+        chunker = new CodeChunker();
     });
 
     describe('estimateTokens', () => {
-        it('should estimate tokens for code', () => {
-            const code = 'function test() { return "Hello World"; }';
-            const tokens = mockCodeChunker.estimateTokens(code);
-            expect(tokens).toBeGreaterThan(0);
-            expect(tokens).toBeLessThan(code.length); // Tokens should be less than character count
-        });
-
-        it('should handle special characters', () => {
-            const codeWithSpecialChars = 'const regex = /[a-zA-Z0-9]+/g; // Comment';
-            const tokens = mockCodeChunker.estimateTokens(codeWithSpecialChars);
-            expect(tokens).toBeGreaterThan(0);
+        it('should estimate ~1 token per 4 characters', () => {
+            expect(chunker.estimateTokens('')).toBe(0);
+            expect(chunker.estimateTokens('a'.repeat(400))).toBe(100);
         });
     });
-}); 
+
+    describe('getMaxTokensForModel / getChunkSize', () => {
+        it('should return known model limits and fall back to default', () => {
+            expect(chunker.getMaxTokensForModel('gpt-4.1')).toBe(128000);
+            expect(chunker.getMaxTokensForModel('embedding')).toBe(1500);
+            expect(chunker.getMaxTokensForModel('nonexistent-model')).toBe(chunker.modelLimits.default);
+        });
+
+        it('should compute a positive chunk size in characters', () => {
+            const size = chunker.getChunkSize('gpt-4.1');
+            expect(size).toBeGreaterThan(0);
+            // embedding reserves no tokens, so its char size should be smaller
+            expect(chunker.getChunkSize('embedding')).toBeLessThan(size);
+        });
+    });
+
+    describe('createSemanticChunks', () => {
+        it('should return an empty array for empty or whitespace code', () => {
+            expect(chunker.createSemanticChunks('', 'gpt-4.1')).toEqual([]);
+            expect(chunker.createSemanticChunks('   \n  ', 'gpt-4.1')).toEqual([]);
+        });
+
+        it('should return a single chunk for small code', () => {
+            const code = 'function add(a, b) {\n  return a + b;\n}\n';
+            const chunks = chunker.createSemanticChunks(code, 'gpt-4.1');
+            expect(chunks.length).toBe(1);
+            expect(chunks[0]).toMatchObject({ type: 'code' });
+            expect(chunks[0].content).toContain('function add');
+            expect(chunks[0].tokens).toBeGreaterThan(0);
+        });
+
+        it('should split large code into multiple chunks under a small model budget', () => {
+            // Build many small functions so the estimated token count comfortably
+            // exceeds the embedding model's small chunk budget, forcing a split.
+            const count = 1500;
+            const fns = Array.from({ length: count }, (_, i) =>
+                `function fn${i}(x) {\n  return x + ${i};\n}\n`).join('\n');
+            const chunks = chunker.createSemanticChunks(fns, 'embedding');
+            expect(chunks.length).toBeGreaterThan(1);
+            // Reassembled content should still contain first and last functions.
+            const joined = chunks.map(c => c.content).join('');
+            expect(joined).toContain('function fn0');
+            expect(joined).toContain(`function fn${count - 1}`);
+        });
+
+        it('should still produce a chunk for code with no detectable boundaries', () => {
+            const blob = 'x'.repeat(200);
+            const chunks = chunker.createSemanticChunks(blob, 'gpt-4.1');
+            expect(chunks.length).toBeGreaterThanOrEqual(1);
+            expect(chunks[0].content.length).toBeGreaterThan(0);
+        });
+    });
+
+    describe('findCodeBoundaries', () => {
+        it('should find function/class boundaries in JS code', () => {
+            const code = 'function a() {}\nclass B {}\nconst c = function() {};\n';
+            const boundaries = chunker.findCodeBoundaries(code);
+            expect(Array.isArray(boundaries)).toBe(true);
+            expect(boundaries.length).toBeGreaterThan(0);
+        });
+    });
+});

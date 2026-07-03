@@ -58,15 +58,18 @@ global.chrome = {
     }
 };
 
-// Mock crypto API
-global.crypto = {
-    getRandomValues: (array) => {
-        for (let i = 0; i < array.length; i++) {
-            array[i] = Math.floor(Math.random() * 256);
-        }
-        return array;
-    }
-};
+// Real WebCrypto (Node's implementation) so production crypto — AES-GCM,
+// PBKDF2, SubtleCrypto — actually runs under the test harness instead of a
+// Math.random stub. Provides both getRandomValues and crypto.subtle.
+// jsdom installs a read-only `crypto` accessor (getRandomValues only, no
+// subtle), so a plain assignment is silently ignored — defineProperty is
+// required to replace it.
+const { webcrypto } = require('crypto');
+Object.defineProperty(globalThis, 'crypto', {
+    value: webcrypto,
+    configurable: true,
+    writable: true,
+});
 
 // Mock fetch API
 global.fetch = jest.fn(() =>
@@ -137,11 +140,13 @@ global.navigator = {
     }
 };
 
-// Mock URL
-global.URL = {
-    createObjectURL: jest.fn(() => 'blob:mock-url'),
-    revokeObjectURL: jest.fn()
-};
+// Use the REAL URL constructor (Node's) so production code that does
+// `new URL(...)` for parsing/validation works, and attach the object-URL
+// helpers as mocks. The previous plain-object mock broke every `new URL()`.
+const { URL: NodeURL } = require('url');
+NodeURL.createObjectURL = jest.fn(() => 'blob:mock-url');
+NodeURL.revokeObjectURL = jest.fn();
+global.URL = NodeURL;
 
 // Mock console methods to avoid noise in tests
 global.console = {

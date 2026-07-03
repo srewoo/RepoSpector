@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "RepoSpector — AI Code Review for GitHub & GitLab",
-    "version": "6.5",
+    "version": "6.6",
     "description": "AI code review for GitHub & GitLab pull requests. Chat with your codebase, find bugs & security issues, and generate unit tests.",
     "permissions": [
         "activeTab",
@@ -32,18 +32,9 @@
         "https://api.mistral.ai/*",
         "https://huggingface.co/*",
         "https://*.huggingface.co/*",
-        "https://cdn-lfs.huggingface.co/*",
-        "https://cas-bridge.xethub.hf.co/*",
-        "https://*.xethub.hf.co/*",
-        "https://cdn.jsdelivr.net/*",
-        "https://*.jsdelivr.net/*",
         "https://api.osv.dev/*",
         "https://endoflife.date/*",
         "http://localhost/*"
-    ],
-    "optional_host_permissions": [
-        "https://*/*",
-        "http://*/*"
     ],
     "action": {
         "default_popup": "src/popup/index.html",
@@ -95,11 +86,21 @@
                 "wasm/*"
             ],
             "matches": [
-                "<all_urls>"
+                "https://github.com/*",
+                "https://gitlab.com/*",
+                "https://bitbucket.org/*",
+                "https://dev.azure.com/*",
+                "https://*.visualstudio.com/*",
+                "https://sourceforge.net/*",
+                "https://codeberg.org/*",
+                "https://*.gitea.io/*",
+                "https://*.gitea.com/*",
+                "https://git.sr.ht/*",
+                "https://*.pagure.io/*"
             ]
         }
     ],
     "content_security_policy": {
-        "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' http://localhost:* https://api.openai.com https://api.anthropic.com https://generativelanguage.googleapis.com https://api.groq.com https://api.mistral.ai https://api.github.com https://gitlab.com https://api.bitbucket.org https://dev.azure.com https://raw.githubusercontent.com https://sourceforge.net https://codeberg.org https://git.sr.ht https://*.gitea.io https://*.gitea.com https://*.pagure.io https://huggingface.co https://*.huggingface.co https://cdn-lfs.huggingface.co https://cas-bridge.xethub.hf.co https://*.xethub.hf.co https://cdn.jsdelivr.net https://*.jsdelivr.net https://api.osv.dev https://endoflife.date; font-src 'self';"
+        "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' http://localhost:* https://api.openai.com https://api.anthropic.com https://generativelanguage.googleapis.com https://api.groq.com https://api.mistral.ai https://api.github.com https://gitlab.com https://api.bitbucket.org https://dev.azure.com https://raw.githubusercontent.com https://sourceforge.net https://codeberg.org https://git.sr.ht https://*.gitea.io https://*.gitea.com https://*.pagure.io https://huggingface.co https://*.huggingface.co https://api.osv.dev https://endoflife.date; font-src 'self';"
     }
 }

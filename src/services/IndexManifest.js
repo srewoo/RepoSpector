@@ -5,6 +5,8 @@
  * Enables efficient re-indexing of only changed files.
  */
 
+import { detectLanguageFromPath } from '../utils/languageMap.js';
+
 /**
  * Calculate hash for content (using FNV-1a algorithm for speed)
  */
@@ -257,40 +259,7 @@ export class IndexManifest {
      * Detect language from file extension
      */
     detectLanguage(filePath) {
-        const ext = filePath.split('.').pop()?.toLowerCase();
-        const languageMap = {
-            'js': 'javascript',
-            'jsx': 'javascript',
-            'ts': 'typescript',
-            'tsx': 'typescript',
-            'py': 'python',
-            'java': 'java',
-            'rb': 'ruby',
-            'go': 'go',
-            'rs': 'rust',
-            'c': 'c',
-            'cpp': 'cpp',
-            'h': 'c',
-            'hpp': 'cpp',
-            'cs': 'csharp',
-            'php': 'php',
-            'swift': 'swift',
-            'kt': 'kotlin',
-            'scala': 'scala',
-            'vue': 'vue',
-            'svelte': 'svelte',
-            'html': 'html',
-            'css': 'css',
-            'scss': 'scss',
-            'less': 'less',
-            'json': 'json',
-            'yaml': 'yaml',
-            'yml': 'yaml',
-            'md': 'markdown',
-            'sql': 'sql'
-        };
-
-        return languageMap[ext] || 'unknown';
+        return detectLanguageFromPath(filePath, { fallback: 'unknown' });
     }
 
     /**

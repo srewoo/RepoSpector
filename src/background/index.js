@@ -17,7 +17,6 @@ import {
     buildEnhancedTestPrompt,
     buildEnhancedChatPrompt,
     CODE_REVIEW_PROMPT,
-    TEST_TYPE_PROMPTS,
     PR_ANALYSIS_SYSTEM_PROMPT,
     buildPRAnalysisPrompt,
     buildPRSummaryPrompt,
@@ -65,7 +64,9 @@ import { REPO_INFO_ENRICHMENT_SYSTEM_PROMPT, buildRepoInfoEnrichmentPrompt } fro
 import { MultiPassReviewEngine } from '../services/MultiPassReviewEngine.js';
 import { ReviewOrchestrator } from '../services/ReviewOrchestrator.js';
 import { VERDICT } from '../services/reviewSchema.js';
-import { AegisClient } from '../services/AegisClient.js';
+// Kept for the future backend re-enable (see docs/adr/0001-backend-service.md);
+// prefixed with `_` so the intentionally-unused import passes lint.
+import { AegisClient as _AegisClient } from '../services/AegisClient.js';
 import { FindingFollowupService } from '../services/FindingFollowupService.js';
 import { CodeGraphPipeline } from '../services/CodeGraphPipeline.js';
 import { ReviewMetricsService } from '../services/ReviewMetricsService.js';
@@ -73,6 +74,8 @@ import { PRComplianceChecker } from '../services/PRComplianceChecker.js';
 import { FindingCache } from '../services/FindingCache.js';
 import { TelemetryService } from '../services/TelemetryService.js';
 import { dispatch, registerHandlers } from './messageRouter.js';
+import { validateMermaidSyntax, sanitizeMermaidCode } from './mermaidValidation.js';
+import { createRagHandlers } from './handlers/ragHandlers.js';
 import { detectLanguages, buildStandardsBlock } from '../utils/standardsLoader.js';
 
 /**
@@ -1815,188 +1818,6 @@ Format your response in a developer-friendly way with code examples where approp
         // Use the enhanced prompt builder from prompts.js
         // This provides much more comprehensive test generation guidance
         return buildEnhancedTestPrompt(code, options, enhancedContext);
-    }
-
-    /**
-     * Get the system prompt for test generation
-     * This is used separately from the user prompt for better LLM performance
-     */
-    getTestGenerationSystemPrompt() {
-        return TEST_GENERATION_SYSTEM_PROMPT;
-    }
-
-    /**
-     * Get additional context for specific test types
-     */
-    getTestTypeContext(testType) {
-        return TEST_TYPE_PROMPTS[testType] || '';
-    }
-
-    buildAllTypesDescriptionsPrompt() {
-        return `
-**RESPONSE FORMAT:**
-Provide ONLY test descriptions and scenarios for ALL applicable test types. Organize as follows:
-
-# Comprehensive Test Suite
-
-## 1. Unit Tests
-### Setup Requirements:
-- [List unit test setup needs]
-- [Mock specifications for dependencies]
-
-### Test Cases:
-#### Positive Tests:
-1. **Test Name**: Description of what this validates
-   - **Input**: Expected parameters
-   - **Expected Outcome**: What should happen
-   - **Assertions**: Key validations
-
-#### Negative Tests:
-[Error cases and edge conditions]
-
-#### Edge Cases:
-[Boundary conditions and special scenarios]
-
-## 2. Integration Tests
-### Setup Requirements:
-- [Integration test environment setup]
-- [Database/service dependencies]
-
-### Test Cases:
-#### Component Integration:
-1. **Test Name**: How components work together
-   - **Setup**: Required test environment
-   - **Scenario**: Integration workflow
-   - **Verification**: End-to-end validation
-
-#### Data Flow Tests:
-[Tests for data passing between components]
-
-## 3. API Tests (if applicable)
-### Setup Requirements:
-- [API test environment]
-- [Authentication/authorization setup]
-
-### Test Cases:
-#### Endpoint Tests:
-1. **Test Name**: API endpoint validation
-   - **Request**: HTTP method, headers, body
-   - **Expected Response**: Status, headers, body structure
-   - **Validation**: Response schema and business logic
-
-#### Error Handling:
-[Invalid requests, server errors, timeouts]
-
-## 4. End-to-End Tests (if applicable)
-### Setup Requirements:
-- [Browser/environment setup]
-- [Test data preparation]
-
-### Test Cases:
-#### User Workflows:
-1. **Test Name**: Complete user journey
-   - **Steps**: User actions sequence
-   - **Expected Behavior**: UI responses and state changes
-   - **Verification**: Final state validation
-
-Do NOT include actual test code implementation.`;
-    }
-
-    buildAllTypesImplementationPrompt(_options) {
-        return `
-**RESPONSE FORMAT:**
-Provide complete, runnable test code for ALL applicable test types using the appropriate testing framework for the detected language.
-
-**IMPORTANT INSTRUCTIONS:**
-1. Analyze the provided code to determine:
-   - The programming language
-   - The most appropriate testing framework for that language
-   - If existing tests are present, follow the exact same style and framework
-2. Generate idiomatic test code following the language's best practices
-3. Use the standard testing conventions for that language/framework
-4. Structure tests logically with setup, teardown, positive cases, negative cases, and edge cases
-5. Include appropriate imports/requires for the testing framework
-6. Ensure tests are complete, runnable, and production-ready
-
-**Test Types to Generate (where applicable):**
-1. **Unit Tests** - Test individual functions/methods in isolation
-2. **Integration Tests** - Test component interactions and data flow
-3. **API Tests** - Test API endpoints (if the code contains API/HTTP handlers)
-4. **End-to-End Tests** - Test complete workflows (if applicable)
-
-**Guidelines:**
-- Use the appropriate testing framework for the language (e.g., Jest/Mocha/Vitest for JavaScript, pytest for Python, JUnit for Java, NUnit for C#, RSpec for Ruby, etc.)
-- Include proper setup and teardown for each test type
-- Add descriptive test names and helpful comments
-- Mock external dependencies appropriately
-- Include positive tests, negative tests (error handling), and edge cases
-- Ensure tests are independent and can run in any order
-- Add appropriate assertions following the framework's conventions
-- If the code is already a test file, generate additional complementary tests or improved test coverage
-
-**Output Format:**
-Return the complete test code with proper syntax for the detected language, ready to be saved and executed.`;
-    }
-
-    buildSingleTypeDescriptionsPrompt() {
-        return `
-**IMPORTANT**: Provide ONLY test descriptions and scenarios, NOT full implementation
-Format as a structured list of test cases with descriptions
-Include setup requirements and mock specifications
-
-**Response Format:**
-Return a structured list of test descriptions in the following format:
-
-## Test Suite: [Function/Class Name]
-
-### Setup Requirements:
-- [List any setup needed]
-- [Mock specifications]
-
-### Test Cases:
-
-#### Positive Tests:
-1. **Test Name**: Description of what this test validates
-   - **Input**: Expected input parameters
-   - **Expected Outcome**: What should happen
-   - **Assertions**: Key validations to check
-
-2. **Test Name**: [Next test description]
-   - **Input**: [Input details]
-   - **Expected Outcome**: [Expected result]
-   - **Assertions**: [What to verify]
-
-#### Negative Tests:
-[Similar format for error cases]
-
-#### Edge Cases:
-[Similar format for boundary conditions]
-
-Do NOT include actual test code implementation.`;
-    }
-
-    buildSingleTypeImplementationPrompt() {
-        return `
-**IMPORTANT INSTRUCTIONS:**
-1. Analyze the provided code to determine:
-   - The programming language
-   - The most appropriate testing framework for that language
-   - If existing tests are present, follow the exact same style and framework
-2. Generate complete, runnable test code using the appropriate testing framework
-3. Follow the language's testing best practices and conventions
-4. If the code is already a test file, generate additional complementary tests
-
-**Guidelines:**
-- Use the appropriate testing framework for the detected language (e.g., Jest/Mocha/Vitest/Cypress for JavaScript, pytest for Python, JUnit for Java, NUnit for C#, RSpec for Ruby, etc.)
-- Include proper setup and teardown when needed
-- Add descriptive test names and helpful comments
-- Mock external dependencies appropriately
-- Include positive tests, negative tests (error handling), and edge cases
-- Include appropriate imports/requires for the testing framework
-- Ensure tests are independent and can run in any order
-
-**Response Format:**
-Return only the complete test code with proper syntax for the detected language, ready to be saved and executed.`;
     }
 
     /**
@@ -4405,10 +4226,10 @@ Return only the complete test code with proper syntax for the detected language,
 
                 let mermaidCode = (response.content || response).trim();
                 mermaidCode = mermaidCode.replace(/^```(?:mermaid)?\n?/, '').replace(/\n?```$/, '').trim();
-                mermaidCode = this.sanitizeMermaidCode(mermaidCode);
+                mermaidCode = sanitizeMermaidCode(mermaidCode);
 
                 // Validate diagram syntax
-                const validation = this.validateMermaidSyntax(mermaidCode, diagramType || 'sequence');
+                const validation = validateMermaidSyntax(mermaidCode, diagramType || 'sequence');
                 if (validation.valid) {
                     console.log(`✅ Mermaid diagram generated successfully (attempt ${attempt})`);
                     sendResponse({ success: true, data: { mermaidCode } });
@@ -4431,150 +4252,12 @@ Return only the complete test code with proper syntax for the detected language,
             );
             let finalCode = (finalResponse.content || finalResponse).trim();
             finalCode = finalCode.replace(/^```(?:mermaid)?\n?/, '').replace(/\n?```$/, '').trim();
-            finalCode = this.sanitizeMermaidCode(finalCode);
+            finalCode = sanitizeMermaidCode(finalCode);
             sendResponse({ success: true, data: { mermaidCode: finalCode, warning: 'Diagram may contain syntax issues' } });
         } catch (error) {
             this.errorHandler.logError('Generate Mermaid Diagram', error);
             sendResponse({ success: false, error: this.getErrorMessage(error) });
         }
-    }
-
-    /**
-     * Validate Mermaid diagram syntax with basic structural checks
-     */
-    validateMermaidSyntax(code, expectedType) {
-        const errors = [];
-        const lines = code.trim().split('\n');
-        if (lines.length === 0) {
-            return { valid: false, errors: ['Empty diagram'] };
-        }
-
-        const firstLine = lines[0].trim().toLowerCase();
-        const typeHeaders = {
-            sequence: 'sequencediagram',
-            class: 'classdiagram',
-            state: 'statediagram',
-            er: 'erdiagram'
-        };
-
-        // Check header matches expected type
-        const expectedHeader = typeHeaders[expectedType] || typeHeaders.sequence;
-        if (!firstLine.startsWith(expectedHeader) && !firstLine.startsWith('sequencediagram') &&
-            !firstLine.startsWith('classdiagram') && !firstLine.startsWith('statediagram') &&
-            !firstLine.startsWith('erdiagram') && !firstLine.startsWith('flowchart') &&
-            !firstLine.startsWith('graph')) {
-            errors.push(`Missing diagram header (expected ${expectedHeader}, got "${lines[0].trim()}")`);
-        }
-
-        // Check for minimum content
-        if (lines.length < 3) {
-            errors.push('Diagram too short — expected at least 3 lines');
-        }
-
-        // Check for unmatched quotes
-        const quoteCount = (code.match(/"/g) || []).length;
-        if (quoteCount % 2 !== 0) {
-            errors.push('Unmatched double quotes');
-        }
-
-        // Check for markdown fence contamination
-        if (code.includes('```')) {
-            errors.push('Contains markdown code fences');
-        }
-
-        // Check for unbalanced brackets in non-ER diagrams
-        if (expectedType !== 'er') {
-            const opens = (code.match(/[[({]/g) || []).length;
-            const closes = (code.match(/[\])}]/g) || []).length;
-            if (Math.abs(opens - closes) > 2) {
-                errors.push(`Unbalanced brackets (${opens} opens vs ${closes} closes)`);
-            }
-        }
-
-        return { valid: errors.length === 0, errors };
-    }
-
-    /**
-     * Sanitize LLM-generated Mermaid code to fix common syntax issues.
-     * Handles nested brackets, unquoted parentheses/braces in labels, etc.
-     */
-    sanitizeMermaidCode(code) {
-        // Detect diagram type to apply appropriate sanitization
-        const firstLine = code.trim().split('\n')[0].trim().toLowerCase();
-        const isSequenceDiagram = firstLine.startsWith('sequencediagram');
-
-        if (isSequenceDiagram) {
-            // For sequence diagrams: minimal sanitization, just fix common LLM issues
-            return code.split('\n').map(line => {
-                const trimmed = line.trim();
-                // Skip empty, comments, and keywords
-                if (!trimmed || trimmed.startsWith('%%') || trimmed === 'end' ||
-                    trimmed === 'sequenceDiagram' ||
-                    /^(participant|actor|activate|deactivate|Note\s|alt|else|opt|loop|par|and|rect|critical|break)\s*/i.test(trimmed)) {
-                    return line;
-                }
-                // Fix <br> tags that some LLMs add (Mermaid prefers \\n in sequence diagrams)
-                return line.replace(/<br\s*\/?>/gi, '\\n');
-            }).join('\n');
-        }
-
-        // Flowchart sanitization
-        return code.split('\n').map(line => {
-            const trimmed = line.trim();
-            // Skip non-node lines
-            if (!trimmed || trimmed.startsWith('%%') || trimmed === 'end' ||
-                trimmed.startsWith('classDef ') ||
-                trimmed.startsWith('style ') || trimmed.startsWith('linkStyle ') ||
-                /^(flowchart|graph|subgraph)\s/.test(trimmed)) {
-                return line;
-            }
-
-            // Fix class statements: "class A, B, C hub" → "class A,B,C hub"
-            if (trimmed.startsWith('class ')) {
-                return line.replace(/class\s+([\w,\s]+)\s+(\w+)\s*$/, (match, ids, className) => {
-                    const cleanIds = ids.replace(/\s+/g, '').replace(/,+/g, ',').replace(/^,|,$/g, '');
-                    return `class ${cleanIds} ${className}`;
-                });
-            }
-
-            // Convert sequence-diagram arrows to flowchart arrows
-            line = line.replace(/-->>/, '-->');
-            line = line.replace(/->>/, '-->');
-
-            // Remove ::: class shortcuts (e.g. "A:::hub --> B")
-            line = line.replace(/:::\w+/g, '');
-
-            // Strip quotes from edge labels: -->|"text"| → -->|text|
-            line = line.replace(/(\|)\s*"([^"]*?)"\s*(\|)/g, '$1$2$3');
-
-            // Sanitize edge labels: remove special chars like / < > from inside |...|
-            line = line.replace(/\|([^|]*)\|/g, (match, label) => {
-                const clean = label.replace(/[/<>\\[\]{}()#&]/g, ' ').replace(/\s+/g, ' ').trim();
-                return `|${clean}|`;
-            });
-
-            // Fix unmatched pipe in edge labels (e.g. "A -->|label B" missing closing pipe)
-            line = line.replace(/(-->|---|-\.->|==>)\|([^|]*?)(\s+\w+\s*$)/, '$1|$2|$3');
-
-            // Skip edge-only lines (e.g. "A --> B")
-            if (/^\s*\w+\s*(-->|---|-\.->|==>|-.->|--)\s*\w+/.test(line) && !/[[({"]/.test(line)) {
-                return line;
-            }
-
-            // Fix node definitions where labels contain Mermaid-special characters.
-            return line.replace(
-                /(\b[A-Za-z_]\w*)\s*([[({])(\({0,2})(.*?)(\){0,2})([\])}])/g,
-                (match, id, open, extraOpen, label, extraClose, close) => {
-                    if (label.startsWith('"') && label.endsWith('"')) return match;
-                    const fullLabel = `${extraOpen}${label}${extraClose}`;
-                    if (/[()[\]{}<>|#&]/.test(fullLabel)) {
-                        const cleanLabel = fullLabel.replace(/[()[\]{}<>|]/g, ' ').replace(/\s+/g, ' ').trim();
-                        return `${id}${open}"${cleanLabel}"${close}`;
-                    }
-                    return match;
-                }
-            );
-        }).join('\n');
     }
 
     /**
@@ -4654,9 +4337,9 @@ ${typeInstructions[type] || typeInstructions.sequence}
 
                 let mermaidCode = (response.content || response).trim();
                 mermaidCode = mermaidCode.replace(/^```(?:mermaid)?\n?/, '').replace(/\n?```$/, '').trim();
-                mermaidCode = this.sanitizeMermaidCode(mermaidCode);
+                mermaidCode = sanitizeMermaidCode(mermaidCode);
 
-                const validation = this.validateMermaidSyntax(mermaidCode, type);
+                const validation = validateMermaidSyntax(mermaidCode, type);
                 if (validation.valid) {
                     console.log(`✅ Repo diagram generated successfully (attempt ${attempt})`);
                     sendResponse({ success: true, data: { mermaidCode, diagramType: type } });
@@ -4775,12 +4458,12 @@ ${typeInstructions[type] || typeInstructions.sequence}
                     );
                     let llmMermaid = (response.content || response).trim();
                     llmMermaid = llmMermaid.replace(/^```(?:mermaid)?\n?/, '').replace(/\n?```$/, '').trim();
-                    llmMermaid = this.sanitizeMermaidCode(llmMermaid);
+                    llmMermaid = sanitizeMermaidCode(llmMermaid);
                     // Validate: must start with 'flowchart' or 'graph' and have reasonable content
                     if (/^(flowchart|graph)\s/i.test(llmMermaid) && llmMermaid.split('\n').length >= 3) {
                         finalMermaidCode = llmMermaid;
                         // Keep code-generated version as fallback in case LLM output fails to render
-                        fallbackCode = this.sanitizeMermaidCode(mermaidCode);
+                        fallbackCode = sanitizeMermaidCode(mermaidCode);
                     } else {
                         console.warn('LLM mindmap output invalid, using code-based output');
                     }
@@ -4790,7 +4473,7 @@ ${typeInstructions[type] || typeInstructions.sequence}
             }
 
             // Always sanitize the final output regardless of source
-            finalMermaidCode = this.sanitizeMermaidCode(finalMermaidCode);
+            finalMermaidCode = sanitizeMermaidCode(finalMermaidCode);
 
             const responseData = { mermaidCode: finalMermaidCode };
             if (fallbackCode) responseData.fallbackCode = fallbackCode;
@@ -5599,110 +5282,8 @@ ${typeInstructions[type] || typeInstructions.sequence}
 // Service worker bootstrap
 // ─────────────────────────────────────────────────────────────────────────────
 
-let ragService = null;
-
 const backgroundServiceInstance = new BackgroundService();
 console.log('🚀 BackgroundService initialized at startup');
-
-// ─── RAG handlers (module-scope; close over `ragService`) ────────────────────
-
-async function handleInitRag(message, sendResponse) {
-    try {
-        // The Embedding Provider in Settings is the single source of truth — this
-        // keeps chat retrieval on the SAME provider used at index time (mixing
-        // local 384-dim and OpenAI 1536-dim vectors silently breaks search).
-        // Local embeddings now run via the offscreen document with a fully bundled
-        // model + ONNX runtime, so 'local' no longer needs a service-worker DOM.
-        await backgroundServiceInstance.ensureRagEmbeddingProvider();
-        ragService = backgroundServiceInstance.ragService;
-
-        if (ragService.provider === 'openai' && !ragService.apiKey) {
-            sendResponse({ success: false, error: 'OpenAI API key required for the OpenAI embedding provider. Set it in Settings, or switch Embedding Provider to Local.' });
-            return;
-        }
-
-        await ragService.init((progress) => {
-            if (progress) {
-                chrome.runtime
-                    .sendMessage({ type: 'RAG_MODEL_PROGRESS', payload: progress })
-                    .catch(() => {});
-            }
-        });
-
-        sendResponse({ success: true, providerInfo: ragService.getProviderInfo() });
-    } catch (error) {
-        console.error('RAG initialization failed:', error);
-        sendResponse({ success: false, error: error.message || 'Failed to initialize RAG service' });
-    }
-}
-
-async function handleIndexRepo(message, sendResponse) {
-    if (!ragService) {
-        sendResponse({ success: false, error: 'RAG Service not initialized' });
-        return;
-    }
-    const { repoId, files } = message.payload || {};
-    await ragService.indexRepositoryIncremental(repoId, files, (progress) => {
-        chrome.runtime.sendMessage({ type: 'RAG_PROGRESS', payload: progress }).catch(() => {});
-    });
-    sendResponse({ success: true });
-}
-
-async function handleRetrieveContext(message, sendResponse) {
-    if (!ragService) {
-        sendResponse({ success: false, error: 'RAG Service not initialized' });
-        return;
-    }
-    const { repoId, query } = message.payload || {};
-    const results = await ragService.retrieveContext(repoId, query);
-    sendResponse({ success: true, results });
-}
-
-async function handleCheckIndexed(message, sendResponse) {
-    if (!ragService) {
-        sendResponse({ success: false, error: 'RAG Service not initialized' });
-        return;
-    }
-    const isIndexed = await ragService.vectorStore.isIndexed(message.payload?.repoId);
-    sendResponse({ success: true, isIndexed });
-}
-
-async function handleAutoIndexRepo(message, sendResponse) {
-    try {
-        const { url, provider, apiKey, token } = message.payload || {};
-
-        if (!ragService) {
-            ragService = new RAGService({ provider, apiKey });
-            await ragService.init();
-        }
-
-        let service;
-        let repoId;
-        if (url.includes('github.com')) {
-            service = new GitHubService(token);
-            repoId = service.getRepoId(url);
-        } else if (url.includes('gitlab.com')) {
-            service = new GitLabService(token);
-            repoId = service.getRepoId(url);
-        } else {
-            sendResponse({ success: false, error: 'Unsupported platform' });
-            return;
-        }
-
-        const files = await service.fetchRepositoryFiles(url, (progress) => {
-            chrome.runtime.sendMessage({ type: 'AUTO_INDEX_PROGRESS', payload: progress }).catch(() => {});
-        });
-
-        await ragService.indexRepositoryIncremental(repoId, files, (progress) => {
-            chrome.runtime.sendMessage({ type: 'RAG_PROGRESS', payload: progress }).catch(() => {});
-        });
-
-        sendResponse({ success: true, repoId, filesIndexed: files.length });
-    } catch (error) {
-        console.error('Auto-index error:', error);
-        sendResponse({ success: false, error: error.message || 'Auto-index failed' });
-    }
-}
 
 // ─── Handler registry ────────────────────────────────────────────────────────
 //
@@ -5714,6 +5295,11 @@ async function handleAutoIndexRepo(message, sendResponse) {
 // module, not here.
 
 const svc = backgroundServiceInstance;
+
+// RAG handlers live in ./handlers/ragHandlers.js. `ragState` is the mutable
+// holder that replaced the old module-level `ragService` variable.
+const ragState = { service: null };
+const ragHandlers = createRagHandlers({ svc, ragState, RAGService, GitHubService, GitLabService });
 
 registerHandlers({
     // Test generation & chat
@@ -5782,12 +5368,8 @@ registerHandlers({
     GET_REVIEW_METRICS: (m, send) => svc.handleGetReviewMetrics(m, send),
     FETCH_FULL_FILE: (m, send) => svc.handleFetchFullFile(m, send),
 
-    // RAG (module-scope handlers)
-    INIT_RAG: handleInitRag,
-    INDEX_REPO: handleIndexRepo,
-    RETRIEVE_CONTEXT: handleRetrieveContext,
-    CHECK_INDEXED: handleCheckIndexed,
-    AUTO_INDEX_REPO: handleAutoIndexRepo,
+    // RAG handlers (extracted to ./handlers/ragHandlers.js)
+    ...ragHandlers,
 
     // Phase 2: content-script-invoked hunk actions. allowContentScript=true
     // because these are triggered by the inline overlay on PR pages.

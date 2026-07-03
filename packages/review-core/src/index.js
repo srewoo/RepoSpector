@@ -33,3 +33,5 @@ export {
 } from './FindingsNormalizer.js';
 
 export { ReviewOrchestrator } from './ReviewOrchestrator.js';
+
+export { liftEngineFindings } from './engineContract.js';

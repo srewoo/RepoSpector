@@ -15,7 +15,7 @@ import {
 import { Button } from './ui/Button';
 import { Card, CardContent } from './ui/Card';
 import { IndexingProgress } from './IndexingProgress';
-import { motion, AnimatePresence } from 'framer-motion';
+import { MotionDiv, LazyAnimatePresence } from './ui/MotionDiv';
 
 function formatTimeAgo(timestamp) {
     if (!timestamp) return 'Unknown';
@@ -32,7 +32,7 @@ function RepoCard({ repo, onReindex, onClear, onDelete, isActive }) {
     const [showConfirmDelete, setShowConfirmDelete] = useState(false);
 
     return (
-        <motion.div
+        <MotionDiv
             layout
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
@@ -124,7 +124,7 @@ function RepoCard({ repo, onReindex, onClear, onDelete, isActive }) {
                     </div>
                 </CardContent>
             </Card>
-        </motion.div>
+        </MotionDiv>
     );
 }
 
@@ -380,7 +380,7 @@ export function ReposView() {
             {indexedRepos.length > 0 && (
                 <div className="space-y-3">
                     <h3 className="text-sm font-semibold text-text">Indexed Repositories</h3>
-                    <AnimatePresence mode="popLayout">
+                    <LazyAnimatePresence mode="popLayout">
                         {indexedRepos.map((repo) => (
                             <RepoCard
                                 key={repo.repoId}
@@ -391,7 +391,7 @@ export function ReposView() {
                                 isActive={currentRepo?.repoId === repo.repoId}
                             />
                         ))}
-                    </AnimatePresence>
+                    </LazyAnimatePresence>
                 </div>
             )}
 

@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Copy, Check } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { MotionDiv, MotionButton, LazyAnimatePresence } from './MotionDiv';
 import { copyToClipboard } from '../../utils/clipboard';
 
 // Language detection based on first line or common patterns
@@ -143,14 +143,14 @@ export function CodeBlock({ code, language: providedLanguage, showLineNumbers = 
             {/* Header */}
             <div className="flex items-center justify-between px-3 py-2 bg-surfaceHighlight/50 border-b border-border">
                 <span className="text-xs text-textMuted font-mono lowercase">{language}</span>
-                <motion.button
+                <MotionButton
                     onClick={handleCopy}
                     className="flex items-center gap-1 px-2 py-1 text-xs text-textMuted hover:text-text rounded transition-colors"
                     whileTap={{ scale: 0.95 }}
                 >
-                    <AnimatePresence mode="wait">
+                    <LazyAnimatePresence mode="wait">
                         {copied ? (
-                            <motion.div
+                            <MotionDiv
                                 key="check"
                                 initial={{ scale: 0 }}
                                 animate={{ scale: 1 }}
@@ -159,9 +159,9 @@ export function CodeBlock({ code, language: providedLanguage, showLineNumbers = 
                             >
                                 <Check className="w-3 h-3" />
                                 <span>Copied!</span>
-                            </motion.div>
+                            </MotionDiv>
                         ) : (
-                            <motion.div
+                            <MotionDiv
                                 key="copy"
                                 initial={{ scale: 0 }}
                                 animate={{ scale: 1 }}
@@ -170,10 +170,10 @@ export function CodeBlock({ code, language: providedLanguage, showLineNumbers = 
                             >
                                 <Copy className="w-3 h-3" />
                                 <span>Copy</span>
-                            </motion.div>
+                            </MotionDiv>
                         )}
-                    </AnimatePresence>
-                </motion.button>
+                    </LazyAnimatePresence>
+                </MotionButton>
             </div>
 
             {/* Code Content */}

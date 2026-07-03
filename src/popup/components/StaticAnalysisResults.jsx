@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { cn } from '@/lib/utils';
-import { motion, AnimatePresence } from 'framer-motion';
+import { MotionDiv, LazyAnimatePresence } from './ui/MotionDiv';
 import {
     Shield,
     AlertTriangle,
@@ -378,9 +378,9 @@ export function StaticAnalysisResults({
                                 )}
                             </button>
 
-                            <AnimatePresence>
+                            <LazyAnimatePresence>
                                 {expandedFiles.has(file) && (
-                                    <motion.div
+                                    <MotionDiv
                                         initial={{ height: 0, opacity: 0 }}
                                         animate={{ height: 'auto', opacity: 1 }}
                                         exit={{ height: 0, opacity: 0 }}
@@ -397,9 +397,9 @@ export function StaticAnalysisResults({
                                                 />
                                             ))}
                                         </CardContent>
-                                    </motion.div>
+                                    </MotionDiv>
                                 )}
-                            </AnimatePresence>
+                            </LazyAnimatePresence>
                         </Card>
                     ))}
                 </div>

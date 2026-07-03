@@ -4,6 +4,8 @@
  * Fetches PR details, file changes, commits, and comments for analysis
  */
 
+import { detectLanguageFromPath } from '../utils/languageMap.js';
+
 export class PullRequestService {
     constructor(options = {}) {
         this.githubToken = options.githubToken || null;
@@ -451,20 +453,7 @@ export class PullRequestService {
      * Detect language from filename
      */
     detectLanguage(filename) {
-        if (!filename) return 'text';
-
-        const ext = filename.split('.').pop()?.toLowerCase();
-        const languageMap = {
-            'js': 'javascript', 'jsx': 'javascript', 'ts': 'typescript', 'tsx': 'typescript',
-            'py': 'python', 'java': 'java', 'kt': 'kotlin', 'go': 'go', 'rs': 'rust',
-            'rb': 'ruby', 'php': 'php', 'c': 'c', 'cpp': 'cpp', 'cs': 'csharp',
-            'swift': 'swift', 'dart': 'dart', 'scala': 'scala', 'vue': 'vue',
-            'svelte': 'svelte', 'html': 'html', 'css': 'css', 'scss': 'scss',
-            'json': 'json', 'yaml': 'yaml', 'yml': 'yaml', 'md': 'markdown',
-            'sql': 'sql', 'graphql': 'graphql', 'sh': 'bash', 'bash': 'bash'
-        };
-
-        return languageMap[ext] || 'text';
+        return detectLanguageFromPath(filename, { fallback: 'text' });
     }
 
     /**

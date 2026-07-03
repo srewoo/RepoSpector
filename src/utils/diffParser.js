@@ -2,6 +2,7 @@
 // Supports GitHub, GitLab, Bitbucket, and other SCM platforms
 
 import { Sanitizer } from './sanitizer.js';
+import { detectLanguageFromPath } from './languageMap.js';
 import { ErrorHandler } from './errorHandler.js';
 
 export class DiffParser {
@@ -768,61 +769,7 @@ export class DiffParser {
      * Detect programming language from file path
      */
     detectLanguage(filePath) {
-        if (!filePath) return 'text';
-
-        const extension = filePath.split('.').pop()?.toLowerCase();
-        
-        const languageMap = {
-            'js': 'javascript',
-            'jsx': 'javascript',
-            'ts': 'typescript',
-            'tsx': 'typescript',
-            'py': 'python',
-            'java': 'java',
-            'cpp': 'cpp',
-            'c': 'c',
-            'cs': 'csharp',
-            'go': 'go',
-            'rb': 'ruby',
-            'php': 'php',
-            'swift': 'swift',
-            'kt': 'kotlin',
-            'rs': 'rust',
-            'scala': 'scala',
-            'clj': 'clojure',
-            'hs': 'haskell',
-            'ml': 'ocaml',
-            'fs': 'fsharp',
-            'elm': 'elm',
-            'dart': 'dart',
-            'lua': 'lua',
-            'r': 'r',
-            'pl': 'perl',
-            'sh': 'bash',
-            'bash': 'bash',
-            'zsh': 'zsh',
-            'fish': 'fish',
-            'ps1': 'powershell',
-            'html': 'html',
-            'css': 'css',
-            'scss': 'scss',
-            'sass': 'sass',
-            'less': 'less',
-            'json': 'json',
-            'xml': 'xml',
-            'yaml': 'yaml',
-            'yml': 'yaml',
-            'toml': 'toml',
-            'ini': 'ini',
-            'cfg': 'ini',
-            'conf': 'ini',
-            'sql': 'sql',
-            'md': 'markdown',
-            'tex': 'latex',
-            'dockerfile': 'dockerfile'
-        };
-
-        return languageMap[extension] || 'text';
+        return detectLanguageFromPath(filePath, { fallback: 'text' });
     }
 
     /**

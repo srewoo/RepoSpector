@@ -1,290 +1,144 @@
-// Mock the module before requiring
-const mockInputSanitizer = {
-    sanitizeHTML: jest.fn(),
-    sanitizeText: jest.fn(),
-    sanitizeURL: jest.fn(),
-    sanitizeApiKey: jest.fn(),
-    sanitizeFilename: jest.fn(),
-    sanitizeJSON: jest.fn(),
-    validateInput: jest.fn(),
-    sanitizeSelector: jest.fn(),
-    sanitizeCode: jest.fn(),
-    sanitizeCustomSelectors: jest.fn(),
-    sanitizeFilePath: jest.fn()
-};
+/**
+ * Tests for the REAL Sanitizer (src/utils/sanitizer.js) — no mocks.
+ * Previously this suite jest.mock'd the subject and tested an inline fake with
+ * method names ('sanitizeURL', 'sanitizeJSON', 'validateInput') that never
+ * existed in production.
+ */
 
-jest.mock('../../src/utils/sanitizer.js', () => ({
-    InputSanitizer: jest.fn().mockImplementation(() => mockInputSanitizer),
-    sanitizer: mockInputSanitizer
-}));
+const { Sanitizer } = require('../../src/utils/sanitizer.js');
 
-describe('InputSanitizer', () => {
+describe('Sanitizer', () => {
+    let sanitizer;
     beforeEach(() => {
-        jest.clearAllMocks();
-        
-        // Setup default mock implementations
-        mockInputSanitizer.sanitizeHTML.mockImplementation((input) => {
-            if (!input) return '';
-            let result = String(input);
-            result = result.replace(/<script[^>]*>.*?<\/script>/gi, '');
-            result = result.replace(/on\w+\s*=\s*["'][^"']*["']/gi, '');
-            result = result.replace(/&/g, '&amp;');
-            result = result.replace(/</g, '&lt;');
-            result = result.replace(/>/g, '&gt;');
-            result = result.replace(/"/g, '&quot;');
-            result = result.replace(/'/g, '&#x27;');
-            return result;
-        });
-
-        mockInputSanitizer.sanitizeText.mockImplementation((input) => {
-            if (!input) return '';
-            return String(input).replace(/<[^>]*>/g, '').trim();
-        });
-
-        mockInputSanitizer.sanitizeURL.mockImplementation((url) => {
-            if (!url) return '';
-            const dangerous = ['javascript:', 'data:', 'vbscript:', 'file:'];
-            const lower = String(url).toLowerCase();
-            for (const proto of dangerous) {
-                if (lower.startsWith(proto)) return '';
-            }
-            try {
-                return encodeURI(decodeURI(url));
-            } catch {
-                return '';
-            }
-        });
-
-        mockInputSanitizer.sanitizeApiKey.mockImplementation((key) => {
-            if (!key) return '';
-            const sanitized = String(key).replace(/[^a-zA-Z0-9\-_]/g, '').trim();
-            if (!sanitized.startsWith('sk-') || sanitized.length < 40) {
-                throw new Error('Invalid API key format');
-            }
-            return sanitized;
-        });
-
-        mockInputSanitizer.sanitizeFilename.mockImplementation((filename) => {
-            if (!filename) return 'download';
-            const sanitized = String(filename)
-                .replace(/[<>:"|?*]/g, '')
-                .replace(/\.{2,}/g, '.')
-                .replace(/[\\/]{2,}/g, '/')
-                .replace(/^\.+\/|\.+$/g, '')
-                .trim();
-            return sanitized || 'download';
-        });
-
-        mockInputSanitizer.sanitizeJSON.mockImplementation((json) => {
-            if (!json) return '{}';
-            try {
-                return JSON.stringify(JSON.parse(json));
-            } catch {
-                return '{}';
-            }
-        });
-
-        mockInputSanitizer.validateInput.mockImplementation((input, type, options = {}) => {
-            if (type === 'number') {
-                const num = Number(input);
-                if (isNaN(num)) throw new Error('Invalid number');
-                if (options.min !== undefined && num < options.min) {
-                    throw new Error(`Number must be >= ${options.min}`);
-                }
-                if (options.max !== undefined && num > options.max) {
-                    throw new Error(`Number must be <= ${options.max}`);
-                }
-                return num;
-            } else if (type === 'email') {
-                const email = String(input).toLowerCase().trim();
-                if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-                    throw new Error('Invalid email format');
-                }
-                return email;
-            } else if (type === 'text') {
-                return mockInputSanitizer.sanitizeText(input);
-            }
-            throw new Error(`Unknown validation type: ${type}`);
-        });
-    });
-
-    describe('sanitizeHTML', () => {
-        it('should remove script tags', () => {
-            const input = '<div>Hello<script>alert("XSS")</script>World</div>';
-            const result = mockInputSanitizer.sanitizeHTML(input);
-            expect(result).not.toContain('<script>');
-            expect(result).not.toContain('alert');
-        });
-
-        it('should escape HTML entities', () => {
-            const input = '<div>Hello & "World" \'s</div>';
-            const result = mockInputSanitizer.sanitizeHTML(input);
-            expect(result).toContain('&lt;');
-            expect(result).toContain('&gt;');
-            expect(result).toContain('&quot;');
-            expect(result).toContain('&#x27;');
-        });
-
-        it('should remove event handlers', () => {
-            const input = '<div onclick="alert(\'XSS\')">Click me</div>';
-            const result = mockInputSanitizer.sanitizeHTML(input);
-            expect(result).not.toContain('onclick');
-        });
-
-        it('should handle empty input', () => {
-            expect(mockInputSanitizer.sanitizeHTML('')).toBe('');
-            expect(mockInputSanitizer.sanitizeHTML(null)).toBe('');
-            expect(mockInputSanitizer.sanitizeHTML(undefined)).toBe('');
-        });
-    });
-
-    describe('sanitizeText', () => {
-        it('should remove all HTML tags', () => {
-            const input = '<p>Hello <strong>World</strong></p>';
-            const result = mockInputSanitizer.sanitizeText(input);
-            expect(result).toBe('Hello World');
-        });
-
-        it('should trim whitespace', () => {
-            const input = '  Hello World  ';
-            const result = mockInputSanitizer.sanitizeText(input);
-            expect(result).toBe('Hello World');
-        });
-    });
-
-    describe('sanitizeURL', () => {
-        it('should allow valid URLs', () => {
-            const validUrls = [
-                'https://example.com',
-                'http://localhost:3000',
-                'https://api.example.com/path?query=value'
-            ];
-
-            validUrls.forEach(url => {
-                const result = mockInputSanitizer.sanitizeURL(url);
-                expect(result).toBeTruthy();
-                expect(result).toContain('http');
-            });
-        });
-
-        it('should block dangerous protocols', () => {
-            const dangerousUrls = [
-                'javascript:alert("XSS")',
-                'data:text/html,<script>alert("XSS")</script>',
-                'vbscript:msgbox("XSS")',
-                'file:///etc/passwd'
-            ];
-
-            dangerousUrls.forEach(url => {
-                const result = mockInputSanitizer.sanitizeURL(url);
-                expect(result).toBe('');
-            });
-        });
-
-        it('should handle malformed URLs', () => {
-            const malformedUrl = 'http://example.com/%%%';
-            const result = mockInputSanitizer.sanitizeURL(malformedUrl);
-            expect(result).toBe('');
-        });
+        sanitizer = new Sanitizer();
     });
 
     describe('sanitizeApiKey', () => {
-        it('should accept valid API keys', () => {
-            const validKey = 'sk-1234567890abcdefghijklmnopqrstuvwxyzABCD';
-            const result = mockInputSanitizer.sanitizeApiKey(validKey);
-            expect(result).toBe(validKey);
+        it('should trim whitespace and strip control characters', () => {
+            expect(sanitizer.sanitizeApiKey('  sk-abcdefghijklmnopqrstuvwx  ')).toBe('sk-abcdefghijklmnopqrstuvwx');
+            // Control characters (not regular spaces) are stripped.
+            expect(sanitizer.sanitizeApiKey('sk-abcdefghijklmnopqrst')).toBe('sk-abcdefghijklmnopqrst');
         });
 
-        it('should remove invalid characters', () => {
-            const dirtyKey = 'sk-1234!@#$%^&*()567890abcdefghijklmnopqrstuvwxyzABCD';
-            const result = mockInputSanitizer.sanitizeApiKey(dirtyKey);
-            expect(result).toBe('sk-1234567890abcdefghijklmnopqrstuvwxyzABCD');
+        it('should return empty string for non-string input', () => {
+            expect(sanitizer.sanitizeApiKey(null)).toBe('');
+            expect(sanitizer.sanitizeApiKey(undefined)).toBe('');
+            expect(sanitizer.sanitizeApiKey(12345)).toBe('');
         });
 
-        it('should reject keys without sk- prefix', () => {
-            const invalidKey = 'pk-1234567890abcdefghijklmnopqrstuvwxyzABCD';
-            expect(() => mockInputSanitizer.sanitizeApiKey(invalidKey)).toThrow('Invalid API key format');
+        it('should cap length at the configured maximum', () => {
+            const long = 'sk-' + 'a'.repeat(2000);
+            expect(sanitizer.sanitizeApiKey(long).length).toBe(1000);
+        });
+    });
+
+    describe('sanitizeUrl', () => {
+        it('should accept http and https URLs', () => {
+            expect(sanitizer.sanitizeUrl('https://github.com/foo')).toBe('https://github.com/foo');
+            expect(sanitizer.sanitizeUrl('http://localhost:8080/x')).toBe('http://localhost:8080/x');
         });
 
-        it('should reject short keys', () => {
-            const shortKey = 'sk-123456789';
-            expect(() => mockInputSanitizer.sanitizeApiKey(shortKey)).toThrow('Invalid API key format');
+        it('should reject non-http(s) protocols', () => {
+            expect(sanitizer.sanitizeUrl('javascript:alert(1)')).toBe('');
+            expect(sanitizer.sanitizeUrl('file:///etc/passwd')).toBe('');
+            expect(sanitizer.sanitizeUrl('ftp://host/x')).toBe('');
+        });
+
+        it('should reject malformed URLs and non-strings', () => {
+            expect(sanitizer.sanitizeUrl('not a url')).toBe('');
+            expect(sanitizer.sanitizeUrl(null)).toBe('');
         });
     });
 
     describe('sanitizeFilename', () => {
-        it('should remove invalid filename characters', () => {
-            const input = 'file<>:"|?*name.txt';
-            const result = mockInputSanitizer.sanitizeFilename(input);
-            expect(result).toBe('filename.txt');
+        it('should replace path separators and strip traversal', () => {
+            // Separators become '-', then '..' traversal sequences are removed.
+            expect(sanitizer.sanitizeFilename('../../etc/passwd')).toBe('--etc-passwd.txt');
+            expect(sanitizer.sanitizeFilename('a/b\\c:d.txt')).toBe('a-b-c-d.txt');
         });
 
-        it('should prevent directory traversal', () => {
-            const input = '../../../etc/passwd';
-            const result = mockInputSanitizer.sanitizeFilename(input);
-            expect(result).toBe('././etc/passwd');
+        it('should add a .txt extension when none present', () => {
+            expect(sanitizer.sanitizeFilename('report')).toBe('report.txt');
         });
 
-        it('should normalize slashes', () => {
-            const input = 'folder\\\\\\file.txt';
-            const result = mockInputSanitizer.sanitizeFilename(input);
-            expect(result).toBe('folder/file.txt');
-        });
-
-        it('should return default for empty input', () => {
-            expect(mockInputSanitizer.sanitizeFilename('')).toBe('download');
-            expect(mockInputSanitizer.sanitizeFilename(null)).toBe('download');
+        it('should default when given non-strings', () => {
+            expect(sanitizer.sanitizeFilename(null)).toBe('download.txt');
         });
     });
 
-    describe('sanitizeJSON', () => {
-        it('should validate and re-stringify valid JSON', () => {
-            const input = '{"key": "value", "number": 123}';
-            const result = mockInputSanitizer.sanitizeJSON(input);
-            const parsed = JSON.parse(result);
-            expect(parsed.key).toBe('value');
-            expect(parsed.number).toBe(123);
+    describe('sanitizeJsonInput', () => {
+        it('should parse valid JSON', () => {
+            expect(sanitizer.sanitizeJsonInput('{"a":1,"b":[2,3]}')).toEqual({ a: 1, b: [2, 3] });
         });
 
-        it('should return empty object for invalid JSON', () => {
-            const invalidInputs = [
-                '{invalid json}',
-                'not json at all',
-                '{"unclosed": "quote}',
-                ''
-            ];
+        it('should return null for invalid JSON or non-strings', () => {
+            expect(sanitizer.sanitizeJsonInput('{bad json')).toBeNull();
+            expect(sanitizer.sanitizeJsonInput(null)).toBeNull();
+        });
 
-            invalidInputs.forEach(input => {
-                const result = mockInputSanitizer.sanitizeJSON(input);
-                expect(result).toBe('{}');
-            });
+        it('should reject oversized JSON', () => {
+            const big = JSON.stringify({ x: 'y'.repeat(200000) });
+            expect(sanitizer.sanitizeJsonInput(big)).toBeNull();
         });
     });
 
-    describe('validateInput', () => {
-        it('should validate numbers within range', () => {
-            const result = mockInputSanitizer.validateInput('42', 'number', { min: 0, max: 100 });
-            expect(result).toBe(42);
-        });
-
-        it('should reject numbers outside range', () => {
-            expect(() => mockInputSanitizer.validateInput('150', 'number', { max: 100 }))
-                .toThrow('Number must be <= 100');
-            expect(() => mockInputSanitizer.validateInput('-5', 'number', { min: 0 }))
-                .toThrow('Number must be >= 0');
-        });
-
-        it('should validate email addresses', () => {
-            const validEmail = mockInputSanitizer.validateInput('test@example.com', 'email');
-            expect(validEmail).toBe('test@example.com');
-
-            expect(() => mockInputSanitizer.validateInput('invalid-email', 'email'))
-                .toThrow('Invalid email format');
-        });
-
-        it('should handle unknown validation types', () => {
-            expect(() => mockInputSanitizer.validateInput('test', 'unknown'))
-                .toThrow('Unknown validation type: unknown');
+    describe('sanitizeHtmlContent', () => {
+        it('should strip script tags, javascript: and inline handlers', () => {
+            const out = sanitizer.sanitizeHtmlContent('<div onclick="x()">hi<script>alert(1)</script></div>');
+            expect(out).not.toContain('<script>');
+            expect(out).not.toMatch(/onclick\s*=/);
+            expect(out).toContain('hi');
         });
     });
-}); 
+
+    describe('sanitizeNumber', () => {
+        it('should clamp within range', () => {
+            expect(sanitizer.sanitizeNumber('50', 0, 100, 0)).toBe(50);
+            expect(sanitizer.sanitizeNumber('500', 0, 100, 0)).toBe(100);
+            expect(sanitizer.sanitizeNumber('-5', 0, 100, 0)).toBe(0);
+        });
+        it('should return default for non-numbers', () => {
+            expect(sanitizer.sanitizeNumber('abc', 0, 100, 7)).toBe(7);
+        });
+    });
+
+    describe('sanitizeCustomSelectors', () => {
+        it('should keep valid selectors and drop dangerous/invalid ones', () => {
+            const input = ['.code', '#main', 'div', 'bad<selector>', '', '   '];
+            const out = sanitizer.sanitizeCustomSelectors(input);
+            expect(out).toContain('.code');
+            expect(out).toContain('#main');
+            expect(out).toContain('div');
+            expect(out.some(s => s.includes('<'))).toBe(false);
+            expect(out).not.toContain('');
+        });
+
+        it('should return empty array for non-arrays', () => {
+            expect(sanitizer.sanitizeCustomSelectors('nope')).toEqual([]);
+        });
+
+        it('should cap at 50 selectors', () => {
+            const many = Array.from({ length: 80 }, (_, i) => `.c${i}`);
+            expect(sanitizer.sanitizeCustomSelectors(many).length).toBe(50);
+        });
+    });
+
+    describe('enum sanitizers', () => {
+        it('should validate testType, contextLevel, and model with fallbacks', () => {
+            expect(sanitizer.sanitizeTestType('unit')).toBe('unit');
+            expect(sanitizer.sanitizeTestType('bogus')).toBe('unit');
+            expect(sanitizer.sanitizeContextLevel('full')).toBe('full');
+            expect(sanitizer.sanitizeContextLevel('bogus')).toBe('smart');
+            expect(sanitizer.sanitizeModel('gpt-4')).toBe('gpt-4');
+            expect(sanitizer.sanitizeModel('bogus')).toBe('gpt-4.1-mini');
+        });
+    });
+
+    describe('sanitizeBranch', () => {
+        it('should strip git-forbidden characters and default when empty', () => {
+            expect(sanitizer.sanitizeBranch('feature/new thing')).toBe('feature/newthing');
+            expect(sanitizer.sanitizeBranch('')).toBe('main');
+            expect(sanitizer.sanitizeBranch('..')).toBe('main');
+        });
+    });
+});

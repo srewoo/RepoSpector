@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { cn } from '@/lib/utils';
-import { motion, AnimatePresence } from 'framer-motion';
+import { MotionDiv, LazyAnimatePresence } from './ui/MotionDiv';
 import {
     AlertTriangle,
     AlertCircle,
@@ -249,9 +249,9 @@ export function FindingCard({ finding, onDismiss, onMarkResolved, compact = fals
             </button>
 
             {/* Expanded Content */}
-            <AnimatePresence>
+            <LazyAnimatePresence>
                 {isExpanded && (
-                    <motion.div
+                    <MotionDiv
                         initial={{ height: 0, opacity: 0 }}
                         animate={{ height: 'auto', opacity: 1 }}
                         exit={{ height: 0, opacity: 0 }}
@@ -424,9 +424,9 @@ export function FindingCard({ finding, onDismiss, onMarkResolved, compact = fals
                                         )}
                                         {groupCount - 1} similar finding{groupCount - 1 > 1 ? 's' : ''} in this file
                                     </button>
-                                    <AnimatePresence>
+                                    <LazyAnimatePresence>
                                         {showGrouped && (
-                                            <motion.div
+                                            <MotionDiv
                                                 initial={{ height: 0, opacity: 0 }}
                                                 animate={{ height: 'auto', opacity: 1 }}
                                                 exit={{ height: 0, opacity: 0 }}
@@ -439,15 +439,15 @@ export function FindingCard({ finding, onDismiss, onMarkResolved, compact = fals
                                                         {' '}&mdash; {gf.message}
                                                     </div>
                                                 ))}
-                                            </motion.div>
+                                            </MotionDiv>
                                         )}
-                                    </AnimatePresence>
+                                    </LazyAnimatePresence>
                                 </div>
                             )}
                         </CardContent>
-                    </motion.div>
+                    </MotionDiv>
                 )}
-            </AnimatePresence>
+            </LazyAnimatePresence>
         </Card>
     );
 }

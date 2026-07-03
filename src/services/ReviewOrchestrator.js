@@ -25,6 +25,7 @@ import {
     VERDICT,
     CATEGORY,
 } from './reviewSchema.js';
+import { liftEngineFindings } from './engineContract.js';
 
 export class ReviewOrchestrator {
     /**
@@ -141,7 +142,13 @@ export class ReviewOrchestrator {
                 // the UI can render incrementally. Without this the UI shows
                 // a blank panel for the full LLM duration — for a 50-file MR
                 // that's 60+ seconds of dead time.
-                const chunkFindings = (result.perFileFindings ?? []).map((f) =>
+                //
+                // MultiPassReviewEngine returns `perFileFindings` as an array of
+                // per-file objects, each with a nested `findings` array. Older /
+                // stub engines return an already-flat findings array. liftEngineFindings
+                // handles both so real per-file findings aren't collapsed into one
+                // empty file-level finding.
+                const chunkFindings = liftEngineFindings(result.perFileFindings).map((f) =>
                     toCanonicalFinding(f, {
                         phase: PHASE.DEEP,
                         source: 'llm',
