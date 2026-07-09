@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "RepoSpector — AI Code Review for GitHub & GitLab",
-    "version": "6.6",
+    "version": "6.7",
     "description": "AI code review for GitHub & GitLab pull requests. Chat with your codebase, find bugs & security issues, and generate unit tests.",
     "permissions": [
         "activeTab",
