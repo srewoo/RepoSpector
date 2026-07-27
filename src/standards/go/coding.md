@@ -29,3 +29,9 @@ All Go code must pass the project's `golangci-lint` configuration without warnin
 
 ## GO-CODING-010: `defer` for resource cleanup
 All resources that require explicit closure (files, DB connections, HTTP response bodies) must be closed with `defer` immediately after a successful open/acquire, to prevent leaks on early returns.
+
+## GO-CODING-020: Close HTTP response bodies on retry/fallback paths
+`defer resp.Body.Close()` immediately after a successful `http.Do`, including inside retry loops — a `continue` or reassignment before closing leaks the connection. Reuse a single `http.Client` across attempts rather than constructing one per iteration.
+
+## GO-CODING-021: A non-200 status is not always a health signal
+Do not count a terminal `404` as a circuit-breaker/health failure; reserve health accounting for 5xx and transport errors so the breaker does not trip on healthy dependencies.

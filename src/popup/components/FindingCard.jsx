@@ -216,7 +216,7 @@ export function FindingCard({ finding, onDismiss, onMarkResolved, compact = fals
                     </div>
 
                     <p className="text-sm text-text mt-1">
-                        {finding.message}
+                        {finding.message || finding.title || finding.description || 'No description'}
                     </p>
 
                     <div className="flex items-center gap-2 mt-2 text-xs text-textMuted flex-wrap">
@@ -258,6 +258,67 @@ export function FindingCard({ finding, onDismiss, onMarkResolved, compact = fals
                         transition={{ duration: 0.2 }}
                     >
                         <CardContent className="pt-0 pb-4 px-4 border-t border-border">
+                            {/* Description / Impact / Suggestion — the core detail.
+                                Findings come in several shapes (LLM: title/description/
+                                impact/suggestion; static: message/remediation), so read
+                                every field and never render an empty body. */}
+                            {(finding.description || finding.impact || finding.suggestion || finding.rule) && (
+                                <div className="mt-4 space-y-3 text-xs">
+                                    {finding.description && finding.description !== finding.message && (
+                                        <div>
+                                            <span className="font-medium text-textMuted">What&apos;s wrong</span>
+                                            <p className="text-text mt-1 whitespace-pre-wrap">{finding.description}</p>
+                                        </div>
+                                    )}
+                                    {finding.impact && (
+                                        <div>
+                                            <span className="font-medium text-textMuted">Impact</span>
+                                            <p className="text-text mt-1 whitespace-pre-wrap">{finding.impact}</p>
+                                        </div>
+                                    )}
+                                    {finding.suggestion && (
+                                        <div>
+                                            <span className="font-medium text-textMuted">Suggested fix</span>
+                                            <p className="text-text mt-1 whitespace-pre-wrap">{finding.suggestion}</p>
+                                        </div>
+                                    )}
+                                    {finding.rule && (
+                                        <div>
+                                            <span className="font-medium text-textMuted">Rule:</span>{' '}
+                                            <span className="text-text">
+                                                {typeof finding.rule === 'string' ? finding.rule : finding.rule?.rule}
+                                            </span>
+                                        </div>
+                                    )}
+                                    {finding.verification?.reason && (
+                                        <div>
+                                            <span className="font-medium text-textMuted">Verified:</span>{' '}
+                                            <span className="text-text">{finding.verification.reason}</span>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* Recommended patch (recommendation only — never auto-applied) */}
+                            {finding.suggestedFix?.replacement && (
+                                <div className="mt-4">
+                                    <span className="text-xs font-medium text-textMuted">
+                                        Recommended patch{finding.suggestedFix.applicability ? ` (${finding.suggestedFix.applicability})` : ''}
+                                    </span>
+                                    {finding.suggestedFix.original && (
+                                        <pre className="mt-2 p-2 bg-red-500/10 rounded-lg text-xs overflow-x-auto font-mono">
+                                            <code>- {finding.suggestedFix.original}</code>
+                                        </pre>
+                                    )}
+                                    <pre className="mt-1 p-2 bg-green-500/10 rounded-lg text-xs overflow-x-auto font-mono">
+                                        <code>+ {finding.suggestedFix.replacement}</code>
+                                    </pre>
+                                    {finding.suggestedFix.explanation && (
+                                        <p className="text-xs text-textMuted mt-1">{finding.suggestedFix.explanation}</p>
+                                    )}
+                                </div>
+                            )}
+
                             {/* Code Snippet */}
                             {finding.codeSnippet && (
                                 <div className="mt-4">

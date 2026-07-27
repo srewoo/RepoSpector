@@ -37,6 +37,19 @@ const MermaidDiagram = React.lazy(() =>
 );
 import { copyToClipboard } from '../utils/clipboard';
 
+// Compact relative time for the "Reviewed X ago" label.
+function timeAgo(ts) {
+    if (!ts) return '';
+    const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    if (s < 45) return 'just now';
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ago`;
+    const d = Math.floor(h / 24);
+    return `${d}d ago`;
+}
+
 export function PRReviewInterface({
     prUrl,
     prData,
@@ -119,23 +132,22 @@ export function PRReviewInterface({
         setPostResult(null);
 
         try {
-            // Build the unified findings list: orchestrator/multi-pass findings
-            // (from analysisResult) + static-analysis findings. Both are in the
-            // legacy { severity, file, line, message } shape because the
-            // adapter normalizes them.
-            const orchestratorFindings = analysisResult?.perFileFindings ?? [];
-            const staticAnalysisFindings = staticAnalysisResult?.findings
-                ?? staticFindings
-                ?? [];
-            const unifiedFindings = [...orchestratorFindings, ...staticAnalysisFindings];
-
+            // Post the SAME findings the panel displays: `findings` is the
+            // authoritative set — verified (false positives removed), deduped
+            // against static analysis, and carrying the generated fix patches.
+            //
+            // This used to post `perFileFindings` instead, which meant the
+            // review posted to the PR contained the exact false positives the
+            // verification pass had just paid an LLM to remove, double-counted
+            // static findings on the orchestrator path, and dropped every
+            // suggested fix. Never diverge display from what gets posted.
             const response = await chrome.runtime.sendMessage({
                 type: 'POST_PR_REVIEW',
                 data: {
                     prUrl,
                     analysisResult: {
                         ...(staticAnalysisResult ?? {}),
-                        findings: unifiedFindings,
+                        findings,
                     },
                     aiSummary,
                     options: {
@@ -163,7 +175,7 @@ export function PRReviewInterface({
             // Clear result after 5 seconds
             setTimeout(() => setPostResult(null), 5000);
         }
-    }, [prUrl, analysisResult, staticAnalysisResult, staticFindings, aiSummary, postingReview, reviewEvent]);
+    }, [prUrl, findings, staticAnalysisResult, aiSummary, postingReview, reviewEvent, setPostingReview, setPostResult]);
 
     // Generate PR description
     const handleGenerateDescription = useCallback(async (apply = false) => {
@@ -433,6 +445,23 @@ export function PRReviewInterface({
                     </button>
                 ))}
             </div>
+
+            {/* Reviewed-when + Re-run */}
+            {analysisResult?.reviewedAt && (
+                <div className="flex items-center justify-between px-1 py-2 text-xs text-textMuted">
+                    <span>Reviewed {timeAgo(analysisResult.reviewedAt)}</span>
+                    <button
+                        type="button"
+                        onClick={onRefresh}
+                        disabled={loading}
+                        className="inline-flex items-center gap-1 text-primary hover:underline disabled:opacity-50 disabled:no-underline"
+                        title="Run a fresh review of this PR"
+                    >
+                        <RefreshCw className={cn('w-3 h-3', loading && 'animate-spin')} />
+                        {loading ? 'Reviewing…' : 'Re-run'}
+                    </button>
+                </div>
+            )}
 
             {/* Tab Content */}
             <LazyAnimatePresence mode="wait">

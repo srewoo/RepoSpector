@@ -39,7 +39,7 @@ describe('settingsHandlers', () => {
 
     it('exposes the expected message types', () => {
         expect(Object.keys(build(makeSvc())).sort()).toEqual(
-            ['EXPLAIN_FINDING', 'GET_SETTINGS', 'SAVE_SETTINGS', 'SUGGEST_FIX', 'VALIDATE_API_KEY']);
+            ['EXPLAIN_FINDING', 'FETCH_MODELS', 'GET_SETTINGS', 'SAVE_SETTINGS', 'SUGGEST_FIX', 'VALIDATE_API_KEY']);
     });
 
     describe('VALIDATE_API_KEY', () => {

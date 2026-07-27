@@ -749,6 +749,10 @@ pre::-webkit-scrollbar-thumb:hover {
   visibility: visible;
 }
 
+.invisible {
+  visibility: hidden;
+}
+
 .collapse {
   visibility: collapse;
 }
@@ -1766,6 +1770,10 @@ pre::-webkit-scrollbar-thumb:hover {
   background-color: var(--color-background);
 }
 
+.bg-black\/25 {
+  background-color: rgb(0 0 0 / 0.25);
+}
+
 .bg-black\/50 {
   background-color: rgb(0 0 0 / 0.5);
 }
@@ -2332,6 +2340,10 @@ pre::-webkit-scrollbar-thumb:hover {
   --tw-text-opacity: 0.8;
 }
 
+.underline {
+  text-decoration-line: underline;
+}
+
 .opacity-0 {
   opacity: 0;
 }
@@ -2395,10 +2407,20 @@ pre::-webkit-scrollbar-thumb:hover {
   outline-style: solid;
 }
 
+.ring-1 {
+  --tw-ring-offset-shadow: var(--tw-ring-inset) 0 0 0 var(--tw-ring-offset-width) var(--tw-ring-offset-color);
+  --tw-ring-shadow: var(--tw-ring-inset) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color);
+  box-shadow: var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow, 0 0 #0000);
+}
+
 .ring-2 {
   --tw-ring-offset-shadow: var(--tw-ring-inset) 0 0 0 var(--tw-ring-offset-width) var(--tw-ring-offset-color);
   --tw-ring-shadow: var(--tw-ring-inset) 0 0 0 calc(2px + var(--tw-ring-offset-width)) var(--tw-ring-color);
   box-shadow: var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow, 0 0 #0000);
+}
+
+.ring-black\/10 {
+  --tw-ring-color: rgb(0 0 0 / 0.1);
 }
 
 .filter {
@@ -2678,6 +2700,10 @@ pre::-webkit-scrollbar-thumb:hover {
   cursor: not-allowed;
 }
 
+.disabled\:no-underline:disabled {
+  text-decoration-line: none;
+}
+
 .disabled\:opacity-50:disabled {
   opacity: 0.5;
 }
@@ -2702,5 +2728,11 @@ pre::-webkit-scrollbar-thumb:hover {
 @media (min-width: 640px) {
   .sm\:w-auto {
     width: auto;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .dark\:bg-white\/25 {
+    background-color: rgb(255 255 255 / 0.25);
   }
 }

@@ -107,6 +107,56 @@ export class KnowledgeGraphService {
         return matches;
     }
 
+    /**
+     * Find where a symbol NAME is referenced in this (repo) graph — the primitive
+     * behind cross-repo impact: given a symbol changed in repo A, ask repo B's graph
+     * "do you reference this name?". Returns the referencing files/sites.
+     *
+     * Recall depends on the name appearing in this graph — as a node (an import
+     * binding, a re-declaration, a same-named definition) or as a CALLS target.
+     * It cannot see a reference the indexer never captured, so this is a floor, not
+     * a proof of no-impact.
+     *
+     * @param {string} name
+     * @returns {Array<{file: string|null, kind: string, line: number|null}>}
+     */
+    findReferences(name) {
+        if (!name) return [];
+        const out = [];
+        const seen = new Set();
+        const push = (file, kind, line) => {
+            const key = `${file}|${kind}|${line}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            out.push({ file: file || null, kind, line: line ?? null });
+        };
+
+        // 1) Named nodes (definitions / import bindings / usages carrying the name).
+        const named = this.findNodeByName(name);
+        const namedIds = new Set(named.map(n => n.id));
+        for (const n of named) {
+            push(n.properties?.filePath, n.label || n.type || 'symbol', n.properties?.startLine);
+        }
+
+        // 2) CALLS relationships whose target is a node named `name` (call sites).
+        for (const rel of this.relationships.values()) {
+            if (rel.type === 'CALLS' && namedIds.has(rel.targetId)) {
+                const src = this.getNode(rel.sourceId);
+                push(src?.properties?.filePath, 'call', rel.properties?.line ?? rel.line);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Convenience predicate used by cross-repo impact.
+     * @param {string} name
+     * @returns {boolean}
+     */
+    referencesSymbol(name) {
+        return this.findReferences(name).length > 0;
+    }
+
     getRelationshipsFrom(nodeId) {
         const result = [];
         for (const rel of this.relationships.values()) {

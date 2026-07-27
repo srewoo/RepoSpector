@@ -5,6 +5,8 @@
  */
 
 import { detectLanguageFromPath } from '../utils/languageMap.js';
+import { formatInlineComments } from '../utils/inlineCommentFormatter.js';
+import { buildCommentableLineMap } from '../utils/patchLines.js';
 
 export class PullRequestService {
     constructor(options = {}) {
@@ -213,6 +215,11 @@ export class PullRequestService {
                 targetRepo: pr.base?.repo?.full_name
             },
 
+            // Revision identity — what incremental re-review diffs against to
+            // decide whether the PR moved since the last review.
+            headSha: pr.head?.sha || null,
+            baseSha: pr.base?.sha || null,
+
             // Stats
             stats: {
                 additions: pr.additions || 0,
@@ -319,7 +326,13 @@ export class PullRequestService {
                 console.warn('Failed to fetch MR approvals:', e);
             }
 
-            return this.normalizeGitLabMR(mrData, changesData, commitsData, notesData, approvals);
+            // Which CI jobs actually failed. "pipeline: failed" alone tells the
+            // reviewer nothing actionable; the job names are what let it reason
+            // about whether this diff explains the failure. Only fetched when the
+            // pipeline is red, so the happy path costs no extra call.
+            const failedJobs = await this._fetchFailedJobNames(projectId, mrData?.head_pipeline, headers);
+
+            return this.normalizeGitLabMR(mrData, changesData, commitsData, notesData, approvals, failedJobs);
         } catch (error) {
             console.error('Error fetching GitLab MR:', error);
             throw error;
@@ -327,9 +340,38 @@ export class PullRequestService {
     }
 
     /**
+     * Names of the failed jobs in an MR's head pipeline.
+     *
+     * Soft in every direction — an unreadable pipeline yields `[]` and the
+     * review proceeds without the detail. Never throws.
+     *
+     * @returns {Promise<string[]>}
+     */
+    async _fetchFailedJobNames(projectId, headPipeline, headers) {
+        if (!headPipeline?.id || headPipeline.status !== 'failed') return [];
+        try {
+            const resp = await fetch(
+                `${this.gitlabBaseUrl}/projects/${projectId}/pipelines/${headPipeline.id}/jobs?scope[]=failed&per_page=20`,
+                { headers }
+            );
+            if (!resp.ok) return [];
+            const jobs = await resp.json();
+            if (!Array.isArray(jobs)) return [];
+            // `allow_failure` jobs are red by design and are not a review signal.
+            return jobs
+                .filter(j => j && j.allow_failure !== true)
+                .map(j => j.name)
+                .filter(Boolean);
+        } catch (e) {
+            console.warn('Failed to fetch failed pipeline jobs:', e.message);
+            return [];
+        }
+    }
+
+    /**
      * Normalize GitLab MR data to common format
      */
-    normalizeGitLabMR(mr, changes, commits, notes, approvals) {
+    normalizeGitLabMR(mr, changes, commits, notes, approvals, failedJobs = []) {
         // Filter inline comments (diff notes) from general notes
         const inlineComments = notes.filter(n => n.position?.new_path || n.position?.old_path);
         const generalComments = notes.filter(n => !n.position);
@@ -372,6 +414,12 @@ export class PullRequestService {
                 sourceRepo: mr.source_project_id,
                 targetRepo: mr.target_project_id
             },
+
+            // Revision identity — head SHA drives incremental re-review; diffRefs
+            // are also what inline diff notes must be positioned against.
+            headSha: mr.diff_refs?.head_sha || mr.sha || null,
+            baseSha: mr.diff_refs?.base_sha || null,
+            diffRefs: mr.diff_refs || null,
 
             // Stats
             stats: {
@@ -437,6 +485,9 @@ export class PullRequestService {
                 status: mr.head_pipeline.status,
                 webUrl: mr.head_pipeline.web_url
             } : null,
+
+            // Names of jobs that failed in the head pipeline (empty when green).
+            failedJobs,
 
             // Timestamps
             createdAt: mr.created_at,
@@ -850,41 +901,294 @@ export class PullRequestService {
             'Content-Type': 'application/json'
         };
 
-        // Build review payload
-        const reviewBody = {
-            body: summary || '',
-            event: event, // COMMENT, APPROVE, REQUEST_CHANGES
-            comments: inlineComments.map(c => ({
-                path: c.path,
-                line: c.line,
-                body: c.body,
-                ...(c.startLine ? { start_line: c.startLine } : {})
-            }))
-        };
+        const toApiComment = (c) => ({
+            path: c.path,
+            line: c.line,
+            side: 'RIGHT',
+            body: c.body,
+            ...(c.startLine ? { start_line: c.startLine, start_side: 'RIGHT' } : {})
+        });
 
-        const response = await fetch(
-            `${this.githubBaseUrl}/repos/${owner}/${repo}/pulls/${prNumber}/reviews`,
-            {
+        const reviewsUrl = `${this.githubBaseUrl}/repos/${owner}/${repo}/pulls/${prNumber}/reviews`;
+
+        const submit = async (comments) => {
+            const response = await fetch(reviewsUrl, {
                 method: 'POST',
                 headers,
-                body: JSON.stringify(reviewBody)
+                body: JSON.stringify({
+                    body: summary || '',
+                    event,
+                    comments: comments.map(toApiComment)
+                })
+            });
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                const err = new Error(`GitHub API error (${response.status}): ${errorData.message || response.statusText}`);
+                err.status = response.status;
+                err.details = errorData;
+                throw err;
             }
-        );
+            return response.json();
+        };
 
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(`GitHub API error (${response.status}): ${errorData.message || response.statusText}`);
+        // The Reviews API is atomic: ONE comment on a line outside the diff 422s
+        // the whole request, losing the summary too. The formatter validates line
+        // positions up front, but a race (a push between fetch and post) or an
+        // unparsed patch can still slip through — so on a 422 we degrade to
+        // summary-only rather than losing the entire review, then re-attach the
+        // comments individually so the good ones still land.
+        let result;
+        let rejectedComments = [];
+        try {
+            result = await submit(inlineComments);
+        } catch (e) {
+            if (e.status !== 422 || inlineComments.length === 0) throw e;
+            console.warn(`GitHub rejected the batched review (${e.details?.message || '422'}); falling back to summary + per-comment posting`);
+            result = await submit([]);
+            rejectedComments = inlineComments;
         }
 
-        const result = await response.json();
+        let commentsPosted = rejectedComments.length ? 0 : inlineComments.length;
+
+        if (rejectedComments.length) {
+            const commentsUrl = `${this.githubBaseUrl}/repos/${owner}/${repo}/pulls/${prNumber}/comments`;
+            const commitId = await this._getGitHubHeadSha(owner, repo, prNumber, headers).catch(() => null);
+            for (const c of rejectedComments) {
+                try {
+                    const resp = await fetch(commentsUrl, {
+                        method: 'POST',
+                        headers,
+                        body: JSON.stringify({ ...toApiComment(c), commit_id: commitId })
+                    });
+                    if (resp.ok) commentsPosted++;
+                    else console.warn(`Skipped inline comment on ${c.path}:${c.line} (${resp.status})`);
+                } catch (err) {
+                    console.warn(`Skipped inline comment on ${c.path}:${c.line}:`, err.message);
+                }
+            }
+        }
+
         return {
             success: true,
             platform: 'github',
             reviewId: result.id,
             htmlUrl: result.html_url,
-            commentsPosted: inlineComments.length,
+            commentsPosted,
+            commentsAttempted: inlineComments.length,
+            degraded: rejectedComments.length > 0,
             hasSummary: !!summary
         };
+    }
+
+    /**
+     * Inline discussions on THIS PR that were started by one of our own comments,
+     * each with its thread replies.
+     *
+     * This is the read side of the feedback flywheel: the bot note carries the
+     * tick-box footer, the replies carry the author's reasoning. Mirrors
+     * pr-agent's `fetch_bot_inline_discussions`.
+     *
+     * Returns `[]` on any failure — a feedback outage must never block a review.
+     *
+     * @param {string} url - PR/MR URL
+     * @param {string} marker - substring identifying our comments (the footer marker)
+     * @returns {Promise<Array<{
+     *   botNote: {id, body, author, createdAt},
+     *   replies: Array<{id, body, author, createdAt}>,
+     *   file: string|null, line: number|null
+     * }>>}
+     */
+    async fetchBotInlineDiscussions(url, marker) {
+        const prInfo = this.parsePullRequestUrl(url);
+        if (!prInfo || !marker) return [];
+
+        try {
+            if (prInfo.platform === 'gitlab') return await this._fetchGitLabBotDiscussions(prInfo, marker);
+            if (prInfo.platform === 'github') return await this._fetchGitHubBotDiscussions(prInfo, marker);
+        } catch (e) {
+            console.warn('[Feedback] Could not fetch bot discussions:', e.message);
+        }
+        return [];
+    }
+
+    async _fetchGitLabBotDiscussions(prInfo, marker) {
+        if (!this.gitlabToken) return [];
+        const project = encodeURIComponent(prInfo.projectPath || `${prInfo.owner}/${prInfo.repo}`);
+        const headers = { 'PRIVATE-TOKEN': this.gitlabToken };
+
+        // GitLab models a thread as a `discussion` with an ordered `notes` array —
+        // the first note starts the thread, the rest are replies. That structure
+        // is exactly what we need, so no reply-stitching is required here.
+        const discussions = await this.fetchAllPagesGitLab(
+            `${this.gitlabBaseUrl}/projects/${project}/merge_requests/${prInfo.mrNumber}/discussions?per_page=100`,
+            headers
+        );
+
+        const out = [];
+        for (const d of discussions || []) {
+            const notes = d?.notes || [];
+            if (!notes.length) continue;
+
+            const first = notes[0];
+            if (!first?.body?.includes(marker)) continue;
+
+            out.push({
+                discussionId: d.id,
+                botNote: {
+                    id: first.id,
+                    body: first.body || '',
+                    author: first.author?.username || '',
+                    authorId: first.author?.id ?? null,
+                    createdAt: first.created_at,
+                },
+                replies: notes.slice(1).map(n => ({
+                    id: n.id,
+                    body: n.body || '',
+                    author: n.author?.username || '',
+                    authorId: n.author?.id ?? null,
+                    createdAt: n.created_at,
+                    system: n.system || false,
+                })),
+                file: first.position?.new_path || first.position?.old_path || null,
+                line: first.position?.new_line ?? first.position?.old_line ?? null,
+                resolved: !!d.notes?.[0]?.resolved,
+            });
+        }
+        return out;
+    }
+
+    async _fetchGitHubBotDiscussions(prInfo, marker) {
+        if (!this.githubToken) return [];
+        const { owner, repo, prNumber } = prInfo;
+        const headers = {
+            'Accept': 'application/vnd.github.v3+json',
+            'Authorization': `token ${this.githubToken}`,
+        };
+
+        // GitHub has no thread object on the REST review-comments API: replies are
+        // flat comments carrying `in_reply_to_id`. Stitch them back together.
+        const comments = await this.fetchAllPagesGitHub(
+            `${this.githubBaseUrl}/repos/${owner}/${repo}/pulls/${prNumber}/comments`,
+            headers
+        );
+
+        const repliesByRoot = new Map();
+        for (const c of comments || []) {
+            if (c.in_reply_to_id == null) continue;
+            const list = repliesByRoot.get(c.in_reply_to_id) || [];
+            list.push(c);
+            repliesByRoot.set(c.in_reply_to_id, list);
+        }
+
+        const out = [];
+        for (const c of comments || []) {
+            if (c.in_reply_to_id != null) continue;      // a reply, not a thread root
+            if (!c.body?.includes(marker)) continue;
+
+            out.push({
+                discussionId: c.id,
+                botNote: {
+                    id: c.id,
+                    body: c.body || '',
+                    author: c.user?.login || '',
+                    authorId: c.user?.id ?? null,
+                    createdAt: c.created_at,
+                },
+                replies: (repliesByRoot.get(c.id) || []).map(r => ({
+                    id: r.id,
+                    body: r.body || '',
+                    author: r.user?.login || '',
+                    authorId: r.user?.id ?? null,
+                    createdAt: r.created_at,
+                    system: false,
+                })),
+                file: c.path || null,
+                line: c.line ?? c.original_line ?? null,
+                resolved: false,
+            });
+        }
+        return out;
+    }
+
+    /**
+     * Review comments across a repository's RECENT merge/pull requests.
+     *
+     * Feeds ConventionMiner: a team's conventions are only recoverable from what
+     * its reviewers have actually asked for. Deliberately bounded — this walks a
+     * handful of recent MRs, not the whole history — because it runs in the
+     * background of a review and must not turn into a crawl.
+     *
+     * @param {string} url - any PR/MR URL in the repo
+     * @param {object} [opts] - { maxRequests, perRequest }
+     * @returns {Promise<Array<{author:string, body:string, file:string|null, line:number|null}>>}
+     */
+    async fetchReviewComments(url, opts = {}) {
+        const { maxRequests = 15 } = opts;
+        const prInfo = this.parsePullRequestUrl(url);
+        if (!prInfo) return [];
+
+        if (prInfo.platform === 'gitlab') {
+            if (!this.gitlabToken) return [];
+            const project = encodeURIComponent(prInfo.projectPath || `${prInfo.owner}/${prInfo.repo}`);
+            const headers = { 'PRIVATE-TOKEN': this.gitlabToken };
+            const listRes = await fetch(
+                `${this.gitlabBaseUrl}/projects/${project}/merge_requests?state=merged&order_by=updated_at&per_page=${maxRequests}`,
+                { headers }
+            );
+            if (!listRes.ok) return [];
+            const mrs = await listRes.json();
+
+            const all = await Promise.all((mrs || []).map(async (mr) => {
+                try {
+                    const r = await fetch(
+                        `${this.gitlabBaseUrl}/projects/${project}/merge_requests/${mr.iid}/notes?per_page=100`,
+                        { headers }
+                    );
+                    if (!r.ok) return [];
+                    const notes = await r.json();
+                    return (notes || [])
+                        .filter(n => !n.system)
+                        .map(n => ({
+                            author: n.author?.username || '',
+                            body: n.body || '',
+                            file: n.position?.new_path || n.position?.old_path || null,
+                            line: n.position?.new_line ?? n.position?.old_line ?? null,
+                        }));
+                } catch { return []; }
+            }));
+            return all.flat();
+        }
+
+        if (prInfo.platform === 'github') {
+            if (!this.githubToken) return [];
+            const { owner, repo } = prInfo;
+            const headers = {
+                Accept: 'application/vnd.github.v3+json',
+                Authorization: `token ${this.githubToken}`,
+            };
+            // One call gets recent review comments across the whole repo.
+            const res = await fetch(
+                `${this.githubBaseUrl}/repos/${owner}/${repo}/pulls/comments?per_page=100&sort=updated&direction=desc`,
+                { headers }
+            );
+            if (!res.ok) return [];
+            const comments = await res.json();
+            return (comments || []).map(c => ({
+                author: c.user?.login || '',
+                body: c.body || '',
+                file: c.path || null,
+                line: c.line ?? c.original_line ?? null,
+            }));
+        }
+
+        return [];
+    }
+
+    /** Head SHA of a PR — required as `commit_id` when posting standalone comments. */
+    async _getGitHubHeadSha(owner, repo, prNumber, headers) {
+        const resp = await fetch(`${this.githubBaseUrl}/repos/${owner}/${repo}/pulls/${prNumber}`, { headers });
+        if (!resp.ok) throw new Error(`GitHub API error: ${resp.status}`);
+        return (await resp.json())?.head?.sha || null;
     }
 
     /**
@@ -927,17 +1231,28 @@ export class PullRequestService {
             results.summaryNoteId = noteResult.id;
         }
 
+        // GitLab diff notes REQUIRE base_sha/start_sha/head_sha from the MR's
+        // diff_refs. These were previously read off each comment object, which
+        // never carried them — so `position` was all-undefined and every inline
+        // note was rejected with a 400. Fetch the refs once for the whole batch.
+        const diffRefs = options.diffRefs
+            || await this._getGitLabDiffRefs(encodedProject, mrNumber, headers).catch(e => {
+                console.warn('Could not fetch GitLab diff_refs; skipping inline notes:', e.message);
+                return null;
+            });
+
         // Post inline comments as diff notes
-        for (const comment of inlineComments) {
+        for (const comment of (diffRefs ? inlineComments : [])) {
             try {
                 const diffNoteBody = {
                     body: comment.body,
                     position: {
-                        base_sha: comment.baseSha,
-                        start_sha: comment.startSha,
-                        head_sha: comment.headSha,
+                        base_sha: diffRefs.base_sha,
+                        start_sha: diffRefs.start_sha,
+                        head_sha: diffRefs.head_sha,
                         position_type: 'text',
                         new_path: comment.path,
+                        old_path: comment.oldPath || comment.path,
                         new_line: comment.line
                     }
                 };
@@ -954,6 +1269,9 @@ export class PullRequestService {
                 if (diffResponse.ok) {
                     const diffResult = await diffResponse.json();
                     results.inlineNoteIds.push(diffResult.id);
+                } else {
+                    const err = await diffResponse.json().catch(() => ({}));
+                    console.warn(`GitLab rejected inline note on ${comment.path}:${comment.line} (${diffResponse.status}): ${err.message || ''}`);
                 }
             } catch (e) {
                 console.warn(`Failed to post inline comment on ${comment.path}:${comment.line}:`, e.message);
@@ -966,8 +1284,22 @@ export class PullRequestService {
             summaryNoteId: results.summaryNoteId,
             inlineNoteIds: results.inlineNoteIds,
             commentsPosted: results.inlineNoteIds.length,
+            commentsAttempted: inlineComments.length,
+            degraded: !diffRefs && inlineComments.length > 0,
             hasSummary: !!summary
         };
+    }
+
+    /** MR diff refs (base/start/head SHA) — mandatory for positioning diff notes. */
+    async _getGitLabDiffRefs(encodedProject, mrNumber, headers) {
+        const resp = await fetch(
+            `${this.gitlabBaseUrl}/projects/${encodedProject}/merge_requests/${mrNumber}`,
+            { headers }
+        );
+        if (!resp.ok) throw new Error(`GitLab API error: ${resp.status}`);
+        const mr = await resp.json();
+        if (!mr?.diff_refs?.head_sha) throw new Error('MR response has no diff_refs');
+        return mr.diff_refs;
     }
 
     /**
@@ -1042,36 +1374,26 @@ export class PullRequestService {
     }
 
     /**
-     * Format findings as inline review comments
+     * Format findings as inline review comments.
+     *
+     * Delegates to the shared formatter, which understands every producer's
+     * finding shape (static `filePath`, LLM `file`, per-file containers) and
+     * validates each target line against the diff. Pass `prData` (or a prebuilt
+     * `commentableLines` map) to enable that validation — without it, an
+     * out-of-diff line makes GitHub reject the entire review.
+     *
+     * @param {Array<Object>} findings
+     * @param {Object} options - { maxInlineComments, prData, commentableLines }
      */
     formatInlineComments(findings, options = {}) {
-        const maxInline = options.maxInlineComments || 30;
+        const commentableLines = options.commentableLines
+            || (options.prData?.files ? buildCommentableLineMap(options.prData.files) : null);
 
-        return findings
-            .filter(f => f.filePath && f.line && f.line > 0)
-            .filter(f => f.severity === 'critical' || f.severity === 'high' || f.severity === 'medium')
-            .slice(0, maxInline)
-            .map(f => {
-                const severityEmoji = { critical: '🔴', high: '🟠', medium: '🟡' };
-                const emoji = severityEmoji[f.severity] || '⚪';
-                const toolBadge = f.tool ? ` \`${f.tool}\`` : '';
-                const ruleInfo = f.ruleId ? ` (${f.ruleId})` : '';
-
-                let body = `${emoji} **${f.severity.toUpperCase()}**${toolBadge}${ruleInfo}: ${f.message}`;
-
-                // Use GitHub suggestion syntax for one-click fixes when a fix is available
-                if (f.suggestedFix) {
-                    body += `\n\n\`\`\`suggestion\n${f.suggestedFix}\n\`\`\``;
-                } else if (f.remediation) {
-                    body += `\n\n**Fix:** ${f.remediation}`;
-                }
-
-                return {
-                    path: f.filePath,
-                    line: f.line,
-                    body
-                };
-            });
+        return formatInlineComments(findings, {
+            ...options,
+            maxInlineComments: options.maxInlineComments || 30,
+            commentableLines,
+        });
     }
 
     /**

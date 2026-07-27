@@ -6,6 +6,28 @@
 import { pipeline, env } from '@xenova/transformers';
 import * as TreeSitter from 'web-tree-sitter';
 import { TreeSitterParser } from '../services/TreeSitterParser.js';
+import { TreeSitterLintEngine } from '../services/TreeSitterLintEngine.js';
+
+// Silence two KNOWN-benign warnings emitted by @xenova/transformers while loading the
+// bundled model over chrome-extension:// — they are not actionable (the model loads
+// fine) and otherwise clutter the extension's error page:
+//   • "Unable to determine content-length from response headers…"  (no Content-Length
+//     on the extension asset → transformers just grows its buffer)
+//   • "…Failed to execute 'put' on 'Cache': Request scheme 'chrome-extension'…"
+//     (belt-and-suspenders; already prevented via env.useBrowserCache=false below)
+const _BENIGN_MODEL_WARNINGS = [
+    /Unable to determine content-length/i,
+    /Unable to add response to browser cache/i,
+    /scheme 'chrome-extension' is unsupported/i
+];
+for (const level of ['warn', 'error']) {
+    const original = console[level].bind(console);
+    console[level] = (...args) => {
+        const text = args.map((a) => (typeof a === 'string' ? a : a?.message || '')).join(' ');
+        if (_BENIGN_MODEL_WARNINGS.some((re) => re.test(text))) return;
+        original(...args);
+    };
+}
 
 // Tree-sitter runs here (module context) for the same reason embeddings do:
 // MV3 service workers can't load the WASM runtime, but offscreen documents can.
@@ -34,6 +56,30 @@ async function handleTreeSitterAnalyze(files) {
     return { available: parser.available, analyses };
 }
 
+// Real AST lint for Python/Go — runs here because tree-sitter's WASM runtime can't
+// load in the MV3 service worker. JS goes through the acorn engine in the worker.
+let _tsLintEngine = null;
+function getTsLintEngine() {
+    if (!_tsLintEngine) _tsLintEngine = new TreeSitterLintEngine({ parser: getTsParser() });
+    return _tsLintEngine;
+}
+
+async function handleTreeSitterLint(files) {
+    const engine = getTsLintEngine();
+    const findingsByFile = {};
+    for (const file of files) {
+        if (!file.content) continue;
+        try {
+            const r = await engine.analyze(file.content, { filePath: file.path });
+            if (r.ok && r.findings.length) findingsByFile[file.path] = r.findings;
+        } catch (e) {
+            // one bad file must not fail the batch
+            console.warn('TS lint failed for', file.path, e?.message);
+        }
+    }
+    return { findingsByFile };
+}
+
 // Configure Transformers.js for Chrome extension environment.
 // The model weights + tokenizer AND the ONNX WASM runtime are bundled inside
 // the extension (see vite.config.js copyAssets + manifest web_accessible_resources).
@@ -43,6 +89,11 @@ async function handleTreeSitterAnalyze(files) {
 env.allowLocalModels = true;                                  // Load model from bundled /models/
 env.allowRemoteModels = false;                                // Never fall back to the HF CDN
 env.localModelPath = chrome.runtime.getURL('models/');        // chrome-extension://<id>/models/
+// The model is already bundled locally, so the browser Cache API is pointless — and
+// it can't cache a chrome-extension:// request, which produced the noisy warning
+// "Failed to execute 'put' on 'Cache': Request scheme 'chrome-extension' is unsupported".
+env.useBrowserCache = false;
+env.useCustomCache = false;
 env.backends.onnx.wasm.numThreads = 1;                        // Avoid blob: URL CSP violations from ONNX workers
 env.backends.onnx.wasm.wasmPaths = chrome.runtime.getURL('wasm/'); // Bundled ONNX runtime, no jsdelivr fetch
 
@@ -111,6 +162,12 @@ class OffscreenEmbeddingWorker {
 
                 case 'TS_ANALYZE_FILES': {
                     const result = await handleTreeSitterAnalyze(message.files || []);
+                    sendResponse({ success: true, ...result, messageId: message.messageId });
+                    break;
+                }
+
+                case 'TS_LINT_FILES': {
+                    const result = await handleTreeSitterLint(message.files || []);
                     sendResponse({ success: true, ...result, messageId: message.messageId });
                     break;
                 }

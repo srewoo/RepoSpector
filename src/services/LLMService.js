@@ -3,7 +3,8 @@
  * Supports: OpenAI, Anthropic (Claude), Google (Gemini), Groq, Mistral, and Ollama (local)
  */
 
-import { LLM_PROVIDERS, API_ENDPOINTS, MODELS } from '../utils/constants.js';
+import { LLM_PROVIDERS, API_ENDPOINTS } from '../utils/constants.js';
+import { resolveModel } from '../utils/modelResolver.js';
 
 export class LLMService {
     constructor() {
@@ -53,10 +54,23 @@ export class LLMService {
      * @returns {Promise<Object>} Response with content property
      */
     async streamChat(messages, options = {}) {
-        const { _provider, model, apiKey, stream = false, onChunk, tabId } = options;
+        const { provider, model, apiKey, stream = false, onChunk, tabId, context } = options;
+
+        // No fallback. This previously read `model || 'openai:gpt-4.1-mini'`, so a
+        // caller that forgot to pass a model silently billed the user's OpenAI key
+        // for a model they never selected — and the resulting review was attributed
+        // to the wrong model. Resolve strictly, or fail.
+        //
+        // `provider` used to be destructured as `_provider` and thrown away, which
+        // made the Settings provider field decorative. It is now honoured: it
+        // disambiguates an unprefixed model and must agree with any prefix.
+        const resolved = resolveModel(model, {
+            explicitProvider: provider,
+            context: context || 'an LLM call',
+        });
 
         const requestData = {
-            model: model || 'openai:gpt-4.1-mini',
+            model: resolved.modelIdentifier,
             messages
         };
 
@@ -79,9 +93,10 @@ export class LLMService {
      * @returns {string} Provider name
      */
     getProvider(modelIdentifier) {
-        if (!modelIdentifier || typeof modelIdentifier !== 'string') return LLM_PROVIDERS.OPENAI;
-        if (!modelIdentifier.includes(':')) return LLM_PROVIDERS.OPENAI;
-        return modelIdentifier.split(':')[0] || LLM_PROVIDERS.OPENAI;
+        // Strict: never assume OpenAI. The old default meant any identifier
+        // without a "provider:" prefix — including "claude-sonnet-4" — was routed
+        // to api.openai.com with the user's OpenAI key.
+        return resolveModel(modelIdentifier, { context: 'provider lookup' }).provider;
     }
 
     /**
@@ -90,15 +105,9 @@ export class LLMService {
      * @returns {string} Model ID for API calls
      */
     getModelId(modelIdentifier) {
-        if (!modelIdentifier || typeof modelIdentifier !== 'string') return 'gpt-4.1-mini';
-
-        const modelConfig = MODELS[modelIdentifier];
-        if (modelConfig?.modelId) {
-            return modelConfig.modelId;
-        }
-
-        if (!modelIdentifier.includes(':')) return modelIdentifier;
-        return modelIdentifier.split(':')[1] || modelIdentifier;
+        // Strict: no 'gpt-4.1-mini' default. A missing identifier is a bug in the
+        // caller, not a reason to spend the user's budget on an arbitrary model.
+        return resolveModel(modelIdentifier, { context: 'model id lookup' }).modelId;
     }
 
     /**
@@ -156,8 +165,14 @@ export class LLMService {
                 return this.callOllama(normalizedRequest, options);
 
             default:
-                console.warn(`Unknown provider '${provider}', falling back to OpenAI`);
-                return this.callOpenAI(normalizedRequest, apiKey, options);
+                // Never fall back to OpenAI. Doing so sent a request intended for
+                // another provider to api.openai.com using whatever key was to hand
+                // — wrong model, wrong bill, and the user's code shipped to a
+                // provider they did not choose.
+                throw new Error(
+                    `Unknown LLM provider '${provider}'. RepoSpector will not substitute a `
+                    + `different provider. Re-select your provider and model in Settings.`
+                );
         }
     }
 

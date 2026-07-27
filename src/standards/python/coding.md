@@ -29,3 +29,15 @@ Wildcard imports pollute the namespace and make it impossible to know where a na
 
 ## PY-CODING-010: `pathlib.Path` over `os.path` string manipulation
 `pathlib.Path` is the modern, object-oriented API for filesystem paths. `os.path.join` string manipulation is error-prone on cross-platform paths.
+
+## PY-CODING-020: Close HTTP responses on retry/fallback paths
+On a retry loop or auth-fallback (401/403) path, read or `aclose()` the previous `httpx.Response` before reassigning it or calling `continue`. `httpx.Response` has no `__del__`, so an unclosed body leaks a pooled connection until GC. Construct the `httpx.AsyncClient`/`requests.Session` once above the loop, not per attempt.
+
+## PY-CODING-021: `dict.get(k, default)`, not `x or default`, for defaulting
+`x or default` also replaces falsy values ("", 0, False, empty collections), not just a missing/None key. Use `dict.get(key, default)` (or an explicit `is None` check) when only absence should trigger the default.
+
+## PY-CODING-022: Gate each concern on its own truthiness
+Do not wrap a statement that sets multiple fields (e.g. `dataclasses.replace(obj, a=x, b=y)`) in a single `if x:` guard — the unrelated field `b` silently never gets set when `x` is falsy. Guard each assignment independently.
+
+## PY-CODING-023: A non-200 status is not always a health signal
+Do not record a legitimate `404` (or other terminal client response) as a circuit-breaker or dependency-health failure — the breaker will trip on healthy dependencies. Treat 404 as a terminal result, and reserve health accounting for 5xx / connection errors.

@@ -225,6 +225,14 @@ export class RAGService {
             console.warn(`⚠️ ${failedBatches} embedding batches failed permanently. ${embeddedCount}/${allChunks.length} chunks indexed.`);
         }
 
+        // If we had chunks but NOTHING embedded, the index is empty — do NOT report
+        // success and do NOT save a manifest (a manifest with no vectors is exactly the
+        // desync that makes re-indexing silently no-op and the repo never appear).
+        if (allChunks.length > 0 && embeddedCount === 0) {
+            if (onProgress) onProgress({ status: 'error', message: 'All embedding batches failed — 0 vectors stored.' });
+            return { success: false, chunksIndexed: 0, error: 'All embedding batches failed — 0 vectors stored. Check the embedding provider (Settings → Embedding Provider).' };
+        }
+
         // 4. Save manifest so incremental indexing works next time
         await this.manifestStore.save(manifest);
 
@@ -232,7 +240,8 @@ export class RAGService {
         await this.hybridSearcher.saveBM25ToStorage(repoId);
 
         if (onProgress) onProgress({ status: 'complete', message: 'Indexing complete!' });
-        return { success: true, chunksIndexed: allChunks.length };
+        // Report the REAL number embedded, not the chunk count we attempted.
+        return { success: true, chunksIndexed: embeddedCount };
     }
 
     /**
@@ -243,8 +252,12 @@ export class RAGService {
      * @param {Array} files - Array of file objects { path, content }
      * @param {function} onProgress - Callback for progress updates
      */
-    async indexRepositoryIncremental(repoId, files, onProgress) {
-        if (!this.enableIncrementalIndexing) {
+    async indexRepositoryIncremental(repoId, files, onProgress, options = {}) {
+        // `force` (used by the manual "Index Repository" button) always does a full,
+        // fresh index — so an explicit user action can never silently no-op on a stale
+        // manifest (the "435 unchanged but 0 vectors" desync).
+        if (!this.enableIncrementalIndexing || options.force) {
+            console.log(options.force ? '📚 Forced full re-index (manual)' : '📚 Incremental indexing disabled — full index');
             return this.indexRepository(repoId, files, onProgress);
         }
 
@@ -257,6 +270,17 @@ export class RAGService {
         if (!manifest) {
             // No existing index, do full indexing
             console.log('📚 No existing index found, performing full indexing');
+            return this.indexRepository(repoId, files, onProgress);
+        }
+
+        // Guard against a manifest/vector-store DESYNC: the manifest may claim the repo
+        // is indexed while the vector store has no chunks for it (a prior run wrote the
+        // manifest but embeddings failed, or the store was cleared out-of-band). In that
+        // case the "no changes" fast-path below would silently no-op and the repo would
+        // never appear in the indexed list. Detect the empty store and do a full index.
+        const hasVectors = await this.vectorStore.isIndexed(repoId).catch(() => false);
+        if (!hasVectors) {
+            console.warn(`📚 Manifest present but vector store empty for ${repoId} — forcing full re-index`);
             return this.indexRepository(repoId, files, onProgress);
         }
 

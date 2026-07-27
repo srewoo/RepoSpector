@@ -38,7 +38,13 @@ Never use \`any\` — use \`unknown\` plus narrowing guards.
 All inputs crossing a trust boundary must be validated with a Zod schema before use.
 
 ## TS-CODING-003: No non-null assertion without guard
-The \`!\` postfix operator silently removes \`null\`/\`undefined\` from the type. Only acceptable when a non-null invariant is proven by a preceding runtime check.`;
+The \`!\` postfix operator silently removes \`null\`/\`undefined\` from the type. Only acceptable when a non-null invariant is proven by a preceding runtime check.
+
+## JS-CODING-020: Use \`??\` not \`||\` for defaulting
+\`x || default\` also replaces falsy values (0, "", false, NaN), not just \`null\`/\`undefined\`. Use the nullish-coalescing operator \`x ?? default\` when only null/undefined should trigger the default.
+
+## JS-CODING-021: Release resources on retry/fallback paths
+On a retry or fallback path, do not abandon an open response/stream/connection before reading or closing it. Construct the HTTP client once above a retry loop rather than per attempt so pooling and keep-alive are preserved.`;
 
 const JS_TESTING = `# JavaScript / TypeScript Testing Standards
 
@@ -84,7 +90,19 @@ A bare \`except\` that silently passes hides crashes. Always either log the erro
 Use \`None\` as the default and create the mutable value inside the function.
 
 ## PY-CODING-007: Type hints required on all public functions (Python 3.10+)
-All public functions must have type hints on parameters and return values.`;
+All public functions must have type hints on parameters and return values.
+
+## PY-CODING-020: Close HTTP responses on retry/fallback paths
+On a retry loop or auth-fallback (401/403) path, read or \`aclose()\` the previous \`httpx.Response\` before reassigning it or calling \`continue\`. \`httpx.Response\` has no \`__del__\`, so an unclosed body leaks a pooled connection until GC. Construct the \`httpx.AsyncClient\`/\`requests.Session\` once above the loop, not per attempt.
+
+## PY-CODING-021: \`dict.get(k, default)\`, not \`x or default\`, for defaulting
+\`x or default\` also replaces falsy values ("", 0, False, empty collections), not just a missing/None key. Use \`dict.get(key, default)\` (or an explicit \`is None\` check) when only absence should trigger the default.
+
+## PY-CODING-022: Gate each concern on its own truthiness
+Do not wrap a statement that sets multiple fields (e.g. \`dataclasses.replace(obj, a=x, b=y)\`) in a single \`if x:\` guard — the unrelated field \`b\` silently never gets set when \`x\` is falsy. Guard each assignment independently.
+
+## PY-CODING-023: A non-200 status is not always a health signal
+Do not record a legitimate \`404\` (or other terminal client response) as a circuit-breaker or dependency-health failure — the breaker will trip on healthy dependencies. Treat 404 as a terminal result, and reserve health accounting for 5xx / connection errors.`;
 
 const PY_TESTING = `# Python Testing Standards
 
@@ -124,7 +142,13 @@ Do not share mutable state between goroutines without synchronisation.
 Any struct field participating in JSON encoding must have an explicit \`json:"name"\` tag.
 
 ## GO-CODING-007: \`defer\` for resource cleanup
-All resources requiring explicit closure must be closed with \`defer\` immediately after acquisition.`;
+All resources requiring explicit closure must be closed with \`defer\` immediately after acquisition.
+
+## GO-CODING-020: Close HTTP response bodies on retry/fallback paths
+\`defer resp.Body.Close()\` immediately after a successful \`http.Do\`, including inside retry loops — a \`continue\` or reassignment before closing leaks the connection back-pressure. Reuse a single \`http.Client\` across attempts rather than constructing one per iteration.
+
+## GO-CODING-021: A non-200 status is not always a health signal
+Do not count a terminal \`404\` as a circuit-breaker/health failure; reserve health accounting for 5xx and transport errors so the breaker does not trip on healthy dependencies.`;
 
 const GO_TESTING = `# Go Testing Standards
 

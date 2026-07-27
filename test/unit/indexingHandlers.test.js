@@ -147,12 +147,73 @@ describe('indexingHandlers', () => {
                 data: [{
                     repoId: 'org/repo',
                     platform: 'github',
-                    url: 'https://github.com/org/repo',
+                    // url is null when no stored metadata URL — we no longer assume
+                    // github.com/<repoId> (wrong for GitLab/nested-group repos).
+                    url: null,
                     indexedAt: null,
                     chunksCount: 5,
                     filesCount: 2,
                 }],
             });
+        });
+
+        it('handles a NUMERIC repoId without losing the whole list', async () => {
+            // GitLab indexing can key a repo by its numeric project id. Calling
+            // `.includes()` on that number threw inside the Promise.all, rejecting
+            // the batch so the handler returned success:false — the Repos panel
+            // showed "no repositories indexed" while the store held seven.
+            const svc = makeSvc();
+            svc.ragService.vectorStore.getAllRepoIds = jest.fn(async () => [
+                { repoId: 80804743 },
+                { repoId: 'mindtickle/enggx/sentinel' },
+                { repoId: 'mindtickle/migrated-call-ai/access-control' },
+            ]);
+
+            const send = jest.fn();
+            await createIndexingHandlers(svc).GET_INDEXED_REPOS({}, send);
+
+            const res = send.mock.calls[0][0];
+            expect(res.success).toBe(true);
+            expect(res.data).toHaveLength(3);
+            // Numeric id is coerced to a string and classified, not crashed on.
+            expect(res.data[0].repoId).toBe('80804743');
+            expect(res.data[0].platform).toBe('unknown');
+            expect(res.data[1].repoId).toBe('mindtickle/enggx/sentinel');
+        });
+
+        it('returns the healthy repos when one entry blows up', async () => {
+            const svc = makeSvc();
+            svc.ragService.vectorStore.getAllRepoIds = jest.fn(async () => [
+                { repoId: 'good/one' },
+                { repoId: null },
+                { repoId: 'good/two' },
+            ]);
+            svc.ragService.vectorStore.getRepoStats = jest.fn(async (id) => {
+                if (id === 'good/two') throw new Error('stats exploded');
+                return { chunksCount: 1, filesCount: 1 };
+            });
+
+            const send = jest.fn();
+            await createIndexingHandlers(svc).GET_INDEXED_REPOS({}, send);
+
+            const res = send.mock.calls[0][0];
+            expect(res.success).toBe(true);
+            // null id dropped; the stats failure falls back rather than removing the repo
+            expect(res.data.map(r => r.repoId)).toEqual(['good/one', 'good/two']);
+        });
+
+        it('reports failure rather than an empty list when the store itself fails', async () => {
+            const svc = makeSvc();
+            svc.ragService.vectorStore.getAllRepoIds = jest.fn(async () => {
+                throw new Error('IndexedDB unavailable');
+            });
+
+            const send = jest.fn();
+            await createIndexingHandlers(svc).GET_INDEXED_REPOS({}, send);
+
+            const res = send.mock.calls[0][0];
+            expect(res.success).toBe(false);
+            expect(res.error).toMatch(/IndexedDB unavailable/);
         });
     });
 });

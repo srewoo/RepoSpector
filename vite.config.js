@@ -143,6 +143,15 @@ export default defineConfig(({ mode }) => ({
                 // Preserve module structure to avoid breaks
                 preserveModules: false,
             },
+            // Silence benign, unactionable warnings:
+            //  - MODULE_LEVEL_DIRECTIVE: framer-motion ships "use client" (React Server
+            //    Component) directives that are meaningless in a client bundle — Rollup
+            //    ignores them and warns ~60×. Nothing to fix.
+            onwarn(warning, defaultHandler) {
+                if (warning.code === 'MODULE_LEVEL_DIRECTIVE') return;
+                if (warning.code === 'THIS_IS_UNDEFINED') return;
+                defaultHandler(warning);
+            },
         },
         // Force Rollup to bundle everything inline
         commonjsOptions: {
@@ -153,6 +162,10 @@ export default defineConfig(({ mode }) => ({
         },
         outDir: 'dist',
         emptyOutDir: true,
+        // The offscreen/background bundles legitimately embed tree-sitter WASM +
+        // transformers.js (local embeddings), so they exceed 500 kB. Raise the
+        // advisory limit rather than see a "chunk too large" warning on every build.
+        chunkSizeWarningLimit: 4000,
         // Disable source maps for production
         sourcemap: false,
         // Use terser for better minification

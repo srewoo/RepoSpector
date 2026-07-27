@@ -26,6 +26,76 @@ import {
     CATEGORY,
 } from './reviewSchema.js';
 import { liftEngineFindings } from './engineContract.js';
+import { normalizeFindingKeys } from './FindingsNormalizer.js';
+
+/** Bastion ships 240s per chunk; match it. */
+export const DEFAULT_CHUNK_TIMEOUT_MS = 240_000;
+
+/**
+ * Reject after `ms` if `promise` has not settled.
+ *
+ * Note this does not CANCEL the underlying work — an in-flight fetch keeps
+ * running to completion in the background. What it bounds is how long the
+ * orchestrator waits, which is the property that matters: the review completes
+ * with the chunks that did finish rather than hanging on the one that didn't.
+ */
+export function withTimeout(promise, ms, label) {
+    if (!Number.isFinite(ms) || ms <= 0) return promise;
+
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(
+            () => reject(new Error(`Timed out after ${Math.round(ms / 1000)}s: ${label}`)),
+            ms,
+        );
+    });
+
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Fold per-chunk narratives into one review summary.
+ *
+ * Bastion runs a cheap Haiku call for this; we do it deterministically instead.
+ * A BYOK user pays for every call, and the failure this fixes is structural
+ * rather than stylistic: N chunk narratives concatenated produce N copies of
+ * "## Summary", N verdict paragraphs, and a reader who cannot tell where one
+ * chunk's opinion ends and the next begins.
+ *
+ * Bastion's Phase 8 reached the same conclusion — it dropped the per-chunk
+ * `### Chunk N/total` headers in favour of one unified `## Code Review` section.
+ *
+ * @param {string[]} narratives - per-chunk analysis text, in chunk order
+ * @returns {string}
+ */
+export function consolidateNarratives(narratives) {
+    const parts = (narratives || []).map(n => String(n ?? '').trim()).filter(Boolean);
+    if (parts.length === 0) return '';
+    if (parts.length === 1) return parts[0];
+
+    // Demote every heading by one level so the chunk narratives nest under a
+    // single top-level section instead of competing with it.
+    const demoted = parts.map(p => p.replace(/^(#{1,5})\s/gm, '$1# '));
+
+    const seen = new Set();
+    const deduped = [];
+    for (const part of demoted) {
+        // Chunks reviewing sibling files routinely emit byte-identical
+        // boilerplate ("No critical issues found."). Say it once.
+        const key = part.replace(/\s+/g, ' ').trim().toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(part);
+    }
+
+    return [
+        '## Code Review',
+        '',
+        `_Reviewed in ${parts.length} chunks; findings below are merged and deduplicated._`,
+        '',
+        deduped.join('\n\n'),
+    ].join('\n');
+}
 
 export class ReviewOrchestrator {
     /**
@@ -100,7 +170,7 @@ export class ReviewOrchestrator {
 
         // ── 3. Deep phase — fan out chunks through the existing engine ──
         const deepFindings = [];
-        let deepNarrative = '';
+        const chunkNarratives = [];
         const failedChunks = [];
 
         for (const chunk of chunks) {
@@ -123,20 +193,28 @@ export class ReviewOrchestrator {
             };
 
             try {
-                const result = await this.multiPass.execute(
-                    chunkPrData,
-                    chunkContext,
-                    settings,
-                    options,
-                    (sub) => onProgress?.({
-                        step: 'deep_review_sub',
-                        chunkIndex: chunk.index,
-                        ...sub,
-                    }),
+                // Per-chunk wall-clock cap (Bastion ships 240s). One pathological
+                // chunk — a huge generated file, a model that stalls mid-stream —
+                // must not hold the whole review hostage. The chunk is recorded as
+                // failed and the remaining chunks still produce a review.
+                const result = await withTimeout(
+                    this.multiPass.execute(
+                        chunkPrData,
+                        chunkContext,
+                        settings,
+                        options,
+                        (sub) => onProgress?.({
+                            step: 'deep_review_sub',
+                            chunkIndex: chunk.index,
+                            ...sub,
+                        }),
+                    ),
+                    options.chunkTimeoutMs ?? DEFAULT_CHUNK_TIMEOUT_MS,
+                    `chunk ${chunk.index}/${chunk.total}`,
                 );
 
                 if (result.analysis) {
-                    deepNarrative += result.analysis + '\n\n';
+                    chunkNarratives.push(result.analysis);
                 }
                 // Lift this chunk's findings and emit them via onProgress so
                 // the UI can render incrementally. Without this the UI shows
@@ -148,7 +226,18 @@ export class ReviewOrchestrator {
                 // stub engines return an already-flat findings array. liftEngineFindings
                 // handles both so real per-file findings aren't collapsed into one
                 // empty file-level finding.
-                const chunkFindings = liftEngineFindings(result.perFileFindings).map((f) =>
+                // Repair schema drift (typo'd keys, `"42"` line numbers, arrays
+                // where prose was asked for) BEFORE canonicalisation, so a
+                // mis-keyed severity doesn't silently default to "suggestion".
+                const repaired = normalizeFindingKeys(liftEngineFindings(result.perFileFindings));
+                if (repaired.stats.aliasedKeys || repaired.stats.coercedLines) {
+                    console.warn(
+                        `[Normalizer] chunk ${chunk.index}: repaired ${repaired.stats.aliasedKeys} key(s), ` +
+                        `${repaired.stats.coercedLines} line value(s) — prompt drift, worth checking`
+                    );
+                }
+
+                const chunkFindings = repaired.findings.map((f) =>
                     toCanonicalFinding(f, {
                         phase: PHASE.DEEP,
                         source: 'llm',
@@ -206,7 +295,7 @@ export class ReviewOrchestrator {
         const report = buildVerdictReport({
             findings: merged,
             summary: {
-                deep: deepNarrative.trim() || 'No deep-phase narrative produced.',
+                deep: consolidateNarratives(chunkNarratives) || 'No deep-phase narrative produced.',
                 standards: stdFiltered.kept.length
                     ? `${stdFiltered.kept.length} standards findings after normalization.`
                     : 'No standards findings.',

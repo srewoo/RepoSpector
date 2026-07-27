@@ -177,8 +177,19 @@ export class GitLabService {
                 console.log('📌 Repository default branch:', defaultBranch);
                 return defaultBranch || 'main';
             }
+            // Do NOT silently fall back to 'main' on auth/not-found — that masks the real
+            // problem (missing/insufficient token) and causes a confusing downstream 404.
+            if ([401, 403, 404].includes(response.status)) {
+                throw new Error(
+                    `GitLab API ${response.status} for this project — add a GitLab token with read_api + read_repository access (Settings → Git Platform Tokens), and confirm you can view the repo.`
+                );
+            }
+            throw new Error(`GitLab API error (${response.status}) resolving default branch.`);
         } catch (error) {
-            console.warn('Failed to fetch default branch, using fallback:', error);
+            // Re-throw our explicit auth/not-found errors; only swallow genuine network
+            // blips (falling back to 'main' is reasonable only for transient failures).
+            if (/GitLab API/.test(error?.message || '')) throw error;
+            console.warn('Failed to fetch default branch (transient?), using fallback:', error?.message);
         }
 
         return 'main';

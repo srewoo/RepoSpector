@@ -52,6 +52,10 @@ export function Settings({ onClose }) {
     const [apiKey, setApiKey] = useState('');
     const [provider, setProvider] = useState(LLM_PROVIDERS.OPENAI);
     const [model, setModel] = useState('openai:gpt-4.1-mini');
+    // Models fetched live from the provider (null = use the static fallback list).
+    const [dynamicModels, setDynamicModels] = useState(null);
+    const [modelsLoading, setModelsLoading] = useState(false);
+    const [modelsError, setModelsError] = useState(null);
     // Embedding provider for repository indexing / RAG (independent of the chat LLM).
     // 'local' = bundled Transformers.js model (free, private, offline); 'openai' = OpenAI API.
     const [embeddingProvider, setEmbeddingProvider] = useState('local');
@@ -80,6 +84,8 @@ export function Settings({ onClose }) {
 
     // Write feature toggles (features that write data to GitHub/GitLab)
     const [enableAutoPostReview, setEnableAutoPostReview] = useState(false);
+    const [autoReviewOnLoad, setAutoReviewOnLoad] = useState(false);
+    const [autoIndexOnOpen, setAutoIndexOnOpen] = useState(true);
     const [enableUpdatePRDescription, setEnableUpdatePRDescription] = useState(false);
     const [enablePostInlineComments, setEnablePostInlineComments] = useState(false);
 
@@ -120,6 +126,8 @@ export function Settings({ onClose }) {
 
                         // Load write feature toggles
                         setEnableAutoPostReview(settings.reviewSettings.enableAutoPostReview === true);
+                        setAutoReviewOnLoad(settings.reviewSettings.autoReviewOnLoad === true);
+                        setAutoIndexOnOpen(settings.reviewSettings.autoIndexOnOpen !== false);
                         setEnableUpdatePRDescription(settings.reviewSettings.enableUpdatePRDescription === true);
                         setEnablePostInlineComments(settings.reviewSettings.enablePostInlineComments === true);
                         setEnableOrchestratedReview(settings.reviewSettings.orchestratedReview === true);
@@ -157,6 +165,40 @@ export function Settings({ onClose }) {
 
         loadSettings();
     }, []);
+
+    // Fetch the live model list from the provider's API (uses the entered key, or
+    // the stored key if the field is masked). Falls back to the static list on error.
+    const refreshModels = async () => {
+        setModelsLoading(true);
+        setModelsError(null);
+        try {
+            const resp = await chrome.runtime.sendMessage({
+                type: 'FETCH_MODELS',
+                data: { provider, apiKey }
+            });
+            if (resp?.success && Array.isArray(resp.models) && resp.models.length) {
+                setDynamicModels(resp.models);
+            } else {
+                setModelsError(resp?.error || 'Could not load models');
+            }
+        } catch (e) {
+            setModelsError(e?.message || 'Could not load models');
+        } finally {
+            setModelsLoading(false);
+        }
+    };
+
+    // When the provider changes, drop the previous provider's live list and try to
+    // fetch the new one if we have (or stored) a key. Local (Ollama) needs no key.
+    useEffect(() => {
+        if (!settingsLoaded) return;
+        setDynamicModels(null);
+        setModelsError(null);
+        if (provider === LLM_PROVIDERS.LOCAL || apiKey || hasExistingKey) {
+            refreshModels();
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [provider, settingsLoaded]);
 
     // Load telemetry enabled state + summary
     useEffect(() => {
@@ -201,16 +243,19 @@ export function Settings({ onClose }) {
         setTelemetryLoading(false);
     };
 
-    // Update model when provider changes (only after settings are loaded, not during initial load)
+    // Reset the model ONLY when the user actually switches to a different provider —
+    // i.e. the current model's provider prefix no longer matches. This must never
+    // clobber a saved model on initial load (that was the bug where gpt-5 reverted to
+    // gpt-4.1: settingsLoaded flipping true re-ran this and overwrote the loaded model).
     useEffect(() => {
         if (!settingsLoaded) return;
-        const modelsForProvider = AVAILABLE_MODELS[provider];
-        if (modelsForProvider && modelsForProvider.length > 0) {
-            // Select the recommended model or the first one
-            const recommended = modelsForProvider.find(m => m.recommended);
-            setModel(recommended ? recommended.id : modelsForProvider[0].id);
+        if (model && model.startsWith(`${provider}:`)) return; // model already valid for provider
+        const list = (dynamicModels && dynamicModels.length) ? dynamicModels : (AVAILABLE_MODELS[provider] || []);
+        if (list.length > 0) {
+            const recommended = list.find(m => m.recommended);
+            setModel(recommended ? recommended.id : list[0].id);
         }
-    }, [provider, settingsLoaded]);
+    }, [provider, settingsLoaded, dynamicModels, model]);
 
     const handleSave = async () => {
         setIsLoading(true);
@@ -243,6 +288,8 @@ export function Settings({ onClose }) {
                             enableAdaptiveLearning: enableAdaptiveLearning,
                             enablePRComments: enablePRComments,
                             enableAutoPostReview: enableAutoPostReview,
+                            autoReviewOnLoad: autoReviewOnLoad,
+                            autoIndexOnOpen: autoIndexOnOpen,
                             enableUpdatePRDescription: enableUpdatePRDescription,
                             enablePostInlineComments: enablePostInlineComments,
                             orchestratedReview: enableOrchestratedReview
@@ -373,18 +420,47 @@ export function Settings({ onClose }) {
 
                     {/* Model Selection */}
                     <div className="space-y-2">
-                        <label className="text-sm font-medium text-text">Model</label>
-                        <select
-                            value={model}
-                            onChange={(e) => setModel(e.target.value)}
-                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
-                        >
-                            {(AVAILABLE_MODELS[provider] || []).map(m => (
-                                <option key={m.id} value={m.id}>
-                                    {m.name} {m.recommended ? '⭐' : ''}
-                                </option>
-                            ))}
-                        </select>
+                        <div className="flex items-center justify-between">
+                            <label className="text-sm font-medium text-text">Model</label>
+                            <button
+                                type="button"
+                                onClick={refreshModels}
+                                disabled={modelsLoading}
+                                className="text-xs text-primary hover:underline disabled:opacity-50 disabled:no-underline"
+                                title="Fetch the latest models from your provider using your key"
+                            >
+                                {modelsLoading ? 'Loading…' : '↻ Refresh models'}
+                            </button>
+                        </div>
+                        {(() => {
+                            const staticList = AVAILABLE_MODELS[provider] || [];
+                            const live = (dynamicModels && dynamicModels.length) ? dynamicModels : staticList;
+                            // Keep the currently-selected model selectable even if the
+                            // live list doesn't include it (e.g. a pinned/older model).
+                            const options = live.some(m => m.id === model)
+                                ? live
+                                : [{ id: model, name: (model.split(':')[1] || model) + ' (current)' }, ...live];
+                            return (
+                                <select
+                                    value={model}
+                                    onChange={(e) => setModel(e.target.value)}
+                                    className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+                                >
+                                    {options.map(m => (
+                                        <option key={m.id} value={m.id}>
+                                            {m.name} {m.recommended ? '⭐' : ''}
+                                        </option>
+                                    ))}
+                                </select>
+                            );
+                        })()}
+                        <p className="text-xs text-textMuted">
+                            {dynamicModels && dynamicModels.length
+                                ? `${dynamicModels.length} models loaded live from ${getProviderLabel(provider)}`
+                                : modelsError
+                                    ? `Live list unavailable (${modelsError}) — showing built-in defaults`
+                                    : 'Enter your key, then Refresh to load the live model list'}
+                        </p>
                     </div>
 
                     {/* API Key (not shown for Ollama) */}
@@ -398,6 +474,7 @@ export function Settings({ onClose }) {
                                     type={showKey ? 'text' : 'password'}
                                     value={apiKey}
                                     onChange={(e) => setApiKey(e.target.value)}
+                                    onBlur={() => { if (apiKey && apiKey.trim().length > 10) refreshModels(); }}
                                     placeholder={getKeyPlaceholder()}
                                     className="w-full h-10 px-3 pr-10 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
                                 />
@@ -601,12 +678,54 @@ export function Settings({ onClose }) {
                         <button
                             onClick={() => setGroupFindings(!groupFindings)}
                             className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
-                                groupFindings ? 'bg-primary' : 'bg-surface'
+                                groupFindings ? 'bg-primary' : 'bg-black/25 dark:bg-white/25'
                             }`}
                         >
                             <span
-                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white shadow-sm ring-1 ring-black/10 rounded-full transition-transform ${
                                     groupFindings ? 'translate-x-5' : 'translate-x-0'
+                                }`}
+                            />
+                        </button>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                            <p className="text-sm font-medium text-text">Auto-Review on Page Load</p>
+                            <p className="text-xs text-textMuted">
+                                Automatically run a review when you open a PR/MR page (once per PR). Off by default — reviews use your BYOK model.
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => setAutoReviewOnLoad(!autoReviewOnLoad)}
+                            className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
+                                autoReviewOnLoad ? 'bg-primary' : 'bg-black/25 dark:bg-white/25'
+                            }`}
+                        >
+                            <span
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white shadow-sm ring-1 ring-black/10 rounded-full transition-transform ${
+                                    autoReviewOnLoad ? 'translate-x-5' : 'translate-x-0'
+                                }`}
+                            />
+                        </button>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                            <p className="text-sm font-medium text-text">Auto-Index Repo on Open</p>
+                            <p className="text-xs text-textMuted">
+                                When you open a PR/MR whose repo isn&apos;t indexed yet, index it in the background so review context (RAG + code graph) is ready. On by default.
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => setAutoIndexOnOpen(!autoIndexOnOpen)}
+                            className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
+                                autoIndexOnOpen ? 'bg-primary' : 'bg-black/25 dark:bg-white/25'
+                            }`}
+                        >
+                            <span
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white shadow-sm ring-1 ring-black/10 rounded-full transition-transform ${
+                                    autoIndexOnOpen ? 'translate-x-5' : 'translate-x-0'
                                 }`}
                             />
                         </button>
@@ -632,11 +751,11 @@ export function Settings({ onClose }) {
                         <button
                             onClick={() => setEnableOSV(!enableOSV)}
                             className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
-                                enableOSV ? 'bg-primary' : 'bg-surface'
+                                enableOSV ? 'bg-primary' : 'bg-black/25 dark:bg-white/25'
                             }`}
                         >
                             <span
-                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white shadow-sm ring-1 ring-black/10 rounded-full transition-transform ${
                                     enableOSV ? 'translate-x-5' : 'translate-x-0'
                                 }`}
                             />
@@ -653,11 +772,11 @@ export function Settings({ onClose }) {
                         <button
                             onClick={() => setEnableEOL(!enableEOL)}
                             className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
-                                enableEOL ? 'bg-primary' : 'bg-surface'
+                                enableEOL ? 'bg-primary' : 'bg-black/25 dark:bg-white/25'
                             }`}
                         >
                             <span
-                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white shadow-sm ring-1 ring-black/10 rounded-full transition-transform ${
                                     enableEOL ? 'translate-x-5' : 'translate-x-0'
                                 }`}
                             />
@@ -674,11 +793,11 @@ export function Settings({ onClose }) {
                         <button
                             onClick={() => setEnableAdaptiveLearning(!enableAdaptiveLearning)}
                             className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
-                                enableAdaptiveLearning ? 'bg-primary' : 'bg-surface'
+                                enableAdaptiveLearning ? 'bg-primary' : 'bg-black/25 dark:bg-white/25'
                             }`}
                         >
                             <span
-                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white shadow-sm ring-1 ring-black/10 rounded-full transition-transform ${
                                     enableAdaptiveLearning ? 'translate-x-5' : 'translate-x-0'
                                 }`}
                             />
@@ -697,11 +816,11 @@ export function Settings({ onClose }) {
                         <button
                             onClick={() => setEnableOrchestratedReview(!enableOrchestratedReview)}
                             className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
-                                enableOrchestratedReview ? 'bg-primary' : 'bg-surface'
+                                enableOrchestratedReview ? 'bg-primary' : 'bg-black/25 dark:bg-white/25'
                             }`}
                         >
                             <span
-                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white shadow-sm ring-1 ring-black/10 rounded-full transition-transform ${
                                     enableOrchestratedReview ? 'translate-x-5' : 'translate-x-0'
                                 }`}
                             />
@@ -724,11 +843,11 @@ export function Settings({ onClose }) {
                         <button
                             onClick={() => setEnablePRComments(!enablePRComments)}
                             className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
-                                enablePRComments ? 'bg-primary' : 'bg-surface'
+                                enablePRComments ? 'bg-primary' : 'bg-black/25 dark:bg-white/25'
                             }`}
                         >
                             <span
-                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white shadow-sm ring-1 ring-black/10 rounded-full transition-transform ${
                                     enablePRComments ? 'translate-x-5' : 'translate-x-0'
                                 }`}
                             />
@@ -761,11 +880,11 @@ export function Settings({ onClose }) {
                         <button
                             onClick={() => setEnableAutoPostReview(!enableAutoPostReview)}
                             className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
-                                enableAutoPostReview ? 'bg-primary' : 'bg-surface'
+                                enableAutoPostReview ? 'bg-primary' : 'bg-black/25 dark:bg-white/25'
                             }`}
                         >
                             <span
-                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white shadow-sm ring-1 ring-black/10 rounded-full transition-transform ${
                                     enableAutoPostReview ? 'translate-x-5' : 'translate-x-0'
                                 }`}
                             />
@@ -782,11 +901,11 @@ export function Settings({ onClose }) {
                         <button
                             onClick={() => setEnableUpdatePRDescription(!enableUpdatePRDescription)}
                             className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
-                                enableUpdatePRDescription ? 'bg-primary' : 'bg-surface'
+                                enableUpdatePRDescription ? 'bg-primary' : 'bg-black/25 dark:bg-white/25'
                             }`}
                         >
                             <span
-                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white shadow-sm ring-1 ring-black/10 rounded-full transition-transform ${
                                     enableUpdatePRDescription ? 'translate-x-5' : 'translate-x-0'
                                 }`}
                             />
@@ -803,11 +922,11 @@ export function Settings({ onClose }) {
                         <button
                             onClick={() => setEnablePostInlineComments(!enablePostInlineComments)}
                             className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
-                                enablePostInlineComments ? 'bg-primary' : 'bg-surface'
+                                enablePostInlineComments ? 'bg-primary' : 'bg-black/25 dark:bg-white/25'
                             }`}
                         >
                             <span
-                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white shadow-sm ring-1 ring-black/10 rounded-full transition-transform ${
                                     enablePostInlineComments ? 'translate-x-5' : 'translate-x-0'
                                 }`}
                             />
@@ -834,11 +953,11 @@ export function Settings({ onClose }) {
                         <button
                             onClick={() => handleToggleTelemetry(!enableTelemetry)}
                             className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
-                                enableTelemetry ? 'bg-primary' : 'bg-surface'
+                                enableTelemetry ? 'bg-primary' : 'bg-black/25 dark:bg-white/25'
                             }`}
                         >
                             <span
-                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white shadow-sm ring-1 ring-black/10 rounded-full transition-transform ${
                                     enableTelemetry ? 'translate-x-5' : 'translate-x-0'
                                 }`}
                             />

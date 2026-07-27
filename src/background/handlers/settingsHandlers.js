@@ -15,7 +15,30 @@
  * @param {Function} opts.FindingFollowupService
  * @returns {Record<string, Function>} handler map keyed by message type
  */
+import { ModelCatalogService } from '../../services/ModelCatalogService.js';
+
 export function createSettingsHandlers({ svc, FindingFollowupService }) {
+    async function handleFetchModels(message, sendResponse) {
+        try {
+            const { provider, apiKey } = message.data || {};
+            let key = apiKey;
+            // If the popup didn't pass a fresh key (existing key is masked), fall back
+            // to the stored, decrypted key for that provider.
+            if ((!key || !key.trim()) && provider !== 'local') {
+                const stored = await svc.getStoredSettings();
+                const field = {
+                    openai: 'apiKey', anthropic: 'anthropicApiKey', google: 'googleApiKey',
+                    groq: 'groqApiKey', mistral: 'mistralApiKey'
+                }[provider];
+                key = field ? stored?.[field] : '';
+            }
+            const models = await ModelCatalogService.fetchModels(provider, key);
+            sendResponse({ success: true, models });
+        } catch (error) {
+            sendResponse({ success: false, error: svc.getErrorMessage(error) });
+        }
+    }
+
     async function handleValidateApiKey(message, sendResponse) {
         try {
             const { apiKey } = message.data || {};
@@ -132,6 +155,7 @@ export function createSettingsHandlers({ svc, FindingFollowupService }) {
 
     return {
         VALIDATE_API_KEY: handleValidateApiKey,
+        FETCH_MODELS: handleFetchModels,
         SAVE_SETTINGS: handleSaveSettings,
         GET_SETTINGS: handleGetSettings,
         EXPLAIN_FINDING: (m, send) => handleFindingFollowup(m, send, 'explain'),

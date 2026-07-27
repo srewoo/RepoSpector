@@ -80,7 +80,27 @@ export class MultiPassReviewEngine {
                         focusAreas,
                         ragChunks: this._getRAGChunksForUnit(ragByFile, unit),
                         staticFindings: this._getStaticFindingsForUnit(findingsByFile, unit),
-                        languageRules: getLanguageRules(unit.files[0]?.language)
+                        // `getLanguageRules` returns an OBJECT ({deprecated,
+                        // securityChecks, patterns, performanceChecks}) which the
+                        // prompt builder indexes into. It was previously being
+                        // `.join()`ed with the convention text, which stringified
+                        // it to "[object Object]" — so every `rules.deprecated?.
+                        // length` check saw undefined and the entire language-rules
+                        // section rendered empty, taking the mined conventions with
+                        // it. Pass the object through and keep conventions separate.
+                        languageRules: getLanguageRules(unit.files[0]?.language),
+                        // Team conventions mined from THIS repo's own review history.
+                        // On the 50-MR benchmark the largest class of missed human
+                        // comments was convention, not defect — no generic rule set
+                        // contains "use the bgcolor token" or "follow tenant_id naming".
+                        conventionBlock: context.conventionBlock || '',
+                        standardsText: context.standardsText || '',
+                        graphContext: this._getGraphContextForUnit(context.graphContext, unit),
+                        // Phase 2: the file itself and its test, plus what the
+                        // change was supposed to do. Both are optional — a review
+                        // still runs (patch-only, as before) when they're absent.
+                        fileContext: context.fileContext || null,
+                        intentBlock: context.intentBlock || ''
                     });
 
                     const response = await this.llmService.streamChat(
@@ -199,11 +219,30 @@ export class MultiPassReviewEngine {
     }
 
     /**
-     * Distribute RAG chunks to matching files (2-3 per file)
+     * Distribute RAG chunks to the files they should inform (max 3 per file).
+     *
+     * Prefers a `byFile` map built by per-file retrieval upstream: querying the
+     * index once per changed file returns chunks that are semantically relevant
+     * to THAT file, which is strictly better than retrieving repo-wide and then
+     * guessing the mapping from path similarity.
+     *
+     * The path-similarity fallback below is kept for callers that still pass a
+     * flat chunk list — but it no longer DISCARDS chunks that match no file by
+     * path. Same-directory matching meant a caller living in another module (the
+     * most valuable cross-file context there is) was retrieved and then thrown
+     * away. Unmatched chunks are now spread across files with spare capacity.
      */
     _distributeRAGContext(ragContext, files) {
         const map = {};
         if (!ragContext) return map;
+
+        // Per-file retrieval result — authoritative, use as-is.
+        if (!Array.isArray(ragContext) && ragContext.byFile && typeof ragContext.byFile === 'object') {
+            for (const [filename, chunks] of Object.entries(ragContext.byFile)) {
+                if (Array.isArray(chunks) && chunks.length) map[filename] = chunks.slice(0, 3);
+            }
+            if (Object.keys(map).length > 0) return map;
+        }
 
         // Handle both formatted string and array of chunks
         const chunks = Array.isArray(ragContext)
@@ -214,20 +253,35 @@ export class MultiPassReviewEngine {
 
         if (chunks.length === 0) return map;
 
+        const MAX_PER_FILE = 3;
+        const unmatched = [];
+
         for (const chunk of chunks) {
             const chunkFile = chunk.filePath || chunk.file || '';
+            let matched = false;
             for (const f of files) {
                 // Match chunk to file if paths overlap
                 if (chunkFile && f.filename &&
                     (chunkFile.includes(f.filename) || f.filename.includes(chunkFile) ||
                      this._sameDirectory(chunkFile, f.filename))) {
+                    matched = true;
                     if (!map[f.filename]) map[f.filename] = [];
-                    if (map[f.filename].length < 3) { // Max 3 chunks per file
+                    if (map[f.filename].length < MAX_PER_FILE) {
                         map[f.filename].push(chunk);
                     }
                 }
             }
+            if (!matched) unmatched.push(chunk);
         }
+
+        // Retrieval already ranked these as relevant to the change as a whole;
+        // give them to files that still have room rather than dropping them.
+        for (const chunk of unmatched) {
+            const target = files.find(f => f.filename && (map[f.filename]?.length ?? 0) < MAX_PER_FILE);
+            if (!target) break;
+            (map[target.filename] = map[target.filename] || []).push(chunk);
+        }
+
         return map;
     }
 
@@ -247,6 +301,22 @@ export class MultiPassReviewEngine {
             chunks.push(...fileChunks);
         }
         return chunks.slice(0, 3); // Max 3 chunks per review unit
+    }
+
+    /**
+     * Get code-graph cross-file context relevant to a review unit.
+     * @param {{byFile?: Record<string,string>, combined?: string}} graphContext
+     * @param {Object} unit
+     * @returns {string}
+     */
+    _getGraphContextForUnit(graphContext, unit) {
+        if (!graphContext || !graphContext.byFile) return '';
+        const parts = [];
+        for (const file of unit.files) {
+            const ctx = graphContext.byFile[file.filename];
+            if (ctx) parts.push(`### ${file.filename}\n${ctx}`);
+        }
+        return parts.join('\n\n');
     }
 
     /**

@@ -33,7 +33,10 @@ export const LANGUAGE_REVIEW_RULES = {
             'async function without error handling',
             'console.log left in production code',
             '== instead of === (type coercion)',
-            'Missing cleanup in useEffect return'
+            'Missing cleanup in useEffect return',
+            '`x || default` used where `x ?? default` is intended → `||` also replaces falsy values (0, "", false), not just null/undefined',
+            'Over-broad gate: an `if (x)` guard wrapping a statement that also sets an unrelated field → the unrelated field silently never gets set; gate each concern separately',
+            'Timeout/TTL/retry/concurrency constant changed by a large factor (e.g. 86400 → 300) without a comment justifying the trade-off'
         ]
     },
     typescript: {
@@ -79,14 +82,19 @@ export const LANGUAGE_REVIEW_RULES = {
             'N+1 queries in ORM loops',
             'List comprehension vs generator for large datasets',
             'Global interpreter lock considerations for threading',
-            'String concatenation in loops → use join()'
+            'String concatenation in loops → use join()',
+            'HTTP client (httpx.AsyncClient/requests.Session) constructed inside a retry loop instead of hoisted above it → loses connection pooling/keep-alive, extra TCP+TLS handshake per attempt'
         ],
         patterns: [
             'Bare except: clause (catches SystemExit, KeyboardInterrupt)',
             'Mutable default arguments (def f(x=[]))',
             'logger.exception() outside except block',
             'Wrong logging level (logger.info for errors)',
-            'Missing __init__.py for package structure'
+            'Missing __init__.py for package structure',
+            'HTTP response not closed on a retry/fallback path (continue in a retry loop, or response reassigned on a 401/403 auth fallback) → connection-pool leak; httpx.Response has no __del__, so read/aclose() the prior response before reassigning or continuing',
+            '`x or default` used where `dict.get(key, default)` is intended → `or` also replaces falsy values ("", 0, False), not just a missing key; often untested',
+            'Over-broad gate drops a sibling assignment: an `if x:` guard wrapping a statement (e.g. dataclasses.replace) that ALSO sets an unrelated field → the unrelated field silently never gets set. Gate each concern on its own truthiness',
+            'Non-200 (e.g. 404) recorded as a circuit-breaker / health failure → breaker trips on healthy dependencies; treat 404 as terminal, not a server-health event'
         ]
     },
     java: {
@@ -136,7 +144,10 @@ export const LANGUAGE_REVIEW_RULES = {
             'Error return value ignored',
             'Goroutine without WaitGroup or context',
             'Race condition on shared state without mutex',
-            'Nil pointer dereference on interface assertion'
+            'Nil pointer dereference on interface assertion',
+            'HTTP response body not closed on a retry/fallback path (continue in a retry loop, or resp reassigned) → connection-pool leak; defer resp.Body.Close() before any continue/reassign',
+            'http.Client constructed inside a retry loop instead of hoisted → loses connection reuse',
+            'Non-200 (e.g. 404) recorded as a circuit-breaker / health failure → breaker trips on healthy dependencies'
         ]
     },
     ruby: {
@@ -356,10 +367,26 @@ export function buildPRContextSummary(prData) {
  * @param {Object} context - { prContext, focusAreas, ragChunks, staticFindings, languageRules }
  */
 export function buildPerFileReviewPrompt(unit, context = {}) {
-    const { prContext, focusAreas = [], ragChunks, staticFindings, languageRules } = context;
+    const {
+        prContext,
+        focusAreas = [],
+        ragChunks,
+        staticFindings,
+        languageRules,
+        conventionBlock = '',
+        standardsText = '',
+        graphContext,
+        // Phase 2 additions — see ReviewFileContextService / reviewIntentContext.
+        fileContext = null,   // Map<filename, {fullContent, testPath, testContent, testFileMissing}>
+        intentBlock = '',     // rendered Jira / pipeline / description context
+    } = context;
 
     const primaryLang = unit.files[0]?.language || 'unknown';
-    const rules = languageRules || getLanguageRules(primaryLang);
+    // Tolerate a caller that passes a pre-rendered string: fall back to the real
+    // rule object rather than indexing into a string and silently rendering nothing.
+    const rules = (languageRules && typeof languageRules === 'object')
+        ? languageRules
+        : getLanguageRules(primaryLang);
 
     // ── Section 1: PR Context (brief) ──
     let prompt = `## PR Context
@@ -371,6 +398,14 @@ export function buildPerFileReviewPrompt(unit, context = {}) {
 ---
 
 `;
+
+    // ── Section 1b: Intent — what this change is SUPPOSED to do ──
+    // Without this the reviewer can only ask "is this code correct?", never
+    // "is this the change that was asked for?". Bastion treats an unmet
+    // acceptance criterion as a legitimate finding; so do we.
+    if (intentBlock && String(intentBlock).trim()) {
+        prompt += `${String(intentBlock).trim()}\n\n---\n\n`;
+    }
 
     // ── Section 2: Language rules FIRST (so LLM reads rules before the diff) ──
     prompt += `## Language-Specific Checks for ${primaryLang} — APPLY THESE TO EVERY LINE IN THE DIFF\n\n`;
@@ -396,6 +431,31 @@ export function buildPerFileReviewPrompt(unit, context = {}) {
         prompt += `\n**Additional Focus**: ${focusAreas.join(', ')}\n`;
     }
 
+    // ── Section 2a: Written standards (bundled, or org-synced) ──
+    // Reference material, not instructions: it is inserted under our heading and
+    // sanitised upstream (StandardsSyncService.sanitize) precisely because it can
+    // come from a remote document.
+    if (standardsText && String(standardsText).trim()) {
+        prompt += `\n### Written Coding Standards
+Cite the rule ID in \`rule\` when a finding violates one of these.
+
+${String(standardsText).slice(0, 6000)}
+`;
+    }
+
+    // ── Section 2b: This team's own conventions ──
+    // Mined by ConventionMiner from the repo's past review comments. These are
+    // the findings a generic reviewer structurally cannot produce, so they get
+    // their own heading rather than being buried in the generic rules.
+    if (conventionBlock && String(conventionBlock).trim()) {
+        prompt += `\n### This Repository's Own Review Conventions (mined from past review comments)
+These are what THIS team actually asks for in review. Violations are real findings,
+usually severity medium, category "conventions". Cite the convention in \`rule\`.
+
+${String(conventionBlock).trim()}
+`;
+    }
+
     // ── Section 3: Static analysis findings (if any) ──
     if (staticFindings && staticFindings.length > 0) {
         prompt += `\n---\n\n## Pre-detected Static Analysis Findings\n`;
@@ -415,13 +475,62 @@ export function buildPerFileReviewPrompt(unit, context = {}) {
         }
     }
 
+    // ── Section 4b: Code-graph cross-file context ──
+    if (graphContext && String(graphContext).trim()) {
+        prompt += `\n---\n\n## Cross-File Context from the Code Knowledge Graph
+Use this to catch issues that depend on code OUTSIDE this diff — callers that would break, callees whose contract changed, functions the changed symbols impact. If a changed signature/behavior breaks one of these callers, that is a finding.
+
+${String(graphContext).slice(0, 4000)}
+`;
+    }
+
     // ── Section 5: The diff (LAST — so LLM applies rules while reading it) ──
     prompt += `\n---\n\n## Files Under Review — APPLY ALL CHECKS ABOVE TO EVERY + LINE\n\n`;
 
     for (const f of unit.files) {
+        const ctx = fileContext?.get?.(f.filename) || null;
+
         prompt += `### File: ${f.filename} (${f.status || 'modified'})
 **Language**: ${f.language || 'unknown'} | **Changes**: +${f.additions || 0} -${f.deletions || 0}
 
+`;
+
+        // Full post-change content, when we could fetch it. This is the single
+        // biggest context upgrade in the pipeline: a hunk cannot answer "does
+        // this break the caller below", "is this the right abstraction", or
+        // "is this state already tracked elsewhere in the file".
+        if (ctx?.fullContent) {
+            prompt += `#### Full file after the change${ctx.truncated ? ' (truncated to fit budget)' : ''}
+Use this for context and to judge whether the change fits the file. Only report issues on lines the diff below actually touches.
+
+\`\`\`${f.language || ''}
+${ctx.fullContent}
+\`\`\`
+
+`;
+        }
+
+        // The test file — present or conspicuously absent.
+        if (ctx?.testPath && ctx.testContent) {
+            prompt += `#### Existing test file: ${ctx.testPath}
+Check that the behavior changed in the diff is actually covered here. A changed
+branch, error path, or signature with no corresponding test change is a finding.
+
+\`\`\`${f.language || ''}
+${ctx.testContent}
+\`\`\`
+
+`;
+        } else if (ctx?.testFileMissing) {
+            prompt += `#### Test file: NONE FOUND
+No test file was located for this source file. If this diff adds or changes an
+exported/public function, missing test coverage is a legitimate finding — report
+it once for this file, not once per function.
+
+`;
+        }
+
+        prompt += `#### Diff — THIS is what you are reviewing
 \`\`\`diff
 ${f.patch || 'No patch available'}
 \`\`\`

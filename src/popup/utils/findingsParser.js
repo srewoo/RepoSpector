@@ -243,6 +243,38 @@ export function convertMultiPassFindings(perFileResults) {
 }
 
 /**
+ * Convert the VERIFIED flat finding set (post multi-finder → verification → fixes)
+ * into the card shape. This is the authoritative list: false positives removed,
+ * severities re-calibrated, citations enforced, and suggested patches attached.
+ * @param {Array} list
+ * @returns {Array}
+ */
+export function convertVerifiedFindings(list) {
+    if (!Array.isArray(list)) return [];
+    return list.map((f, i) => ({
+        id: `vf-${f.id || i}-${Date.now()}`,
+        file: f.file || f.filePath || 'Unknown',
+        line: f.line || 0,
+        type: f.type || f.title || 'general',
+        severity: f.severity || 'medium',
+        bucket: f.bucket || (f.severity === 'critical' || f.severity === 'high' ? 'BLOCKING' : 'SUGGESTION'),
+        rule: (typeof f.rule === 'string' ? f.rule : f.rule?.rule) || null,
+        message: f.description || f.title || f.message || '',
+        title: f.title || '',
+        description: f.description || '',
+        impact: f.impact || '',
+        suggestion: f.suggestion || '',
+        cwe: f.cwe || null,
+        codeSnippet: f.codeSnippet || null,
+        suggestedFix: f.suggestedFix || null,
+        verification: f.verification || null,
+        source: f.source === 'static' ? 'static' : 'ai',
+        tool: f.tool || (f.source === 'static' ? 'static' : undefined),
+        confidence: f.confidence ?? 0.8
+    }));
+}
+
+/**
  * Parse the Standards Checklist from analysis text for display in the UI.
  * Returns array of { ruleId, status ('PASS'|'FAIL'|'SKIPPED'), note }
  */

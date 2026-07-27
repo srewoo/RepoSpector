@@ -6,11 +6,14 @@ import { ErrorHandler } from '../utils/errorHandler.js';
 import { ContextAnalyzer } from '../utils/contextAnalyzer.js';
 import { BatchProcessor } from '../utils/batchProcessor.js';
 import { CodeChunker } from '../utils/chunking.js';
+import { CrossRepoImpactService } from '../services/CrossRepoImpactService.js';
+import { resolveModel } from '../utils/modelResolver.js';
+import { IncrementalReviewService } from '../services/IncrementalReviewService.js';
 import { TestGenerator } from '../utils/testGenerator.js';
 import { CacheManager } from '../utils/cacheManager.js';
 import { LanguageDetector } from '../utils/languageDetector.js';
 import { TokenManager } from '../utils/tokenManager.js';
-import { PLATFORM_PATTERNS as _PLATFORM_PATTERNS, MODELS } from '../utils/constants.js';
+import { PLATFORM_PATTERNS as _PLATFORM_PATTERNS } from '../utils/constants.js';
 import {
     TEST_GENERATION_SYSTEM_PROMPT,
     buildEnhancedTestPrompt,
@@ -87,6 +90,9 @@ class BackgroundService {
             this.telemetry = new TelemetryService();
             this.customRulesService = new CustomRulesService();
             this.pullRequestService = new PullRequestService();
+            // Per-PR revision state so a re-review after a push only re-reads the
+            // files whose diff actually changed.
+            this.incrementalReview = new IncrementalReviewService();
             this.staticAnalysisService = new StaticAnalysisService({
                 enableESLint: true,
                 enableSemgrep: true,
@@ -616,7 +622,7 @@ class BackgroundService {
             // Skip metadata generation - go straight to LLM generation
             // The enhanced test suite generation is not used for actual test output
             console.log('🚀 Starting LLM-based test generation...');
-            console.log('🤖 Model:', settings.model || 'gpt-4');
+            console.log('🤖 Model:', settings.model || '(none selected)');
             console.log('📊 API Key configured:', !!settings.apiKey);
 
             // Determine if chunking is needed using TokenManager
@@ -873,7 +879,7 @@ class BackgroundService {
      * @param {string} model - Model identifier for token limits
      * @returns {array} - Array of messages for OpenAI API
      */
-    buildChatMessages(code, question, languageDetection, context, conversationHistory = [], ragContext = null, model = 'gpt-4.1-mini') {
+    buildChatMessages(code, question, languageDetection, context, conversationHistory = [], ragContext = null, model = null) {
         const language = languageDetection.language || 'unknown';
 
         // Get model limits
@@ -1433,22 +1439,9 @@ Format your response in a developer-friendly way with code examples where approp
      * Extracts modelId from MODELS config if available, otherwise returns the model as-is
      */
     getModelId(modelIdentifier) {
-        if (!modelIdentifier) return 'gpt-4.1-mini'; // default fallback
-
-        // If it's already a plain model name (no provider prefix), return as-is
-        if (!modelIdentifier.includes(':')) {
-            return modelIdentifier;
-        }
-
-        // Look up in MODELS config to get the correct modelId
-        const modelConfig = MODELS[modelIdentifier];
-        if (modelConfig && modelConfig.modelId) {
-            return modelConfig.modelId;
-        }
-
-        // Fallback: extract the part after the colon
-        const parts = modelIdentifier.split(':');
-        return parts.length > 1 ? parts[1] : modelIdentifier;
+        // Strict — see utils/modelResolver.js. No 'gpt-4.1-mini' default: the
+        // extension calls the selected model or fails loudly, never a stand-in.
+        return resolveModel(modelIdentifier, { context: 'model id lookup' }).modelId;
     }
 
     /**
@@ -1882,11 +1875,69 @@ Format your response in a developer-friendly way with code examples where approp
     async _fetchRAGContextForMultiPass(repoId, prData, options) {
         if (options.useRepoContext === false) return null;
         try {
-            const prDescription = `${prData.title} ${prData.description || ''}`;
-            return await this.ragService.retrieveContext(repoId, prDescription, 20, {
+            // Anchor retrieval on the ACTUAL CHANGE, not just the PR title. The most
+            // relevant repo context for reviewing a diff is code semantically near the
+            // changed symbols/files (callers, similar implementations, related code) —
+            // querying with the title alone retrieves generic, often-irrelevant chunks.
+            const changedSymbols = CrossRepoImpactService.extractChangedSymbols(prData);
+            const changedFiles = (prData.files || [])
+                .map(f => f.filename)
+                .filter(Boolean)
+                .slice(0, 25);
+            const addedSample = (prData.files || [])
+                .flatMap(f => String(f.patch || '')
+                    .split('\n')
+                    .filter(l => l.startsWith('+') && !l.startsWith('+++'))
+                    .map(l => l.slice(1).trim()))
+                .filter(l => l.length > 3)
+                .slice(0, 40);
+
+            const query = [
+                prData.title || '',
+                changedSymbols.join(' '),
+                changedFiles.join(' '),
+                addedSample.join(' ')
+            ].filter(Boolean).join('\n').slice(0, 4000)
+                || `${prData.title} ${prData.description || ''}`; // fallback if diff is empty
+
+            const global = await this.ragService.retrieveContext(repoId, query, 20, {
                 formatOutput: false, // Keep raw chunks for per-file distribution
                 maxChunksPerFile: 4
             });
+
+            // Per-file retrieval: one targeted query per changed file, anchored on
+            // that file's own added lines. A single repo-wide query returns chunks
+            // relevant to the PR *on average*, which the distributor then has to
+            // map back to files by path similarity — losing exactly the cross-module
+            // context that matters most. Asking per file removes the guesswork.
+            const byFile = {};
+            const perFileTargets = (prData.files || []).slice(0, 15);
+            await Promise.all(perFileTargets.map(async (f) => {
+                if (!f.filename) return;
+                const added = String(f.patch || '')
+                    .split('\n')
+                    .filter(l => l.startsWith('+') && !l.startsWith('+++'))
+                    .map(l => l.slice(1).trim())
+                    .filter(l => l.length > 3)
+                    .slice(0, 30)
+                    .join('\n');
+                const fileQuery = [f.filename, added].filter(Boolean).join('\n').slice(0, 2000);
+                if (!fileQuery.trim()) return;
+                try {
+                    const res = await this.ragService.retrieveContext(repoId, fileQuery, 4, {
+                        formatOutput: false,
+                        maxChunksPerFile: 2
+                    });
+                    const chunks = Array.isArray(res) ? res : (res?.chunks || []);
+                    // Skip chunks from the file itself — its content is already in
+                    // the prompt as the diff plus full file content.
+                    const external = chunks.filter(c => (c.filePath || c.file || '') !== f.filename);
+                    if (external.length) byFile[f.filename] = external.slice(0, 3);
+                } catch { /* per-file retrieval is best-effort */ }
+            }));
+
+            const globalChunks = Array.isArray(global) ? global : (global?.chunks || []);
+            return { chunks: globalChunks, byFile };
         } catch (e) {
             console.warn('RAG context not available:', e.message);
             return null;

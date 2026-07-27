@@ -2126,6 +2126,209 @@ class FloatingPanelManager {
     init() {
         this.createToggleButton();
         this.setupMessageListener();
+        this.maybeAutoReview();
+        this.startPushWatcher();
+    }
+
+    _isPRPage() {
+        const u = window.location.href;
+        return u.includes('/pull/') || u.includes('/merge_requests/') || u.includes('/pull-requests/');
+    }
+
+    // Opt-in auto-review: if the "Auto-Review on Page Load" setting is on and we're on
+    // a PR/MR page, kick off the full review in the background (once per PR URL) and
+    // show the "Reviewing …" indicator. The result is cached, so opening the panel
+    // shows it without a re-run.
+    async maybeAutoReview() {
+        try {
+            if (!this._isPRPage()) return;
+            // Content-script-safe flags (GET_SETTINGS is not content-script-allowed and
+            // could expose keys; this returns only booleans).
+            const resp = await chrome.runtime.sendMessage({ type: 'GET_AUTO_REVIEW_SETTING' });
+            if (resp?.enabled === true) {
+                // Auto-review runs a full review, which already indexes the repo.
+                this.runBackgroundReview();
+            } else if (resp?.autoIndexOnOpen === true) {
+                // No auto-review, but index the repo on open so context is ready.
+                this.runIndexOnOpen();
+            }
+        } catch (_e) { /* setting unavailable → skip */ }
+    }
+
+    async runIndexOnOpen() {
+        const url = window.location.href;
+        if (this._indexedUrl === url) return; // at most once per PR page
+        this._indexedUrl = url;
+        this.showReviewingIndicator('Indexing');
+        try {
+            await chrome.runtime.sendMessage({ type: 'ENSURE_REPO_INDEXED', data: { prUrl: url } });
+        } catch (_e) { /* index failed — indicator still clears */ }
+        finally {
+            this.hideReviewingIndicator();
+        }
+    }
+
+    async runBackgroundReview({ force = false } = {}) {
+        const url = window.location.href;
+        if (!force && this._reviewedUrl === url) return; // at most once per PR
+        this._reviewedUrl = url;
+        this.showReviewingIndicator(force ? 'Re-reviewing' : 'Reviewing');
+        try {
+            // AUTO_REVIEW_PR is content-script-allowed and runs the full pipeline
+            // server-side (re-checking the setting). Result is cached for the popup.
+            await chrome.runtime.sendMessage({ type: 'AUTO_REVIEW_PR', data: { prUrl: url } });
+        } catch (_e) { /* review failed — indicator still clears */ }
+        finally {
+            this.hideReviewingIndicator();
+        }
+    }
+
+    // ── Re-review on push ────────────────────────────────────────────────────
+    // A PR is not reviewed once: the author pushes fixes and expects the review
+    // to follow. An extension has no webhook, so poll the head SHA — one cheap
+    // API call, no LLM spend unless something actually moved. The background
+    // then re-reads only the files whose diff changed.
+    //
+    // Polling stops while the tab is hidden so a backgrounded PR page costs
+    // nothing, and resumes on focus (which is also when a push is most likely
+    // to have landed since you last looked).
+    startPushWatcher() {
+        if (!this._isPRPage()) return;
+        if (this._pushWatcherId) return; // init() can run more than once on an SPA
+
+        const POLL_MS = 90_000;
+
+        const tick = async () => {
+            if (document.hidden) return;
+            const url = window.location.href;
+            if (!this._isPRPage() || this._pushCheckInFlight) return;
+            this._pushCheckInFlight = true;
+            try {
+                const resp = await chrome.runtime.sendMessage({
+                    type: 'CHECK_PR_FOR_UPDATES',
+                    data: { prUrl: url }
+                });
+                // Only act when this PR has been reviewed before — otherwise
+                // "has updates" is trivially true and we'd auto-review a PR the
+                // user never asked us to touch.
+                if (!resp?.success || !resp.data?.reviewed || !resp.data.hasUpdates) return;
+                // Key the "already told you" marker by URL: GitHub and GitLab are
+                // SPAs, so this watcher outlives navigation between PRs and a bare
+                // SHA check would suppress the prompt on a different PR.
+                const notifyKey = `${url}@${resp.data.headSha}`;
+                if (this._notifiedKey === notifyKey) return;
+                this._notifiedKey = notifyKey;
+
+                const setting = await chrome.runtime.sendMessage({ type: 'GET_AUTO_REVIEW_SETTING' });
+                if (setting?.enabled === true) {
+                    this.runBackgroundReview({ force: true });
+                } else {
+                    this.showReReviewPrompt(resp.data);
+                }
+            } catch (_e) { /* offline or worker asleep — try again next tick */ }
+            finally {
+                this._pushCheckInFlight = false;
+            }
+        };
+
+        this._pushWatcherId = setInterval(tick, POLL_MS);
+        // Checking on focus is worth more than the timer: a push most likely
+        // landed while you were looking somewhere else.
+        this._onVisibility = () => { if (!document.hidden) tick(); };
+        document.addEventListener('visibilitychange', this._onVisibility);
+    }
+
+    stopPushWatcher() {
+        if (this._pushWatcherId) {
+            clearInterval(this._pushWatcherId);
+            this._pushWatcherId = null;
+        }
+        if (this._onVisibility) {
+            document.removeEventListener('visibilitychange', this._onVisibility);
+            this._onVisibility = null;
+        }
+    }
+
+    /** Non-blocking nudge offering an incremental re-review of the new commits. */
+    showReReviewPrompt(info) {
+        document.getElementById('repospector-rereview')?.remove();
+
+        const el = document.createElement('div');
+        el.id = 'repospector-rereview';
+        const n = info?.changedFiles?.length || 0;
+        Object.assign(el.style, {
+            position: 'fixed', bottom: '24px', right: '24px', zIndex: '2147483647',
+            display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 14px',
+            background: '#1f1b2e', border: '1px solid rgba(139, 92, 246, 0.45)',
+            borderRadius: '10px', color: '#efeaff', fontSize: '13px',
+            fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+            boxShadow: '0 8px 24px rgba(0, 0, 0, 0.35)'
+        });
+
+        const text = document.createElement('span');
+        text.textContent = `New commits — ${n} file${n === 1 ? '' : 's'} changed since the last review.`;
+
+        const btn = document.createElement('button');
+        btn.textContent = 'Re-review';
+        Object.assign(btn.style, {
+            cursor: 'pointer', border: 'none', borderRadius: '6px',
+            padding: '5px 12px', background: '#6d5cf6', color: '#fff',
+            fontSize: '12px', fontWeight: '600'
+        });
+        btn.addEventListener('click', () => {
+            el.remove();
+            this.runBackgroundReview({ force: true });
+        });
+
+        const dismiss = document.createElement('button');
+        dismiss.textContent = '✕';
+        dismiss.setAttribute('aria-label', 'Dismiss');
+        Object.assign(dismiss.style, {
+            cursor: 'pointer', border: 'none', background: 'transparent',
+            color: '#9d93bd', fontSize: '13px', padding: '0 2px'
+        });
+        dismiss.addEventListener('click', () => el.remove());
+
+        el.append(text, btn, dismiss);
+        document.body.appendChild(el);
+    }
+
+    showReviewingIndicator(label = 'Reviewing') {
+        if (this._reviewingEl) return;
+        const el = document.createElement('div');
+        el.id = 'repospector-reviewing';
+        const r = this.toggleButton?.getBoundingClientRect();
+        Object.assign(el.style, {
+            position: 'fixed',
+            top: r ? `${Math.round(r.bottom + 8)}px` : '128px',
+            right: r ? `${Math.round(window.innerWidth - r.right)}px` : '16px',
+            zIndex: '2147483647',
+            display: 'inline-flex',
+            alignItems: 'center',
+            padding: '4px 12px',
+            background: 'rgba(139, 92, 246, 0.12)',
+            border: '1px solid rgba(139, 92, 246, 0.35)',
+            borderRadius: '999px',
+            color: '#6d5cf6',
+            fontSize: '12px',
+            fontWeight: '600',
+            fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+            boxShadow: '0 4px 12px rgba(139, 92, 246, 0.25)',
+            whiteSpace: 'nowrap'
+        });
+        el.textContent = label;
+        const dots = document.createElement('span');
+        Object.assign(dots.style, { display: 'inline-block', width: '18px', textAlign: 'left', marginLeft: '2px', letterSpacing: '1px' });
+        el.appendChild(dots);
+        document.body.appendChild(el);
+        this._reviewingEl = el;
+        let n = 0;
+        this._reviewingTimer = setInterval(() => { n = (n % 3) + 1; dots.textContent = '.'.repeat(n); }, 400);
+    }
+
+    hideReviewingIndicator() {
+        if (this._reviewingTimer) { clearInterval(this._reviewingTimer); this._reviewingTimer = null; }
+        if (this._reviewingEl) { this._reviewingEl.remove(); this._reviewingEl = null; }
     }
 
     createToggleButton() {

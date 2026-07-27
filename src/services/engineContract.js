@@ -55,10 +55,20 @@ export function liftEngineFindings(perFileFindings) {
         if (Array.isArray(item.findings)) {
             for (const f of item.findings) {
                 if (!f || typeof f !== 'object') continue;
-                out.push({ ...f, file: f.file ?? item.file ?? null });
+                out.push({
+                    ...f,
+                    // A finding may omit the file it belongs to; inherit from the
+                    // per-file container. Same for language, which downstream
+                    // prompts (fix recommendation, verification) rely on.
+                    file: f.file ?? f.filePath ?? item.file ?? null,
+                    language: f.language ?? item.language ?? null,
+                });
             }
         } else {
-            out.push(item);
+            // Already-flat finding. Normalize the file key so every consumer can
+            // rely on `.file` regardless of which producer emitted it (static
+            // analysis uses `filePath`, LLM paths use `file`).
+            out.push({ ...item, file: item.file ?? item.filePath ?? null });
         }
     }
     return out;

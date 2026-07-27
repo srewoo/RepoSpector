@@ -14,8 +14,16 @@ LLM providers, with local embeddings that keep indexing on your machine.
 - **Two-phase review pipeline** — skip-rule gating (docs-only, draft, oversized)
   → diff chunking → per-file deep LLM review → static-analysis merge →
   assigned-hunks normalization → a canonical verdict report.
-- **Inline finding threads** — explain a finding, ask for a fix, or post an
-  inline comment back to GitHub/GitLab.
+- **Review-quality pipeline** — multi-finder recall pass → citation enforcement
+  → adversarial verification (false-positive removal) → fix recommendation.
+  Runs on every PR regardless of size.
+- **Incremental re-review on push** — after the first review, a new push only
+  re-reads the files whose diff actually changed; findings on untouched files
+  are carried forward. The PR page polls for new commits and offers a
+  re-review (or runs one automatically when auto-review is on).
+- **Inline findings posted to the PR** — comments are validated against the
+  diff before posting, deduplicated per line, and carry rationale, a rule
+  citation, evidence, and a one-click ```suggestion patch where available.
 - **Persistent sessions** — reviews, threads, and metrics are stored in
   IndexedDB with a 30-day retention window.
 - **Adaptive learning** — records which findings you act on to tune future noise.
@@ -83,8 +91,20 @@ Then load it in Chrome:
 
 ### Supported platforms
 
-GitHub, GitLab, Bitbucket, Azure DevOps, SourceForge, Codeberg, Gitea,
-SourceHut, and Pagure (see `src/manifest.json` for the exact matched origins).
+| Platform | PR/MR review | Post review back | Code extraction & chat |
+|---|---|---|---|
+| GitHub (github.com) | ✅ | ✅ | ✅ |
+| GitLab (gitlab.com) | ✅ | ✅ | ✅ |
+| Bitbucket, Azure DevOps, SourceForge, Codeberg, Gitea, SourceHut, Pagure | ✗ | ✗ | ✅ |
+
+**PR/MR review and comment posting are GitHub.com and GitLab.com only.** The
+other origins appear in `src/manifest.json` because the content script can read
+code from them for chat and test generation — `parsePullRequestUrl` recognises
+only GitHub and GitLab, and `postReview` throws for anything else.
+
+GitHub Enterprise and self-managed GitLab are **not** supported: the API base
+URLs are fixed to `api.github.com` and `gitlab.com/api/v4`, and the manifest
+requests no enterprise host permissions.
 
 ## 🏗️ Architecture
 

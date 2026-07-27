@@ -166,8 +166,16 @@ export function ReposView() {
             const reposResponse = await chrome.runtime.sendMessage({
                 type: 'GET_INDEXED_REPOS'
             });
-            if (reposResponse.success) {
+            if (reposResponse?.success) {
                 setIndexedRepos(reposResponse.data || []);
+                setError(null);
+            } else {
+                // Do NOT fall through to the empty state here. "No repositories
+                // indexed yet" and "the lookup failed" look identical to the user,
+                // which is exactly how a background crash stayed invisible while
+                // seven repos sat in the store.
+                setIndexedRepos([]);
+                setError(reposResponse?.error || 'Could not load indexed repositories');
             }
 
             // Check if API key is set
@@ -191,15 +199,23 @@ export function ReposView() {
             if (tab?.url && (tab.url.includes('github.com') || tab.url.includes('gitlab.com'))) {
                 // Extract repo info from URL
                 const url = new URL(tab.url);
-                const pathParts = url.pathname.split('/').filter(Boolean);
-                if (pathParts.length >= 2) {
-                    const repoId = `${pathParts[0]}/${pathParts[1]}`;
-                    const platform = url.hostname.includes('gitlab') ? 'gitlab' : 'github';
-                    setCurrentRepo({
-                        url: tab.url,
-                        repoId,
-                        platform
-                    });
+                const platform = url.hostname.includes('gitlab') ? 'gitlab' : 'github';
+                let repoId = null;
+                if (platform === 'gitlab') {
+                    // GitLab supports nested groups: the project path is EVERYTHING before
+                    // the '/-/' marker (e.g. group/subgroup/project/-/merge_requests/1).
+                    // Using only the first two segments truncated nested-group repos and
+                    // caused a repoId mismatch with the indexer (panel showed "0 indexed").
+                    let path = url.pathname;
+                    const marker = path.indexOf('/-/');
+                    if (marker !== -1) path = path.slice(0, marker);
+                    repoId = path.split('/').filter(Boolean).join('/') || null;
+                } else {
+                    const pathParts = url.pathname.split('/').filter(Boolean);
+                    if (pathParts.length >= 2) repoId = `${pathParts[0]}/${pathParts[1]}`;
+                }
+                if (repoId) {
+                    setCurrentRepo({ url: tab.url, repoId, platform });
                 }
             }
         } catch (err) {
@@ -294,11 +310,22 @@ export function ReposView() {
                 </span>
             </div>
 
-            {/* Error Display */}
+            {/* Error Display — always recoverable. A panel mounted before an
+                extension reload keeps its old state forever otherwise, so the
+                user sees a stale failure with no way to re-run the lookup. */}
             {error && (
                 <div className="flex items-start gap-2 p-3 bg-error/10 border border-error/20 rounded-lg">
                     <AlertCircle className="w-4 h-4 text-error mt-0.5 shrink-0" />
-                    <p className="text-sm text-error">{error}</p>
+                    <div className="flex-1 min-w-0">
+                        <p className="text-sm text-error">{error}</p>
+                        <button
+                            type="button"
+                            onClick={() => { setError(null); setIsLoading(true); loadData(); }}
+                            className="mt-1 text-xs font-medium text-error/80 hover:text-error underline"
+                        >
+                            Retry
+                        </button>
+                    </div>
                 </div>
             )}
 
@@ -395,8 +422,9 @@ export function ReposView() {
                 </div>
             )}
 
-            {/* Empty State */}
-            {indexedRepos.length === 0 && currentRepo && !isIndexing && (
+            {/* Empty State — suppressed on error, so a failed lookup is never
+                mistaken for "you have nothing indexed". */}
+            {indexedRepos.length === 0 && currentRepo && !isIndexing && !error && (
                 <div className="text-center py-6 space-y-2">
                     <Database className="w-10 h-10 text-textMuted/50 mx-auto" />
                     <p className="text-sm text-textMuted">No repositories indexed yet</p>

@@ -6,6 +6,32 @@
  */
 
 /**
+ * Safe lookup into a plain-object map keyed by arbitrary code tokens.
+ *
+ * The synonym/abbreviation maps below are object literals, so they inherit from
+ * Object.prototype. Indexing one with a token like `constructor`, `toString`,
+ * `valueOf` or `hasOwnProperty` returns the INHERITED function — truthy, so it
+ * passes an `if (MAP[token])` guard, then explodes on `.slice(...)` with
+ * "MAP[token].slice is not a function". `constructor` in particular appears in
+ * almost every JS/TS/Python file, so any query built from real code hits this
+ * and takes the whole RAG retrieval down with it.
+ *
+ * @param {Object} map
+ * @param {string} key
+ * @returns {string[]|string|undefined} own value only
+ */
+function ownLookup(map, key) {
+    if (typeof key !== 'string') return undefined;
+    return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : undefined;
+}
+
+/** Own-property lookup that additionally guarantees an array result. */
+function ownList(map, key) {
+    const v = ownLookup(map, key);
+    return Array.isArray(v) ? v : undefined;
+}
+
+/**
  * Code-specific synonyms and related terms
  */
 const CODE_SYNONYMS = {
@@ -117,7 +143,7 @@ const CONTEXT_PATTERNS = [
             return {
                 type: 'howto',
                 action,
-                related: CODE_SYNONYMS[action] || []
+                related: ownList(CODE_SYNONYMS, action) || []
             };
         }
     },
@@ -202,8 +228,9 @@ export function expandQuery(query, options = {}) {
         result.terms.push(token);
 
         // Expand abbreviations
-        if (includeAbbreviations && ABBREVIATIONS[token]) {
-            const expanded = ABBREVIATIONS[token];
+        const abbrevExpansion = ownLookup(ABBREVIATIONS, token);
+        if (includeAbbreviations && typeof abbrevExpansion === 'string') {
+            const expanded = abbrevExpansion;
             allTerms.add(expanded);
             result.expansions.push({
                 original: token,
@@ -213,8 +240,9 @@ export function expandQuery(query, options = {}) {
         }
 
         // Add synonyms
-        if (includeSynonyms && CODE_SYNONYMS[token]) {
-            const synonyms = CODE_SYNONYMS[token].slice(0, maxExpansions);
+        const synonymList = ownList(CODE_SYNONYMS, token);
+        if (includeSynonyms && synonymList) {
+            const synonyms = synonymList.slice(0, maxExpansions);
             for (const syn of synonyms) {
                 allTerms.add(syn);
                 result.expansions.push({
@@ -297,7 +325,7 @@ export function extractKeyConcepts(query) {
     // Action concepts
     const actions = ['create', 'read', 'update', 'delete', 'get', 'set', 'find', 'search', 'filter', 'sort', 'validate', 'parse', 'format', 'handle', 'process'];
     for (const token of tokens) {
-        if (actions.includes(token) || CODE_SYNONYMS[token]?.some(s => actions.includes(s))) {
+        if (actions.includes(token) || ownList(CODE_SYNONYMS, token)?.some(s => actions.includes(s))) {
             concepts.push({ type: 'action', value: token });
         }
     }

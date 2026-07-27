@@ -74,7 +74,7 @@ export class StaticAnalysisService {
                 // Run analyzers in parallel
                 const [eslintResult, semgrepResult, depResult] = await Promise.all([
                     this.options.enableESLint ?
-                        Promise.resolve(this.eslintAnalyzer.analyze(code, context)) :
+                        this.eslintAnalyzer.analyzeWithEngine(code, context) :
                         Promise.resolve(null),
                     this.options.enableSemgrep ?
                         Promise.resolve(this.semgrepAnalyzer.analyze(code, context)) :
@@ -90,7 +90,7 @@ export class StaticAnalysisService {
             } else {
                 // Run sequentially
                 if (this.options.enableESLint) {
-                    results.eslint = this.eslintAnalyzer.analyze(code, context);
+                    results.eslint = await this.eslintAnalyzer.analyzeWithEngine(code, context);
                 }
                 if (this.options.enableSemgrep) {
                     results.semgrep = this.semgrepAnalyzer.analyze(code, context);

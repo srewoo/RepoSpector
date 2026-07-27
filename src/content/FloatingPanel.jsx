@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { X, Minimize2, Maximize2 } from 'lucide-react';
 import { ChatInterface } from '../popup/components/ChatInterface';
 import { Settings } from '../popup/components/Settings';
@@ -9,6 +9,41 @@ import { Sparkles, Code2, FileCode, GitPullRequest } from 'lucide-react';
 // Match GitHub PR, GitLab MR, Bitbucket PR URLs.
 const PR_URL_RE = /\/(?:[^/]+\/[^/]+\/(?:pull|pull-requests)\/\d+|.*?\/-\/merge_requests\/\d+)/i;
 
+// Self-contained "Reviewing …" indicator shown under the pill while a review runs.
+// Uses inline styles + a JS-driven dot cycle so it never depends on the content-CSS
+// pipeline (which purges unused classes from the injected stylesheet).
+function ReviewingIndicator() {
+    const [dots, setDots] = useState(1);
+    useEffect(() => {
+        const id = setInterval(() => setDots((d) => (d % 3) + 1), 400);
+        return () => clearInterval(id);
+    }, []);
+    return (
+        <div
+            title="Review in progress"
+            style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                padding: '4px 12px',
+                background: 'rgba(139, 92, 246, 0.12)',
+                border: '1px solid rgba(139, 92, 246, 0.35)',
+                borderRadius: '999px',
+                color: '#6d5cf6',
+                fontSize: '12px',
+                fontWeight: 600,
+                fontFamily: 'system-ui, -apple-system, sans-serif',
+                boxShadow: '0 4px 12px rgba(139, 92, 246, 0.25)',
+                whiteSpace: 'nowrap'
+            }}
+        >
+            Reviewing
+            <span style={{ display: 'inline-block', width: '18px', textAlign: 'left', letterSpacing: '1px' }}>
+                {'.'.repeat(dots)}
+            </span>
+        </div>
+    );
+}
+
 export function FloatingPanel({ onClose }) {
     const [view, setView] = useState('home'); // 'home', 'settings', 'chat'
     const [testType, setTestType] = useState(null); // 'unit', 'integration', or null
@@ -18,9 +53,18 @@ export function FloatingPanel({ onClose }) {
     // script runs on the page so window.location is the source of truth.
     const [isPRPage, setIsPRPage] = useState(false);
     const [reviewStatus, setReviewStatus] = useState(null); // null | 'running' | 'done' | 'error'
+    const [autoReviewOnLoad, setAutoReviewOnLoad] = useState(false);
+    const autoFiredForUrl = useRef(null); // guard: auto-review at most once per PR URL
 
     useEffect(() => {
         setIsPRPage(typeof window !== 'undefined' && PR_URL_RE.test(window.location?.href ?? ''));
+        // Read the opt-in auto-review setting (default off).
+        (async () => {
+            try {
+                const resp = await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' });
+                setAutoReviewOnLoad(resp?.data?.reviewSettings?.autoReviewOnLoad === true);
+            } catch { /* settings unavailable → stays off */ }
+        })();
     }, []);
 
     const handleReviewThisPR = async () => {
@@ -28,15 +72,17 @@ export function FloatingPanel({ onClose }) {
         setReviewStatus('running');
         try {
             const response = await chrome.runtime.sendMessage({
-                type: 'ANALYZE_PULL_REQUEST',
+                // Full pipeline: auto-index (if needed) → static/AST → multi-finder →
+                // verification → fixes → cross-repo. The result is cached by PR URL so
+                // the popup shows it on open (no re-run).
+                type: 'MULTI_PASS_PR_REVIEW',
                 data: {
                     prUrl: window.location.href,
                     options: {
-                        contextLevel: 'smart',
-                        // Defaults that match the recommended pipeline. These
-                        // travel as `options` to the orchestrator branch, which
-                        // only kicks in when the user has enabled the flag.
                         focusAreas: ['security', 'bugs', 'performance', 'style'],
+                        enableESLint: true,
+                        enableSemgrep: true,
+                        enableDependency: true,
                     },
                 },
             });
@@ -49,6 +95,24 @@ export function FloatingPanel({ onClose }) {
         }
     };
 
+    // Opt-in auto-review: when enabled, run a review once per PR page automatically.
+    // Guarded by autoFiredForUrl so it never re-fires on re-render or SPA re-render
+    // of the same PR. Uses the same BYOK pipeline as the manual button.
+    useEffect(() => {
+        const url = typeof window !== 'undefined' ? window.location?.href : null;
+        if (
+            isPRPage &&
+            autoReviewOnLoad &&
+            url &&
+            autoFiredForUrl.current !== url &&
+            reviewStatus === null
+        ) {
+            autoFiredForUrl.current = url;
+            handleReviewThisPR();
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isPRPage, autoReviewOnLoad]);
+
     const handleSettingsClick = () => {
         setView(view === 'settings' ? 'home' : 'settings');
     };
@@ -60,7 +124,7 @@ export function FloatingPanel({ onClose }) {
 
     if (isMinimized) {
         return (
-            <div className="repospector-floating-minimized">
+            <div className="repospector-floating-minimized" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '6px' }}>
                 <button
                     onClick={() => setIsMinimized(false)}
                     className="repospector-minimize-btn"
@@ -69,6 +133,7 @@ export function FloatingPanel({ onClose }) {
                     <Sparkles className="w-5 h-5" />
                     <span className="ml-2">RepoSpector</span>
                 </button>
+                {reviewStatus === 'running' && <ReviewingIndicator />}
             </div>
         );
     }

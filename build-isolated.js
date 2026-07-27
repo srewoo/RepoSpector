@@ -218,6 +218,9 @@ async function buildPopup() {
             build: {
                 outDir: 'dist',
                 emptyOutDir: false,
+                // Bundles React + framer-motion; raise the advisory so a large-chunk
+                // notice isn't printed on every build.
+                chunkSizeWarningLimit: 4000,
                 rollupOptions: {
                     input: {
                         popup: path.resolve(__dirname, 'src/popup/index.html')
@@ -226,6 +229,14 @@ async function buildPopup() {
                         entryFileNames: 'assets/[name].js',
                         chunkFileNames: 'assets/[name]-[hash].js',
                         assetFileNames: 'assets/[name].[ext]'
+                    },
+                    // framer-motion ships "use client" (React Server Component)
+                    // directives that are inert in a client bundle; Rollup ignores them
+                    // and warns ~60×. Suppress that one benign, unactionable class.
+                    onwarn(warning, defaultHandler) {
+                        if (warning.code === 'MODULE_LEVEL_DIRECTIVE') return;
+                        if (warning.code === 'THIS_IS_UNDEFINED') return;
+                        defaultHandler(warning);
                     }
                 }
             },

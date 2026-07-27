@@ -44,12 +44,18 @@ describe('prReviewHandlers', () => {
         expect(Object.keys(h).sort()).toEqual([
             'ANALYZE_PR_WITH_STATIC_ANALYSIS',
             'ANALYZE_PULL_REQUEST',
+            'AUTO_REVIEW_PR',
+            'CHECK_PR_FOR_UPDATES',
+            'ENSURE_REPO_INDEXED',
             'EXPLAIN_HUNK',
             'FETCH_FULL_FILE',
+            'GET_AUTO_REVIEW_SETTING',
+            'GET_PR_REVIEW_RESULT',
             'GET_PR_SUMMARY',
             'MULTI_PASS_PR_REVIEW',
             'POST_INLINE_COMMENT',
             'POST_PR_REVIEW',
+            'RESET_INCREMENTAL_REVIEW',
             'REVIEW_TEST_AUTOMATION',
             'RUN_STATIC_ANALYSIS',
             'SECURITY_REVIEW_PR',
@@ -57,9 +63,9 @@ describe('prReviewHandlers', () => {
         ]);
     });
 
-    it('exposes the three content-script handlers as {fn, allowContentScript:true}', () => {
+    it('exposes the content-script handlers as {fn, allowContentScript:true}', () => {
         const h = createPrReviewHandlers(makeSvc());
-        for (const key of ['EXPLAIN_HUNK', 'SUGGEST_FIX_HUNK', 'POST_INLINE_COMMENT']) {
+        for (const key of ['EXPLAIN_HUNK', 'SUGGEST_FIX_HUNK', 'POST_INLINE_COMMENT', 'GET_AUTO_REVIEW_SETTING', 'AUTO_REVIEW_PR', 'ENSURE_REPO_INDEXED']) {
             expect(typeof h[key]).toBe('object');
             expect(typeof h[key].fn).toBe('function');
             expect(h[key].allowContentScript).toBe(true);

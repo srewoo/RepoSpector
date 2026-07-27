@@ -9,6 +9,7 @@ import { useState, useCallback, useMemo } from 'react';
 import {
     parseLLMFindings,
     convertMultiPassFindings,
+    convertVerifiedFindings,
     parseStandardsChecklist,
     parseSummaryCounts
 } from '../utils/findingsParser.js';
@@ -66,7 +67,7 @@ export function usePRReview({ analysisResult, staticAnalysisResult, prUrl, prDat
     const [generatedRepoInfo, setGeneratedRepoInfo] = useState(null);
     const [generating, setGenerating] = useState(null);
 
-    const { analysis, staticAnalysis, reviewEffort, isMultiPass, perFileFindings, reviewVerdict, reviewEvent, blockingCount } = analysisResult || {};
+    const { analysis, staticAnalysis, reviewEffort, isMultiPass, perFileFindings, verifiedFindings, reviewVerdict, reviewEvent, blockingCount } = analysisResult || {};
     const staticFindings = staticAnalysisResult?.findings || staticAnalysis?.findings || [];
 
     // Derive findings
@@ -78,7 +79,15 @@ export function usePRReview({ analysisResult, staticAnalysisResult, prUrl, prDat
         multiPassFindings.length > 0 ? multiPassFindings : parseLLMFindings(analysis),
         [multiPassFindings, analysis]
     );
-    const findings = useMemo(() => [...staticFindings, ...llmFindings], [staticFindings, llmFindings]);
+    // Prefer the VERIFIED set when present — it is the complete, deduped list (LLM +
+    // static, false positives removed, patches attached), so it replaces the raw
+    // combine (which would otherwise double-count static findings).
+    const findings = useMemo(() => {
+        if (Array.isArray(verifiedFindings) && verifiedFindings.length) {
+            return convertVerifiedFindings(verifiedFindings);
+        }
+        return [...staticFindings, ...llmFindings];
+    }, [verifiedFindings, staticFindings, llmFindings]);
 
     // Derive verdicts
     const findingsVerdict = useMemo(() => getVerdictFromFindings(findings), [findings]);

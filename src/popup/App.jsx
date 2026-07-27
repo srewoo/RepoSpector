@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Layout } from './components/Layout';
 import { Settings } from './components/Settings';
 import { ChatInterface } from './components/ChatInterface';
@@ -12,6 +12,26 @@ import { Card, CardContent } from './components/ui/Card';
 import { PRReviewInterface } from './components/PRReviewInterface';
 import { Sparkles, Code2, FileCode, GitPullRequest, RefreshCw, AlertCircle, Github, ExternalLink } from 'lucide-react';
 
+// Shape the MULTI_PASS_PR_REVIEW response into the analysisResult the UI consumes.
+// Used by both a live run and by picking up a cached background/auto review.
+function mapReviewData(data) {
+    return {
+        reviewedAt: data.reviewedAt || null,
+        analysis: data.analysis,
+        recommendation: data.staticAnalysis?.recommendation,
+        reviewEffort: data.reviewEffort,
+        isMultiPass: data.isMultiPass || false,
+        perFileFindings: data.perFileFindings,
+        verifiedFindings: data.verifiedFindings,
+        reviewVerdict: data.reviewVerdict,
+        reviewEvent: data.reviewEvent,
+        blockingCount: data.blockingCount,
+        reviewQuality: data.reviewQuality,
+        failedFiles: data.failedFiles,
+        processingTime: data.processingTime
+    };
+}
+
 function AppContent() {
     const [activeTab, setActiveTab] = useState('home');
     const [testType, setTestType] = useState(null);
@@ -19,6 +39,7 @@ function AppContent() {
 
     // PR Review state
     const [prUrl, setPrUrl] = useState(null);
+    const prUrlRef = useRef(null); // stable PR URL for the progress listener closure
     const [prData, setPrData] = useState(null);
     const [prAnalysisResult, setPrAnalysisResult] = useState(null);
     const [prStaticAnalysisResult, setPrStaticAnalysisResult] = useState(null);
@@ -66,6 +87,21 @@ function AppContent() {
         const progressListener = (message) => {
             if (message.type !== 'PR_REVIEW_PROGRESS') return;
             const data = message.data ?? {};
+            // A background/auto review just finished — pull its cached result in so an
+            // already-open popup updates without a manual run.
+            if (data.phase === 'complete' && prUrlRef.current) {
+                chrome.runtime.sendMessage({ type: 'GET_PR_REVIEW_RESULT', data: { prUrl: prUrlRef.current } })
+                    .then((cached) => {
+                        if (cached?.success && cached.status === 'done' && cached.data) {
+                            setPrData(cached.data.prData);
+                            setPrAnalysisResult(mapReviewData(cached.data));
+                            setPrStaticAnalysisResult(cached.data.staticAnalysis);
+                            setPrAiSummary(cached.data.aiSummary || null);
+                            setPrLoading(false);
+                        }
+                    })
+                    .catch(() => { /* ignore */ });
+            }
             setPrProgress((prev) => {
                 // Streaming chunk: append to the running findings list.
                 if (data.step === 'chunk_findings' && Array.isArray(data.findings)) {
@@ -105,6 +141,23 @@ function AppContent() {
                     if (isPRPage) {
                         setIsOnPRPage(true);
                         setPrUrl(tab.url);
+                        prUrlRef.current = tab.url;
+                        // Pick up a cached background/auto review for this PR (from an
+                        // auto-review triggered on the page) so the popup shows results
+                        // on open instead of forcing a re-run.
+                        try {
+                            const cached = await chrome.runtime.sendMessage({
+                                type: 'GET_PR_REVIEW_RESULT', data: { prUrl: tab.url }
+                            });
+                            if (cached?.success && cached.status === 'done' && cached.data) {
+                                setPrData(cached.data.prData);
+                                setPrAnalysisResult(mapReviewData(cached.data));
+                                setPrStaticAnalysisResult(cached.data.staticAnalysis);
+                                setPrAiSummary(cached.data.aiSummary || null);
+                            } else if (cached?.status === 'running') {
+                                setPrLoading(true); // background review in flight
+                            }
+                        } catch { /* no cache → manual run still available */ }
                     } else {
                         setIsOnPRPage(false);
                         setPrUrl(null);
@@ -146,15 +199,7 @@ function AppContent() {
 
             if (response.success) {
                 setPrData(response.data.prData);
-                setPrAnalysisResult({
-                    analysis: response.data.analysis,
-                    recommendation: response.data.staticAnalysis?.recommendation,
-                    reviewEffort: response.data.reviewEffort,
-                    isMultiPass: response.data.isMultiPass || false,
-                    perFileFindings: response.data.perFileFindings,
-                    failedFiles: response.data.failedFiles,
-                    processingTime: response.data.processingTime
-                });
+                setPrAnalysisResult(mapReviewData(response.data));
                 setPrStaticAnalysisResult(response.data.staticAnalysis);
                 setPrAiSummary(response.data.aiSummary || null);
                 // Create a session object for thread management

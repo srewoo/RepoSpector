@@ -205,7 +205,9 @@ Please analyze:
 1. Which issues are new in the current review?
 2. Which issues were resolved since the previous review?
 3. Which issues remain unaddressed?
-4. Overall progress assessment`;
+4. Overall progress assessment
+
+IMPORTANT — verify fixes, don't trust them: only count a previous finding as "resolved" if the current diff/code actually shows the change that fixes it. A finding that merely disappeared from the current list is NOT proof it was fixed (the file may not have been re-scanned, or the fix may be incomplete). For each "resolved" item, cite the file:line or commit evidence that resolves it; if you cannot find that evidence, classify it as "unverified — needs re-check", not resolved.`;
 }
 
 /**

@@ -6,11 +6,16 @@
  */
 
 import { ESLINT_RULES, SEVERITY_WEIGHTS } from '../utils/staticAnalysisPatterns.js';
+import { ESLintEngine } from './ESLintEngine.js';
 
 export class ESLintAnalyzer {
     constructor(options = {}) {
         this.rules = { ...ESLINT_RULES };
         this.enabledRules = new Set(Object.keys(this.rules));
+
+        // Real ESLint engine (AST-based) for full-content JS files. Falls back to
+        // the regex rules below for TS, partial hunks, or if ESLint can't load.
+        this.engine = options.useRealEngine === false ? null : new ESLintEngine();
 
         // Configuration
         this.options = {
@@ -89,6 +94,38 @@ export class ESLintAnalyzer {
             summary: this.generateSummary(findings),
             confidence: this.calculateOverallConfidence(findings)
         };
+    }
+
+    /**
+     * Analyze, preferring the REAL ESLint engine (AST) for JS full-content files and
+     * transparently falling back to the regex rules otherwise. Async because the real
+     * engine lazy-loads ESLint.
+     * @param {string} code
+     * @param {Object} context - { filePath, language }
+     * @returns {Promise<Object>} same result shape as analyze()
+     */
+    async analyzeWithEngine(code, context = {}) {
+        const { filePath = 'unknown', language = this.detectLanguage(context.filePath) } = context;
+        if (this.engine && this.engine.supports(language, filePath) && code) {
+            try {
+                const r = await this.engine.analyze(code, { filePath, language });
+                if (r.ok) {
+                    const findings = r.findings.filter(f => this.options.includeInfo || f.severity !== 'info');
+                    return {
+                        tool: 'eslint',
+                        engine: 'acorn-ast',
+                        filePath,
+                        language,
+                        findings,
+                        summary: this.generateSummary(findings),
+                        confidence: this.calculateOverallConfidence(findings)
+                    };
+                }
+            } catch (e) {
+                // fall through to regex
+            }
+        }
+        return this.analyze(code, context);
     }
 
     /**

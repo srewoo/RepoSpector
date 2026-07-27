@@ -79,8 +79,17 @@ export function createIndexingHandlers(svc) {
             });
 
             console.log(`📚 Fetched ${files.length} files from repository`);
+            if (!files || files.length === 0) {
+                sendResponse({
+                    success: false,
+                    repoId,
+                    error: 'No files fetched from the repository. Check your token/permissions and that the repo path is correct (nested GitLab groups included).'
+                });
+                return;
+            }
 
-            // Index the repository
+            // Index the repository. The manual button forces a full, fresh index so it
+            // can never silently no-op on a stale manifest.
             const result = await svc.ragService.indexRepositoryIncremental(
                 repoId,
                 files,
@@ -92,10 +101,16 @@ export function createIndexingHandlers(svc) {
                             data: progress
                         }).catch(() => { });
                     }
-                }
+                },
+                { force: message.data?.force !== false }
             );
 
-            console.log('✅ Repository indexed successfully:', result);
+            console.log('✅ Repository index result:', result);
+            if (result && result.success === false) {
+                chrome.runtime.sendMessage({ type: 'INDEX_PROGRESS', data: { status: 'error', repoId } }).catch(() => { });
+                sendResponse({ success: false, repoId, error: result.error || 'Indexing failed.' });
+                return;
+            }
 
             // Build/refresh Knowledge Graph (symbols, calls, coverage, communities, flows).
             // updateGraph re-parses only changed files (full build on first run).
@@ -113,6 +128,20 @@ export function createIndexingHandlers(svc) {
                 console.log('✅ Knowledge graph built:', graphStats);
             } catch (graphError) {
                 console.warn('⚠️ Knowledge graph build failed (non-fatal):', graphError.message);
+            }
+
+            // Verify vectors actually landed in the store. The indexed-repos list is
+            // built by cursoring the vector store, so if nothing persisted the repo
+            // would never show up — report that truthfully instead of a false success.
+            const persisted = await svc.ragService.vectorStore.isIndexed(repoId).catch(() => false);
+            if (!persisted) {
+                chrome.runtime.sendMessage({ type: 'INDEX_PROGRESS', data: { status: 'error', repoId } }).catch(() => { });
+                sendResponse({
+                    success: false,
+                    repoId,
+                    error: 'Indexing produced no vectors — the embedding provider may have failed or the repo had no supported files. It will not appear as indexed.'
+                });
+                return;
             }
 
             // Determine platform
@@ -259,34 +288,59 @@ export function createIndexingHandlers(svc) {
 
             // Get all repos from VectorStore
             const reposFromDb = await svc.ragService.vectorStore.getAllRepoIds();
+            console.log(`📚 GET_INDEXED_REPOS: vector store has ${reposFromDb.length} repo(s):`, reposFromDb.map(r => r.repoId));
 
             // Get metadata from chrome.storage.local
             const result = await chrome.storage.local.get(['indexedReposMetadata']);
             const metadata = result.indexedReposMetadata || {};
 
-            // Merge data: repo stats from DB + metadata from storage
-            const repos = await Promise.all(reposFromDb.map(async (repo) => {
-                const repoStats = await svc.ragService.vectorStore.getRepoStats(repo.repoId);
-                const repoMetadata = metadata[repo.repoId] || {};
+            // Merge data: repo stats from DB + metadata from storage. Per-repo try/catch
+            // so one bad getRepoStats can't reject the whole list (which would blank the
+            // panel even though repos ARE indexed).
+            const settled = await Promise.all(reposFromDb.map(async (repo) => {
+                // GitLab indexing can key a repo by its NUMERIC project id, so repoId
+                // is not always a string. Calling a string method on it (`.includes`)
+                // threw inside this map, rejecting the whole Promise.all and making the
+                // handler return success:false — the Repos panel then rendered "no
+                // repositories indexed" while the store held seven. Coerce once, and
+                // wrap each repo so a single bad entry can never blank the list again.
+                try {
+                    const repoId = String(repo.repoId ?? '');
+                    if (!repoId) return null;
 
-                // Determine platform from repoId pattern or stored metadata
-                const platform = repoMetadata.platform ||
-                    (repo.repoId.includes('/') ? 'github' : 'unknown');
+                    let repoStats = { chunksCount: repo.chunksCount ?? 0, filesCount: 0 };
+                    try {
+                        repoStats = await svc.ragService.vectorStore.getRepoStats(repo.repoId);
+                    } catch (statErr) {
+                        console.warn(`getRepoStats failed for ${repoId} (using fallback):`, statErr?.message);
+                    }
 
-                return {
-                    repoId: repo.repoId,
-                    platform: platform,
-                    url: repoMetadata.url || `https://github.com/${repo.repoId}`,
-                    indexedAt: repoMetadata.indexedAt || null,
-                    chunksCount: repoStats.chunksCount,
-                    filesCount: repoStats.filesCount
-                };
+                    const repoMetadata = metadata[repoId] || metadata[repo.repoId] || {};
+                    const platform = repoMetadata.platform ||
+                        (repoId.includes('/')
+                            ? (repoMetadata.url?.includes('gitlab') ? 'gitlab' : 'github')
+                            : 'unknown');
+
+                    return {
+                        repoId,
+                        platform,
+                        url: repoMetadata.url || null,
+                        indexedAt: repoMetadata.indexedAt || null,
+                        chunksCount: repoStats.chunksCount,
+                        filesCount: repoStats.filesCount
+                    };
+                } catch (repoErr) {
+                    console.warn(`Skipping repo entry ${String(repo?.repoId)}:`, repoErr?.message);
+                    return null;
+                }
             }));
 
-            sendResponse({
-                success: true,
-                data: repos
-            });
+            const repos = settled.filter(Boolean);
+            if (repos.length !== reposFromDb.length) {
+                console.warn(`GET_INDEXED_REPOS: ${reposFromDb.length - repos.length} repo entry/entries skipped`);
+            }
+
+            sendResponse({ success: true, data: repos });
         } catch (error) {
             svc.errorHandler.logError('Get indexed repos', error);
             sendResponse({

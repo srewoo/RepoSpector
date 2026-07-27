@@ -41,3 +41,9 @@ The `!` postfix operator (`value!`) silently removes `null`/`undefined` from the
 
 ## TS-CODING-004: `interface` for object shapes, `type` for unions/intersections
 Use `interface` when describing the shape of an object. Use `type` for union types, intersection types, and aliases of primitives.
+
+## JS-CODING-020: Use `??` not `||` for defaulting
+`x || default` also replaces falsy values (0, "", false, NaN), not just `null`/`undefined`. Use the nullish-coalescing operator `x ?? default` when only null/undefined should trigger the default.
+
+## JS-CODING-021: Release resources on retry/fallback paths
+On a retry or fallback path, do not abandon an open response/stream/connection before reading or closing it. Construct the HTTP client once above a retry loop rather than per attempt so pooling and keep-alive are preserved.

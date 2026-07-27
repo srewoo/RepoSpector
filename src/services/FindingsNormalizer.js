@@ -16,6 +16,124 @@
 import { DiffParser } from '../utils/diffParser.js';
 
 /**
+ * Key names LLMs actually emit instead of the schema's. Every entry here was a
+ * real drift mode Bastion hit in production (`src/driver/findings_normalizer.py`
+ * carries the same table) — a typo'd key is worse than a missing one, because
+ * the field silently reads as `undefined` and the finding is dropped or
+ * mis-severitied downstream rather than failing loudly.
+ */
+const KEY_ALIASES = {
+    severy: 'severity', severit: 'severity', severtiy: 'severity', Severity: 'severity',
+    phse: 'phase', Phase: 'phase',
+    categry: 'category', catagory: 'category', Category: 'category',
+    rul: 'rule', Rule: 'rule',
+    Suggestion: 'suggestion', suggestions: 'suggestion',
+    relevantFile: 'file', relevant_file: 'file', filepath: 'file', filePath: 'file',
+    lineNumber: 'line', line_number: 'line', startLine: 'line',
+    Message: 'message', desc: 'description',
+};
+
+/** Categories that indicate a standards-phase finding when `phase` is missing. */
+const STANDARDS_CATEGORIES = new Set(['testing', 'lint', 'linter', 'style', 'conventions', 'coverage']);
+
+/** Fields that MUST be strings downstream; a non-string breaks rendering. */
+const STRING_FIELDS = {
+    category: 'logic',
+    suggestion: '',
+    rule: '',
+    message: '',
+    title: '',
+};
+
+/**
+ * Coerce a model-emitted line value to a positive integer, or null.
+ *
+ * Handles the forms LLMs actually produce despite being told not to: `"42"`,
+ * `"L42"`, `"line 42"`, and ranges like `"42-43"` (first line wins — a range is
+ * unpostable, but its start is a usable anchor).
+ */
+function coerceLine(value) {
+    if (value == null) return null;
+    if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? Math.trunc(value) : null;
+
+    const m = String(value).match(/\d+/);
+    if (!m) return null;
+    const n = Number.parseInt(m[0], 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** Best-effort scalar → string. Objects/arrays are not representable; use the default. */
+function coerceString(value, fallback) {
+    if (value == null) return fallback;
+    if (typeof value === 'string') return value;
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    if (Array.isArray(value)) {
+        // A model asked for prose sometimes returns bullet points as an array.
+        const flat = value.filter(v => typeof v === 'string' || typeof v === 'number');
+        return flat.length ? flat.join(' ') : fallback;
+    }
+    return fallback;
+}
+
+/**
+ * Repair schema drift in a list of raw LLM findings BEFORE anything downstream
+ * indexes into them.
+ *
+ * Applied at the orchestrator boundary so both the chunked and single-pass paths
+ * get it. Never throws and never drops a finding for being malformed — the worst
+ * case is a finding with default values, which a human can still read.
+ *
+ * @param {Array<Object>} findings
+ * @returns {{ findings: Array<Object>, stats: Object }}
+ */
+export function normalizeFindingKeys(findings) {
+    const stats = { input: 0, aliasedKeys: 0, coercedLines: 0, coercedStrings: 0, inferredPhase: 0 };
+    const out = [];
+
+    for (const raw of findings ?? []) {
+        if (!raw || typeof raw !== 'object') continue;
+        stats.input++;
+
+        const f = {};
+        for (const [k, v] of Object.entries(raw)) {
+            const canonical = KEY_ALIASES[k];
+            if (canonical && !(canonical in raw)) {
+                // Only rewrite when the canonical key is absent — an explicit
+                // correct key always beats a typo'd one in the same object.
+                f[canonical] = v;
+                stats.aliasedKeys++;
+            } else if (canonical) {
+                stats.aliasedKeys++;   // drop the duplicate typo'd key
+            } else {
+                f[k] = v;
+            }
+        }
+
+        const originalLine = f.line;
+        f.line = coerceLine(f.line);
+        if (originalLine != null && typeof originalLine !== 'number') stats.coercedLines++;
+
+        for (const [field, fallback] of Object.entries(STRING_FIELDS)) {
+            if (!(field in f)) continue;
+            const coerced = coerceString(f[field], fallback);
+            if (coerced !== f[field]) stats.coercedStrings++;
+            f[field] = coerced;
+        }
+
+        if (!f.phase) {
+            f.phase = STANDARDS_CATEGORIES.has(String(f.category || '').toLowerCase())
+                ? 'standards'
+                : 'deep';
+            stats.inferredPhase++;
+        }
+
+        out.push(f);
+    }
+
+    return { findings: out, stats };
+}
+
+/**
  * Build the assigned-hunks allow-list from parsed diff files.
  * Returns Map<filePath, Set<lineNumber>> on the NEW side.
  */

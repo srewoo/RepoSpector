@@ -53,3 +53,76 @@ export function productionCandidatesForTest(testPath) {
     candidates.delete(testPath);
     return [...candidates].filter(Boolean);
 }
+
+/**
+ * Per-language test-file naming conventions, in the order we should try them.
+ * Each entry maps a production stem+ext to the paths a test for it would live at,
+ * relative to the production file's directory unless the pattern says otherwise.
+ *
+ * Go is deliberately first-and-only for `.go`: the toolchain enforces
+ * `foo_test.go` beside `foo.go`, so guessing anything else wastes an API call.
+ */
+const TEST_PATTERNS = {
+    go: (dir, stem) => [`${dir}/${stem}_test.go`],
+    py: (dir, stem) => [
+        `${dir}/test_${stem}.py`,
+        `${dir}/${stem}_test.py`,
+        `tests/test_${stem}.py`,
+        `test/test_${stem}.py`,
+    ],
+    rb: (dir, stem) => [`${dir}/${stem}_spec.rb`, `spec/${stem}_spec.rb`],
+    java: (dir, stem) => [`${dir}/${stem}Test.java`, dir.replace('/main/', '/test/') + `/${stem}Test.java`],
+    kt: (dir, stem) => [`${dir}/${stem}Test.kt`, dir.replace('/main/', '/test/') + `/${stem}Test.kt`],
+};
+
+/** JS/TS-family extensions all share one convention set. */
+const JS_EXTS = new Set(['js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs']);
+
+/**
+ * Given a PRODUCTION file path, return candidate test file paths, best guess
+ * first. The inverse of `productionCandidatesForTest`.
+ *
+ * Used by the review context builder: Bastion's reviewer can open the test file
+ * from its clone, which is how it produces "this new exported function has no
+ * test" findings. We have no clone, so we guess the path and fetch it — a
+ * bounded number of cheap API calls, most of which hit on the first candidate.
+ *
+ * Returns [] for a path that is already a test file (nothing to look up).
+ *
+ * @param {string} filePath
+ * @returns {string[]} candidate test paths, ordered by likelihood
+ */
+export function testCandidatesForProduction(filePath) {
+    if (!filePath || isTestFile(filePath)) return [];
+
+    const slash = filePath.lastIndexOf('/');
+    const dir = slash >= 0 ? filePath.slice(0, slash) : '';
+    const base = slash >= 0 ? filePath.slice(slash + 1) : filePath;
+
+    const dot = base.lastIndexOf('.');
+    if (dot < 0) return [];
+    const ext = base.slice(dot + 1).toLowerCase();
+    const stem = base.slice(0, dot);
+
+    const out = [];
+
+    if (JS_EXTS.has(ext)) {
+        // Same directory first — the overwhelmingly common layout.
+        out.push(`${dir ? dir + '/' : ''}${stem}.test.${ext}`);
+        out.push(`${dir ? dir + '/' : ''}${stem}.spec.${ext}`);
+        // Then the __tests__ sibling directory.
+        out.push(`${dir ? dir + '/' : ''}__tests__/${stem}.test.${ext}`);
+        out.push(`${dir ? dir + '/' : ''}__tests__/${stem}.${ext}`);
+        // Then a top-level mirror, which is what this repo itself uses.
+        const mirrored = dir.replace(/^src\//, '');
+        out.push(`test/${mirrored ? mirrored + '/' : ''}${stem}.test.${ext}`);
+        out.push(`tests/${mirrored ? mirrored + '/' : ''}${stem}.test.${ext}`);
+    } else if (TEST_PATTERNS[ext]) {
+        out.push(...TEST_PATTERNS[ext](dir, stem));
+    } else {
+        return [];
+    }
+
+    // Collapse the `//` that a root-level file (dir === '') would produce.
+    return [...new Set(out.map(p => p.replace(/\/{2,}/g, '/').replace(/^\//, '')))];
+}

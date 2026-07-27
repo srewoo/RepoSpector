@@ -41,7 +41,7 @@ describe('GitLab Integration', () => {
                 return 'unknown';
             },
 
-            async enhanceWithGitLabContext(context, url, level) {
+            async enhanceWithGitLabContext(context, url, _level) {
                 if (!url) {
                     console.warn('URL is null or undefined in enhanceWithGitLabContext');
                     return;
@@ -53,7 +53,7 @@ describe('GitLab Integration', () => {
                     return;
                 }
 
-                const [, projectPath, branch, filePath] = urlParts;
+                const [, projectPath, _branch, filePath] = urlParts;
                 
                 if (filePath) {
                     context.filePath = filePath;
@@ -106,7 +106,7 @@ describe('GitLab Integration', () => {
                     const urlParts = url.match(/gitlab\.com\/(.+?)\/-\/blob\/([^/]+)\/(.+?)(?:\?.*)?$/);
                     if (!urlParts) return;
 
-                    const [, projectPath, branch, filePath] = urlParts;
+                    const [, projectPath, _branch, filePath] = urlParts;
                     const projectId = encodeURIComponent(projectPath);
                     
                     // Mock API responses for testing

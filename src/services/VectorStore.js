@@ -621,8 +621,16 @@ export class VectorStore {
             request.onsuccess = (event) => {
                 const cursor = event.target.result;
                 if (cursor) {
-                    const repoId = cursor.value.repoId;
-                    repoMap.set(repoId, (repoMap.get(repoId) || 0) + 1);
+                    // Normalize to a string at the boundary. GitLab indexing can key
+                    // a repo by its NUMERIC project id, and every consumer downstream
+                    // treats repoId as a string — one `repoId.includes('/')` on a
+                    // number threw and took out the entire Repos panel. Coercing here
+                    // means no caller has to remember, and a numeric and string form
+                    // of the same id collapse into one entry rather than two.
+                    const repoId = String(cursor.value.repoId ?? '');
+                    if (repoId) {
+                        repoMap.set(repoId, (repoMap.get(repoId) || 0) + 1);
+                    }
                     cursor.continue();
                 } else {
                     // Cursor exhausted, convert map to array
