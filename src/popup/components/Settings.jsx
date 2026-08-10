@@ -69,6 +69,13 @@ export function Settings({ onClose }) {
     // Git platform tokens (for RAG indexing)
     const [githubToken, setGithubToken] = useState('');
     const [gitlabToken, setGitlabToken] = useState('');
+    // Jira is optional and independent of the git host: teams on GitHub or
+    // GitLab commonly keep the requirement (and its acceptance criteria) in Jira.
+    const [jiraBaseUrl, setJiraBaseUrl] = useState('');
+    const [jiraEmail, setJiraEmail] = useState('');
+    const [jiraToken, setJiraToken] = useState('');
+    const [showJiraToken, setShowJiraToken] = useState(false);
+    const [gitlabHosts, setGitlabHosts] = useState('');
     const [showGithubToken, setShowGithubToken] = useState(false);
     const [showGitlabToken, setShowGitlabToken] = useState(false);
 
@@ -89,9 +96,10 @@ export function Settings({ onClose }) {
     const [enableUpdatePRDescription, setEnableUpdatePRDescription] = useState(false);
     const [enablePostInlineComments, setEnablePostInlineComments] = useState(false);
 
-    // Experimental — orchestrated review pipeline (skip rules + chunking +
-    // assigned-hunks normalization). Opt-in until validated on real PRs.
-    const [enableOrchestratedReview, setEnableOrchestratedReview] = useState(false);
+    // Orchestrated review pipeline (skip rules + chunking + assigned-hunks
+    // normalization). Now the default — this toggle is the opt-OUT. While it was
+    // opt-in the common path skipped hunk normalization entirely.
+    const [enableOrchestratedReview, setEnableOrchestratedReview] = useState(true);
 
     // Telemetry (#16a)
     const [enableTelemetry, setEnableTelemetry] = useState(false);
@@ -113,6 +121,14 @@ export function Settings({ onClose }) {
                     setHasExistingKey(!!settings.apiKey);
                     setGithubToken(settings.githubToken || '');
                     setGitlabToken(settings.gitlabToken || '');
+                    setJiraBaseUrl(settings.jiraBaseUrl || '');
+                    setJiraEmail(settings.jiraEmail || '');
+                    setJiraToken(settings.jiraToken || '');
+                    setGitlabHosts(
+                        Array.isArray(settings.gitlabHosts)
+                            ? settings.gitlabHosts.join(', ')
+                            : (settings.gitlabHosts || settings.gitlabHost || '')
+                    );
                     setEmbeddingProvider(settings.embeddingProvider === 'openai' ? 'openai' : 'local');
 
                     // Load review quality settings
@@ -130,7 +146,7 @@ export function Settings({ onClose }) {
                         setAutoIndexOnOpen(settings.reviewSettings.autoIndexOnOpen !== false);
                         setEnableUpdatePRDescription(settings.reviewSettings.enableUpdatePRDescription === true);
                         setEnablePostInlineComments(settings.reviewSettings.enablePostInlineComments === true);
-                        setEnableOrchestratedReview(settings.reviewSettings.orchestratedReview === true);
+                        setEnableOrchestratedReview(settings.reviewSettings.orchestratedReview !== false);
                     }
 
                     // Load model selection
@@ -280,6 +296,10 @@ export function Settings({ onClose }) {
                         embeddingProvider: embeddingProvider,
                         githubToken: githubToken,
                         gitlabToken: gitlabToken,
+                        jiraBaseUrl: jiraBaseUrl.trim().replace(/\/+$/, ''),
+                        jiraEmail: jiraEmail.trim(),
+                        jiraToken: jiraToken,
+                        gitlabHosts: gitlabHosts,
                         reviewSettings: {
                             severityThreshold: severityThreshold,
                             groupRelatedFindings: groupFindings,
@@ -639,6 +659,79 @@ export function Settings({ onClose }) {
                             {' '}- Use "read_api" scope
                         </p>
                     </div>
+
+                    {/* Jira — optional; unlocks acceptance-criteria checking */}
+                    <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                            <label className="text-sm font-medium text-text">Jira</label>
+                            <span className="text-[10px] text-textMuted bg-surfaceHighlight px-1.5 py-0.5 rounded">
+                                Optional
+                            </span>
+                        </div>
+                        <p className="text-xs text-textMuted">
+                            When a PR title or branch names a Jira issue, the reviewer reads its
+                            acceptance criteria and reports any the diff does not address.
+                        </p>
+                        <input
+                            type="url"
+                            value={jiraBaseUrl}
+                            onChange={(e) => setJiraBaseUrl(e.target.value)}
+                            placeholder="https://your-team.atlassian.net"
+                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
+                        />
+                        <input
+                            type="email"
+                            value={jiraEmail}
+                            onChange={(e) => setJiraEmail(e.target.value)}
+                            placeholder="you@company.com"
+                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
+                        />
+                        <div className="relative">
+                            <input
+                                type={showJiraToken ? 'text' : 'password'}
+                                value={jiraToken}
+                                onChange={(e) => setJiraToken(e.target.value)}
+                                placeholder="Jira API token"
+                                className="w-full h-10 px-3 pr-10 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
+                            />
+                            <button
+                                type="button"
+                                onClick={() => setShowJiraToken(!showJiraToken)}
+                                className="absolute right-3 top-1/2 -translate-y-1/2 text-textMuted hover:text-text transition-colors"
+                            >
+                                {showJiraToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                            </button>
+                        </div>
+                        <p className="text-xs text-textMuted">
+                            Get from:{' '}
+                            <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                                Atlassian API tokens
+                            </a>
+                            {' '}- all three fields are required
+                        </p>
+                    </div>
+
+                    {/* Self-hosted GitLab. Without this, a URL on an internal
+                        instance is not recognised as GitLab at all. */}
+                    <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                            <label className="text-sm font-medium text-text">Self-hosted GitLab host</label>
+                            <span className="text-[10px] text-textMuted bg-surfaceHighlight px-1.5 py-0.5 rounded">
+                                Optional
+                            </span>
+                        </div>
+                        <input
+                            type="text"
+                            value={gitlabHosts}
+                            onChange={(e) => setGitlabHosts(e.target.value)}
+                            placeholder="gitlab.mycompany.com"
+                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
+                        />
+                        <p className="text-xs text-textMuted">
+                            Hostname only, or several separated by commas. gitlab.com always works.
+                            Saving prompts for permission to read that host.
+                        </p>
+                    </div>
                 </div>
             </Collapsible>
 
@@ -693,7 +786,10 @@ export function Settings({ onClose }) {
                         <div className="space-y-0.5">
                             <p className="text-sm font-medium text-text">Auto-Review on Page Load</p>
                             <p className="text-xs text-textMuted">
-                                Automatically run a review when you open a PR/MR page (once per PR). Off by default — reviews use your BYOK model.
+                                Automatically run a review when you open a PR/MR page (once per PR). If the repo
+                                isn&apos;t indexed yet it is indexed <strong>first</strong>, so the review has full
+                                context — on a large repo the first run spends a while on &ldquo;Indexing&rdquo;
+                                before it starts reviewing. Off by default — reviews use your BYOK model.
                             </p>
                         </div>
                         <button
@@ -714,7 +810,9 @@ export function Settings({ onClose }) {
                         <div className="space-y-0.5">
                             <p className="text-sm font-medium text-text">Auto-Index Repo on Open</p>
                             <p className="text-xs text-textMuted">
-                                When you open a PR/MR whose repo isn&apos;t indexed yet, index it in the background so review context (RAG + code graph) is ready. On by default.
+                                When you open a PR/MR whose repo isn&apos;t indexed yet, index it so review context
+                                (RAG + code graph) is ready before you ask for a review. On by default. Only applies
+                                when Auto-Review is off — with Auto-Review on, the review indexes first itself.
                             </p>
                         </div>
                         <button
@@ -807,10 +905,10 @@ export function Settings({ onClose }) {
                     <div className="flex items-center justify-between pt-3 border-t border-border">
                         <div className="space-y-0.5">
                             <p className="text-sm font-medium text-text">
-                                Orchestrated Review <span className="text-xs text-yellow-500">(experimental)</span>
+                                Orchestrated Review <span className="text-xs text-textMuted">(default)</span>
                             </p>
                             <p className="text-xs text-textMuted">
-                                New pipeline: skip rules · MR chunking · two-phase review · hunk-scoped findings
+                                Skip rules · MR chunking · two-phase review · hunk-scoped findings. Turn off to use the legacy engine.
                             </p>
                         </div>
                         <button

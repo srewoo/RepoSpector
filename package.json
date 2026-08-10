@@ -1,6 +1,6 @@
 {
   "name": "repospector",
-  "version": "6.8",
+  "version": "7.0",
   "description": "RepoSpector \u2014 AI-powered code review Chrome extension for GitHub & GitLab. Reviews pull requests, chats with your codebase using local RAG, detects bugs and security vulnerabilities, scans dependencies (OSV), and generates unit tests.",
   "author": "AI RepoSpector Team",
   "license": "MIT",
@@ -8,6 +8,13 @@
   "scripts": {
     "test": "jest",
     "test:coverage": "jest --coverage",
+    "eval": "node eval/score.js --corpus eval/fixtures/synthetic.json",
+    "eval:fetch": "node eval/fetch-github.js",
+    "eval:run": "node eval/run.js",
+    "eval:real": "node eval/score.js --corpus eval/corpus/public-prs.json --misses",
+    "eval:inject": "node eval/inject.js",
+    "eval:injected": "node eval/score.js --corpus eval/corpus/injected.json --misses",
+    "eval:gate": "node eval/score.js --corpus eval/fixtures/synthetic.json --gate",
     "lint": "eslint src/**/*.js test/**/*.js",
     "lint:fix": "eslint src/**/*.js test/**/*.js --fix",
     "dev": "vite",

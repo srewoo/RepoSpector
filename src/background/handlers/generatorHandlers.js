@@ -19,6 +19,7 @@ import {
 import { generateRepoInfo, buildExtractedDataSummary, insertAfterHeader } from '../../utils/repoInfoGenerator.js';
 import { REPO_INFO_ENRICHMENT_SYSTEM_PROMPT, buildRepoInfoEnrichmentPrompt } from '../../utils/repoInfoPrompts.js';
 import { validateMermaidSyntax, sanitizeMermaidCode } from '../mermaidValidation.js';
+import { detectPlatform } from '../../utils/gitHosts.js';
 
 /**
  * Build the generator message handlers bound to a BackgroundService instance.
@@ -262,9 +263,9 @@ ${typeInstructions[type] || typeInstructions.sequence}
             // Always derive repoId from URL when available (matches indexing format)
             let repoId = null;
             if (url) {
-                if (url.includes('github.com')) {
+                if (detectPlatform(url) === 'github') {
                     repoId = svc.githubService.getRepoId(url);
-                } else if (url.includes('gitlab.com')) {
+                } else if (detectPlatform(url) === 'gitlab') {
                     repoId = svc.gitlabService.getRepoId(url);
                 }
             }
@@ -364,9 +365,9 @@ ${typeInstructions[type] || typeInstructions.sequence}
             // Always derive repoId from URL when available (matches indexing format)
             let repoId = null;
             if (url) {
-                if (url.includes('github.com')) {
+                if (detectPlatform(url) === 'github') {
                     repoId = svc.githubService.getRepoId(url);
-                } else if (url.includes('gitlab.com')) {
+                } else if (detectPlatform(url) === 'gitlab') {
                     repoId = svc.gitlabService.getRepoId(url);
                 }
             }

@@ -27,6 +27,10 @@
  * isolated.
  */
 
+// Shared with the background service so "which forge is this?" has ONE answer.
+// Safe in the content bundle: gitHosts is pure (no chrome APIs) and rollup inlines it.
+import { detectPlatform, PLATFORM } from '../utils/gitHosts.js';
+
 const OVERLAY_CLASS = 'rs-overlay';
 const HUNK_MARKER = 'data-rs-hunk-id';
 const FOCUSED_CLASS = 'rs-overlay-focused';
@@ -126,9 +130,21 @@ function detectGitLabHunks() {
 }
 
 function detectHunks() {
-    const host = window.location.hostname;
-    if (host === 'github.com') return detectGitHubHunks();
-    if (host === 'gitlab.com') return detectGitLabHunks();
+    // Exact-hostname matching meant the overlay was dead on self-hosted GitLab even
+    // though the extension now registers a content script for configured hosts —
+    // the script loaded, found neither literal host, and returned zero hunks.
+    // `detectPlatform` recognises a GitLab MR route on ANY host, which is the same
+    // structural signal the background service uses.
+    const platform = detectPlatform(window.location.href);
+    if (platform === PLATFORM.GITHUB) return detectGitHubHunks();
+    if (platform === PLATFORM.GITLAB) return detectGitLabHunks();
+
+    // Structural detection needs a `/-/merge_requests/` style path. On a GitLab
+    // instance page that lacks it, fall back to the DOM: only GitLab renders
+    // `.diff-file` / `.file-holder` with `.diff-content`.
+    if (document.querySelector('.diff-file .diff-content, .file-holder .diff-content')) {
+        return detectGitLabHunks();
+    }
     return [];
 }
 

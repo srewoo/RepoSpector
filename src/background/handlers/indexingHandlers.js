@@ -15,6 +15,8 @@
  * module needs no additional imports.
  */
 
+import { detectPlatform } from '../../utils/gitHosts.js';
+
 export function createIndexingHandlers(svc) {
     async function handleIndexRepository(message, sender, sendResponse) {
         try {
@@ -32,12 +34,12 @@ export function createIndexingHandlers(svc) {
             let service;
             let repoId;
 
-            if (url.includes('github.com')) {
+            if (detectPlatform(url) === 'github') {
                 console.log('🔵 Detected GitHub repository');
                 service = svc.githubService;
                 repoId = service.getRepoId(url);
                 console.log('📌 Extracted repoId:', repoId);
-            } else if (url.includes('gitlab.com')) {
+            } else if (detectPlatform(url) === 'gitlab') {
                 console.log('🟠 Detected GitLab repository');
                 service = svc.gitlabService;
                 repoId = service.getRepoId(url);
@@ -53,7 +55,7 @@ export function createIndexingHandlers(svc) {
                 return;
             }
 
-            console.log('✅ Repository identified:', { platform: url.includes('github.com') ? 'GitHub' : 'GitLab', repoId });
+            console.log('✅ Repository identified:', { platform: detectPlatform(url) === 'github' ? 'GitHub' : 'GitLab', repoId });
 
             // Honor the embedding provider selected in Settings, then initialize.
             await svc.ensureRagEmbeddingProvider();
@@ -190,9 +192,9 @@ export function createIndexingHandlers(svc) {
 
             // Determine repoId
             let repoId;
-            if (url.includes('github.com')) {
+            if (detectPlatform(url) === 'github') {
                 repoId = svc.githubService.getRepoId(url);
-            } else if (url.includes('gitlab.com')) {
+            } else if (detectPlatform(url) === 'gitlab') {
                 repoId = svc.gitlabService.getRepoId(url);
             } else {
                 sendResponse({ success: false, error: 'Unsupported platform' });
@@ -228,9 +230,9 @@ export function createIndexingHandlers(svc) {
 
             if (!repoId && url) {
                 // Determine repoId from URL
-                if (url.includes('github.com')) {
+                if (detectPlatform(url) === 'github') {
                     repoId = svc.githubService.getRepoId(url);
-                } else if (url.includes('gitlab.com')) {
+                } else if (detectPlatform(url) === 'gitlab') {
                     repoId = svc.gitlabService.getRepoId(url);
                 }
             }

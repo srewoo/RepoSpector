@@ -27,6 +27,7 @@ import {
 } from './reviewSchema.js';
 import { liftEngineFindings } from './engineContract.js';
 import { normalizeFindingKeys } from './FindingsNormalizer.js';
+import { parsePatchHunks } from '../utils/patchLines.js';
 
 /** Bastion ships 240s per chunk; match it. */
 export const DEFAULT_CHUNK_TIMEOUT_MS = 240_000;
@@ -161,9 +162,32 @@ export class ReviewOrchestrator {
             });
         }
 
+        // ── 1b. Partial review budget ────────────────────────────────────
+        // An oversized MR is reviewed, not skipped, but only across the files the
+        // gate selected. Narrowing `prData` here (rather than inside the engine)
+        // keeps chunking, the brief and the assigned-hunk allow-list all consistent
+        // with what was actually read — an allow-list covering files nobody reviewed
+        // would let a stale carried finding through the normalizer.
+        let effectivePrData = prData;
+        if (gate.partial?.reviewedFiles?.length) {
+            const keep = new Set(gate.partial.reviewedFiles);
+            const selected = (prData.files ?? []).filter(
+                f => keep.has(f.filename ?? f.path ?? f.new_path),
+            );
+            if (selected.length) {
+                effectivePrData = { ...prData, files: selected };
+                console.warn(
+                    `⚠️ Partial review (${gate.partial.reason}): reviewing ` +
+                    `${selected.length} of ${gate.partial.totalFiles} files; ` +
+                    `${gate.partial.skippedFileCount} not read`
+                );
+                onProgress?.({ step: 'partial_review', partial: gate.partial });
+            }
+        }
+
         // ── 2. Chunk + build shared brief ────────────────────────────────
         const { chunks, brief, summary: chunkSummary } = chunkMR(
-            prData,
+            effectivePrData,
             options.chunking,
         );
         onProgress?.({ step: 'chunked', chunkSummary });
@@ -276,7 +300,9 @@ export class ReviewOrchestrator {
         );
 
         // ── 5. Filter both phases to the MR's actual changed hunks ──────
-        const allow = buildAssignedHunks(toParsedFiles(prData.files));
+        // Built from the files that were actually reviewed, so a partial run cannot
+        // admit a finding on a file it never read.
+        const allow = buildAssignedHunks(toParsedFiles(effectivePrData.files));
         const deepFiltered = filterToAssignedHunks(
             deepFindings.filter(Boolean),
             allow,
@@ -292,10 +318,22 @@ export class ReviewOrchestrator {
         const merged = dedupeFindings([...deepFiltered.kept, ...stdFiltered.kept]);
 
         // ── 7. Build the canonical report ───────────────────────────────
+        // A truncated review must SAY it was truncated, at the top of the narrative.
+        // Silence here reads as "we looked at everything and found this much", which
+        // is the one thing a partial review must never imply.
+        const partialNote = gate.partial
+            ? `> ⚠️ **Partial review.** This MR changes ${gate.partial.totalFiles} files `
+              + `(${gate.partial.totalLoc} lines). ${gate.partial.reviewedFiles.length} `
+              + `file(s) were reviewed, prioritised by change size and excluding generated `
+              + `code; **${gate.partial.skippedFileCount} file(s) were not read.** `
+              + `Absence of findings in those files is not evidence they are correct.\n`
+            : '';
+
         const report = buildVerdictReport({
             findings: merged,
             summary: {
-                deep: consolidateNarratives(chunkNarratives) || 'No deep-phase narrative produced.',
+                deep: partialNote
+                    + (consolidateNarratives(chunkNarratives) || 'No deep-phase narrative produced.'),
                 standards: stdFiltered.kept.length
                     ? `${stdFiltered.kept.length} standards findings after normalization.`
                     : 'No standards findings.',
@@ -303,6 +341,7 @@ export class ReviewOrchestrator {
             meta: {
                 durationMs: Date.now() - startedAt,
                 gate,
+                partial: gate.partial ?? null,
                 chunkSummary,
                 brief,
                 normalization: {
@@ -355,8 +394,14 @@ function dedupeFindings(findings) {
 
 /**
  * Adapter — PullRequestService gives us patches per file. The normalizer
- * wants parsed hunks. We reconstruct a minimal hunk list from the unified
- * patch lines, which is enough for line-allow-list construction.
+ * wants parsed hunks.
+ *
+ * The parse itself MUST come from `patchLines`. This file used to carry its own
+ * copy, and the copies had already drifted: the local one had no `\ No newline`
+ * handling and a different notion of a context line. That is precisely the bug
+ * `patchLines`' module note warns about — the assigned-hunk allow-list built
+ * here and the posting allow-list built there disagreed, so a finding could
+ * survive one filter and be dropped by the other.
  */
 function toParsedFiles(files) {
     const out = [];
@@ -369,38 +414,4 @@ function toParsedFiles(files) {
         out.push({ newPath, hunks });
     }
     return out;
-}
-
-const HUNK_HEADER_RE = /^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@/;
-
-function parsePatchHunks(patch) {
-    if (!patch) return [];
-    const hunks = [];
-    let cur = null;
-    let newLineCursor = 0;
-
-    for (const line of patch.split('\n')) {
-        const m = line.match(HUNK_HEADER_RE);
-        if (m) {
-            if (cur) hunks.push(cur);
-            const newStart = parseInt(m[3], 10);
-            const newLines = parseInt(m[4] || '1', 10);
-            cur = { newStart, newLines, lines: [] };
-            newLineCursor = newStart;
-            continue;
-        }
-        if (!cur) continue;
-
-        if (line.startsWith('+') && !line.startsWith('+++')) {
-            cur.lines.push({ type: 'added', number: { new: newLineCursor, old: null } });
-            newLineCursor++;
-        } else if (line.startsWith('-') && !line.startsWith('---')) {
-            cur.lines.push({ type: 'deleted', number: { new: null, old: null } });
-        } else if (line.startsWith(' ')) {
-            cur.lines.push({ type: 'context', number: { new: newLineCursor, old: null } });
-            newLineCursor++;
-        }
-    }
-    if (cur) hunks.push(cur);
-    return hunks;
 }

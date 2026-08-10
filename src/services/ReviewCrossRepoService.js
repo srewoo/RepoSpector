@@ -11,11 +11,23 @@ import { linkedRepos, parseWorkspace } from '../utils/workspaceConfig.js';
  * with the new findReferences() primitive. Auto-index is delegated to an injected
  * indexRepo (wired to the existing indexing routine by the caller).
  *
- * Only runs when a `.repospector.yaml` `workspace.repos` block is present — zero cost
- * otherwise. Best-effort: any failure returns null and the review proceeds.
+ * Two ways to get a set of repos to check:
  *
- * DI-friendly: isRepoIndexed / loadGraph can be overridden for tests without
- * IndexedDB.
+ *   Declared  — a `.repospector.yaml` `workspace.repos` block. Uncapped, and the
+ *               only path that can auto-index a repo it has never seen.
+ *   Discovered— any OTHER repo the user has already indexed locally. Capped, and
+ *               never indexes anything (a discovered repo is indexed by
+ *               definition).
+ *
+ * Discovery exists because the declared path made the whole feature conditional
+ * on a config file almost nobody writes, so in practice this returned `null`
+ * every time and the capability was dead. Having indexed two repos is itself a
+ * statement that you work across both.
+ *
+ * Best-effort throughout: any failure returns null and the review proceeds.
+ *
+ * DI-friendly: isRepoIndexed / loadGraph / listIndexedRepos can be overridden
+ * for tests without IndexedDB.
  */
 export class ReviewCrossRepoService {
     /**
@@ -24,12 +36,14 @@ export class ReviewCrossRepoService {
      * @param {(repoId:string)=>Promise<boolean>} [deps.isRepoIndexed]
      * @param {(repoId:string)=>Promise<Object|null>} [deps.loadGraph]
      */
-    constructor({ indexRepo, isRepoIndexed, loadGraph } = {}) {
+    constructor({ indexRepo, isRepoIndexed, loadGraph, vectorStore, listIndexedRepos } = {}) {
         this.indexRepo = indexRepo;
+        this.vectorStore = vectorStore || null;
         this._graphCache = new Map();
         this._stats = ReviewCrossRepoService.emptyStats();
         this._isRepoIndexed = isRepoIndexed || ((repoId) => this._defaultIsIndexed(repoId));
         this._loadGraph = loadGraph || ((repoId) => this._defaultLoadGraph(repoId));
+        this._listIndexedRepos = listIndexedRepos || (() => this._defaultListIndexedRepos());
     }
 
     /**
@@ -45,6 +59,10 @@ export class ReviewCrossRepoService {
         return {
             workspaceDeclared: false,
             linkedReposConfigured: 0,
+            // Repos found by discovery rather than declaration. Counted
+            // separately so "checked 3 repos" can be traced to whether the user
+            // declared them or we inferred them.
+            discoveredRepos: 0,
             linkedReposChecked: 0,
             linkedReposSkipped: 0,
             graphsEmpty: 0,
@@ -54,6 +72,38 @@ export class ReviewCrossRepoService {
             dependentRepos: 0,
             durationMs: 0,
         };
+    }
+
+    /**
+     * Repos other than this one that already have an index locally.
+     *
+     * Capped, because every discovered repo costs a graph load and a symbol scan
+     * on the review's critical path. Someone who has indexed twenty repos does
+     * not want all twenty walked on every PR; the cap keeps the implicit
+     * workspace cheap, and anyone who wants exhaustive coverage can declare it
+     * explicitly in `.repospector.yaml`, which is not capped.
+     *
+     * @param {string} currentRepoId
+     * @param {number} [max=5]
+     * @returns {Promise<Array<{repoId: string}>>}
+     */
+    async _discoverIndexedRepos(currentRepoId, max = 5) {
+        try {
+            const ids = await this._listIndexedRepos();
+            return (ids || [])
+                .filter(id => id && id !== currentRepoId)
+                .slice(0, max)
+                .map(repoId => ({ repoId, url: null, discovered: true }));
+        } catch (e) {
+            console.warn('Cross-repo: could not list indexed repos:', e?.message);
+            return [];
+        }
+    }
+
+    async _defaultListIndexedRepos() {
+        const store = this.vectorStore;
+        if (!store?.getAllRepoIds) return [];
+        return await store.getAllRepoIds();
     }
 
     async _defaultIsIndexed(repoId) {
@@ -123,11 +173,32 @@ export class ReviewCrossRepoService {
         const startedAt = Date.now();
         this._stats = ReviewCrossRepoService.emptyStats();
 
-        const links = linkedRepos(customConfig || {}, currentRepoId);
-        if (!links.length) return null; // no workspace declared → skip entirely
-
-        this._stats.workspaceDeclared = true;
+        let links = linkedRepos(customConfig || {}, currentRepoId);
+        this._stats.workspaceDeclared = links.length > 0;
         this._stats.linkedReposConfigured = links.length;
+
+        // Fall back to repos this user has ALREADY indexed.
+        //
+        // Requiring a `.repospector.yaml` made the whole feature opt-in through a
+        // file almost nobody writes, so in practice cross-repo impact never ran —
+        // the capability existed and the answer was always `null`. Anyone who has
+        // indexed two repos has already told us they work across both; that is
+        // the workspace declaration, just implicit.
+        //
+        // This costs nothing when it finds nothing (one IndexedDB key read), and
+        // it never triggers indexing: a discovered repo is by definition already
+        // indexed, so unlike the declared path there is no network work and no
+        // `needsIndexing` to report.
+        if (!links.length) {
+            links = await this._discoverIndexedRepos(currentRepoId);
+            this._stats.discoveredRepos = links.length;
+            if (links.length) {
+                console.log(`🔗 Cross-repo: no workspace declared; checking ${links.length} `
+                    + 'already-indexed repo(s) instead');
+            }
+        }
+
+        if (!links.length) return null; // nothing declared and nothing indexed
 
         const { autoIndex } = parseWorkspace(customConfig || {});
         const changedSymbols = CrossRepoImpactService.extractChangedSymbols(prData);

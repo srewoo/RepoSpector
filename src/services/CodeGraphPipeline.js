@@ -349,6 +349,60 @@ export class CodeGraphPipeline {
     /**
      * Get 360-degree view of a symbol: callers, callees, imports
      */
+    /**
+     * The callers of a symbol, as data rather than prose.
+     *
+     * `_getSymbolView` already walks these edges but renders them straight into
+     * a markdown bullet list, which is all the review prompt ever received: "3
+     * callers, here are their names". That tells the model a contract change
+     * has consumers; it does not let the model judge whether those consumers
+     * actually break. Returning the refs makes it possible to go and fetch
+     * their source.
+     *
+     * Ordered by the graph's own call-resolution confidence, so when the budget
+     * only allows a few, they are the ones most likely to be real call sites
+     * rather than a same-named symbol elsewhere.
+     *
+     * @param {string} symbolName
+     * @param {number} [limit=5]
+     * @returns {Array<{name: string, filePath: string, startLine: number|null, confidence: number}>}
+     */
+    getCallerRefs(symbolName, limit = 5) {
+        if (!this.graph || this.graph.nodeCount === 0) return [];
+        try {
+            const nodes = this.graph.findNodeByName(symbolName);
+            if (!nodes || nodes.length === 0) return [];
+
+            const incoming = this.graph
+                .getRelationshipsTo(nodes[0].id)
+                .filter(r => r.type === 'CALLS');
+
+            const refs = [];
+            const seen = new Set();
+            for (const rel of incoming) {
+                const caller = this.graph.getNode(rel.sourceId);
+                const filePath = caller?.properties?.filePath;
+                const name = caller?.properties?.name;
+                if (!filePath || !name) continue;
+                const key = `${filePath}::${name}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                refs.push({
+                    name,
+                    filePath,
+                    startLine: caller.properties?.startLine ?? null,
+                    confidence: typeof rel.confidence === 'number' ? rel.confidence : 0,
+                });
+            }
+
+            refs.sort((a, b) => b.confidence - a.confidence);
+            return refs.slice(0, Math.max(0, limit));
+        } catch (e) {
+            console.warn(`getCallerRefs failed for ${symbolName}:`, e?.message);
+            return [];
+        }
+    }
+
     _getSymbolView(symbolName) {
         const nodes = this.graph.findNodeByName(symbolName);
         if (nodes.length === 0) return null;

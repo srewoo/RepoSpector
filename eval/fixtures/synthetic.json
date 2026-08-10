@@ -1,0 +1,53 @@
+{
+  "_comment": [
+    "Synthetic, non-proprietary corpus. It exercises the SCORER, not the reviewer:",
+    "the predictions here are hand-written, not produced by a review run, so the",
+    "rates it yields say nothing about RepoSpector's accuracy. Its job is to keep",
+    "CI honest about the measurement code — matching, tolerance, pooling, empty",
+    "samples — on every commit, without needing a private corpus or an API key.",
+    "The real accuracy gate runs against eval/corpus/, which is never committed."
+  ],
+  "cases": [
+    {
+      "id": "synthetic-1",
+      "url": "https://example.invalid/g/p/-/merge_requests/1",
+      "predictions": [
+        { "file": "src/a.js", "line": 10, "title": "eval() on user input" },
+        { "file": "src/a.js", "line": 40, "title": "unused variable" },
+        { "file": "src/b.js", "line": 5, "title": "missing await" }
+      ],
+      "adjudications": [
+        { "file": "src/a.js", "line": 10, "verdict": "true_positive" },
+        { "file": "src/a.js", "line": 40, "verdict": "false_positive" },
+        { "file": "src/b.js", "line": 5, "verdict": "true_positive" }
+      ],
+      "humanComments": [
+        { "file": "src/a.js", "line": 12, "body": "this eval is reachable from the request body" },
+        { "file": "src/c.js", "line": 3, "body": "this needs a feature flag" },
+        { "file": "src/b.js", "body": "LGTM otherwise", "substantive": false }
+      ]
+    },
+    {
+      "id": "synthetic-2",
+      "url": "https://example.invalid/g/p/-/merge_requests/2",
+      "predictions": [
+        { "file": "src/d.py", "line": 20, "title": "bare except" }
+      ],
+      "adjudications": [
+        { "file": "src/d.py", "line": 22, "verdict": "true_positive" }
+      ],
+      "humanComments": [
+        { "file": "src/d.py", "line": 100, "body": "extract this into a helper" }
+      ]
+    },
+    {
+      "id": "synthetic-3",
+      "url": "https://example.invalid/g/p/-/merge_requests/3",
+      "predictions": [],
+      "adjudications": [],
+      "humanComments": [
+        { "file": "src/e.go", "line": 7, "body": "err is dropped here" }
+      ]
+    }
+  ]
+}

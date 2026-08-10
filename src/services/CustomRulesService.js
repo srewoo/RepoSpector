@@ -17,54 +17,76 @@ export class CustomRulesService {
     }
 
     /**
-     * Fetch .repospector.yaml from repo root
+     * Fetch .repospector.yaml from repo root.
+     *
      * @param {string} platform - 'github' or 'gitlab'
-     * @param {string} owner - Repo owner
+     * @param {string} owner - Repo owner (parent group on GitLab)
      * @param {string} repo - Repo name
      * @param {string} token - API token
+     * @param {Object} [options]
+     * @param {string} [options.projectPath] - Full GitLab project path including any
+     *        subgroups (`group/subgroup/project`). Required for nested groups:
+     *        `${owner}/${repo}` collapses them and 404s. Defaults to `owner/repo`.
+     * @param {string} [options.apiBase] - GitLab REST base for the instance serving
+     *        this repo (from `gitHosts.gitlabApiBase`). The old hardcoded
+     *        `https://gitlab.com/api/v4` meant self-hosted instances could never
+     *        load a config at all.
+     * @param {string[]} [options.refs] - Branches to try, in order. Only `main` was
+     *        tried before, so a repo on `master`/`develop`/`trunk` silently had no
+     *        config even on gitlab.com.
      * @returns {Object|null} Parsed config or null
      */
-    async fetchConfig(platform, owner, repo, token) {
-        const cacheKey = `${platform}:${owner}/${repo}`;
+    async fetchConfig(platform, owner, repo, token, options = {}) {
+        const projectPath = options.projectPath || `${owner}/${repo}`;
+        const apiBase = options.apiBase || 'https://gitlab.com/api/v4';
+        const refs = options.refs?.length ? options.refs : ['HEAD', 'main', 'master', 'develop'];
+
+        const cacheKey = `${platform}:${apiBase}:${projectPath}`;
         const cached = this.configCache.get(cacheKey);
         if (cached && Date.now() - cached.fetchedAt < this.cacheTTL) {
             return cached.config;
         }
 
         for (const filename of this.configFileNames) {
-            try {
-                let url, headers;
+            // GitHub's contents API resolves the default branch on its own, so it
+            // needs no ref sweep; GitLab's raw-file endpoint requires one.
+            const candidateRefs = platform === 'github' ? [null] : refs;
 
-                if (platform === 'github') {
-                    url = `https://api.github.com/repos/${owner}/${repo}/contents/${filename}`;
-                    headers = {
-                        'Accept': 'application/vnd.github.v3.raw',
-                        ...(token ? { 'Authorization': `Bearer ${token}` } : {})
-                    };
-                } else if (platform === 'gitlab') {
-                    const projectPath = encodeURIComponent(`${owner}/${repo}`);
-                    const filePath = encodeURIComponent(filename);
-                    url = `https://gitlab.com/api/v4/projects/${projectPath}/repository/files/${filePath}/raw?ref=main`;
-                    headers = token ? { 'PRIVATE-TOKEN': token } : {};
-                } else {
-                    continue;
+            for (const ref of candidateRefs) {
+                try {
+                    let url, headers;
+
+                    if (platform === 'github') {
+                        url = `https://api.github.com/repos/${owner}/${repo}/contents/${filename}`;
+                        headers = {
+                            'Accept': 'application/vnd.github.v3.raw',
+                            ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+                        };
+                    } else if (platform === 'gitlab') {
+                        const encodedProject = encodeURIComponent(projectPath);
+                        const filePath = encodeURIComponent(filename);
+                        url = `${apiBase}/projects/${encodedProject}/repository/files/${filePath}/raw?ref=${encodeURIComponent(ref)}`;
+                        headers = token ? { 'PRIVATE-TOKEN': token } : {};
+                    } else {
+                        continue;
+                    }
+
+                    const response = await fetch(url, { headers });
+                    if (response.ok) {
+                        const content = await response.text();
+                        const config = this.parseYAML(content);
+                        const validated = this.validateConfig(config);
+
+                        this.configCache.set(cacheKey, {
+                            config: validated,
+                            fetchedAt: Date.now()
+                        });
+
+                        return validated;
+                    }
+                } catch (e) {
+                    // File doesn't exist on this ref or can't be fetched — keep trying.
                 }
-
-                const response = await fetch(url, { headers });
-                if (response.ok) {
-                    const content = await response.text();
-                    const config = this.parseYAML(content);
-                    const validated = this.validateConfig(config);
-
-                    this.configCache.set(cacheKey, {
-                        config: validated,
-                        fetchedAt: Date.now()
-                    });
-
-                    return validated;
-                }
-            } catch (e) {
-                // File doesn't exist or can't be fetched - continue
             }
         }
 

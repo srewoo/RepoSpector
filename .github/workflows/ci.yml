@@ -31,6 +31,12 @@ jobs:
       - name: Unit + integration tests
         run: npm test -- --ci --runInBand
 
+      # Guards the MEASUREMENT code, not the reviewer's accuracy: the fixture's
+      # predictions are hand-written. A real accuracy gate needs the private
+      # corpus and runs locally — see eval/README.md.
+      - name: Eval harness self-check
+        run: npm run eval:gate
+
       - name: Build extension
         run: npm run build
 

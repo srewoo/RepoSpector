@@ -156,6 +156,56 @@ describe('postGitLabReview', () => {
         });
     });
 
+    it('omits old_line for a note on an ADDED line', async () => {
+        global.fetch
+            .mockResolvedValueOnce(jsonResponse({ id: 10 }))
+            .mockResolvedValueOnce(jsonResponse({ id: 20 }));
+
+        await svc.postGitLabReview(prInfo, {
+            summary: 'sum',
+            inlineComments: [{ path: 'src/a.js', line: 3, body: 'bad' }],
+            diffRefs: { base_sha: 'b', start_sha: 's', head_sha: 'h' },
+        });
+
+        const position = JSON.parse(global.fetch.mock.calls[1][1].body).position;
+        expect(position.new_line).toBe(3);
+        // GitLab 400s an added-line note that also carries old_line.
+        expect(position).not.toHaveProperty('old_line');
+    });
+
+    it('sends old_line for a note on an UNCHANGED (context) line', async () => {
+        global.fetch
+            .mockResolvedValueOnce(jsonResponse({ id: 10 }))
+            .mockResolvedValueOnce(jsonResponse({ id: 20 }));
+
+        await svc.postGitLabReview(prInfo, {
+            summary: 'sum',
+            // new line 4 is ' module.exports = { a };' — unchanged, old side 2.
+            inlineComments: [{ path: 'src/a.js', line: 4, oldLine: 2, body: 'ctx' }],
+            diffRefs: { base_sha: 'b', start_sha: 's', head_sha: 'h' },
+        });
+
+        const position = JSON.parse(global.fetch.mock.calls[1][1].body).position;
+        expect(position).toMatchObject({ new_line: 4, old_line: 2 });
+    });
+
+    it('formatInlineComments resolves oldLine so context notes are postable', () => {
+        const fresh = new PullRequestService({ gitlabToken: 'tok' });
+
+        const [added] = fresh.formatInlineComments(
+            [{ severity: 'high', title: 'eval', file: 'src/a.js', line: 3 }],
+            { prData }
+        );
+        expect(added.oldLine).toBeUndefined();
+
+        const [context] = fresh.formatInlineComments(
+            [{ severity: 'high', title: 'exports', file: 'src/a.js', line: 4 }],
+            { prData }
+        );
+        expect(context.line).toBe(4);
+        expect(context.oldLine).toBe(2);
+    });
+
     it('uses caller-supplied diffRefs without a second fetch', async () => {
         global.fetch
             .mockResolvedValueOnce(jsonResponse({ id: 10 }))

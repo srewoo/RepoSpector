@@ -7,9 +7,24 @@
  *
  * Returns one of:
  *   { action: 'REVIEW' }                        → run the normal pipeline
+ *   { action: 'REVIEW', partial: {...} }        → review, but only a bounded subset
  *   { action: 'AUTO_VERDICT', verdict, reason, classification }
  *   { action: 'SKIP',         reason }          → don't review at all
  *   { action: 'DEFER',        reason }          → ask user to retry later
+ *
+ * A note on how aggressive these rules should be. Every SKIP is a review the user
+ * asked for and did not get, and the only signal they get back is a one-line note.
+ * Two of the original rules were too blunt for that trade:
+ *
+ *   - OVERSIZED returned SKIP, so a large refactor — the change most in need of a
+ *     second pair of eyes — produced nothing at all, even though `MRChunker`
+ *     exists precisely to review large MRs in pieces. It now returns REVIEW with a
+ *     `partial` budget, so the reviewer covers the highest-signal files and SAYS
+ *     what it left out.
+ *   - TESTS_ONLY auto-APPROVED without reading anything, which also meant the
+ *     dedicated `test-quality` finder lens could never run: the gate fired before
+ *     it. Wrong assertions and silently-disabled tests are real defects, so a
+ *     test-only change is now reviewed like any other.
  */
 
 import { VERDICT } from './reviewSchema.js';
@@ -18,13 +33,25 @@ import { VERDICT } from './reviewSchema.js';
 export const DEFAULT_THRESHOLDS = Object.freeze({
     OVERSIZED_FILES: 200,
     OVERSIZED_LOC: 5000,
+    /** How many files an oversized MR still gets reviewed, highest-signal first. */
+    PARTIAL_MAX_FILES: 60,
+    /** …and the LOC ceiling for that subset. */
+    PARTIAL_MAX_LOC: 4000,
     DOC_PATH_RE: /(^|\/)(docs?|README|CHANGELOG|LICENSE|\.md$|\.mdx$|\.rst$|\.txt$)/i,
     TEST_PATH_RE: /(^|\/)(__tests__|tests?|spec)\/|\.(test|spec)\.[jt]sx?$|_test\.go$|_spec\.rb$/i,
     CI_PATH_RE: /(^|\/)(\.github|\.gitlab|\.circleci|\.azure-pipelines|Jenkinsfile|\.travis|\.drone)/i,
     DEP_PATH_RE: /(^|\/)(package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Pipfile(\.lock)?|requirements[^/]*\.txt|poetry\.lock|go\.(mod|sum)|Gemfile(\.lock)?|composer\.(json|lock)|Cargo\.(toml|lock))$/i,
     BINARY_EXT_RE: /\.(png|jpe?g|gif|ico|svg|webp|bmp|tiff|pdf|zip|tar|gz|7z|rar|exe|dll|so|dylib|class|jar|wasm|woff2?|ttf|eot|mp[34]|mov|webm|psd|sketch|fig)$/i,
     BOT_LOGIN_RE: /(\[bot\]$|^dependabot|^renovate|^greenkeeper|^snyk-bot|^github-actions)/i,
-    REVERT_TITLE_RE: /^revert\b/i,
+    /**
+     * A PURE revert, as git itself writes it: `Revert "<original subject>"`.
+     *
+     * This was `/^revert\b/i`, which also swallowed "Revert the cache layer and add
+     * a bounded LRU" — a revert plus new code, where the new code is exactly what
+     * needs reviewing. Requiring the quoted original subject is what distinguishes
+     * a mechanical `git revert` from a hand-written change that mentions one.
+     */
+    REVERT_TITLE_RE: /^revert(?:\s+"[^"]+"|\s+'[^']+'|:?\s+commit\s+[0-9a-f]{7,40})\s*$/i,
 });
 
 /**
@@ -57,6 +84,58 @@ export function classifyChanges(files, thresholds = DEFAULT_THRESHOLDS) {
     if (deps > 0) return 'DEPS_ONLY';
     if (binaries > 0) return 'BINARY_ONLY';
     return 'CODE_CHANGES';
+}
+
+/**
+ * Rank and cap the files of an oversized MR so the reviewer spends its budget on
+ * the parts most likely to contain a defect worth blocking on.
+ *
+ * Ordering signals, in priority order:
+ *   1. non-generated before generated / vendored / lockfile-ish
+ *   2. non-test source before tests (tests are still eligible, just later)
+ *   3. larger change first — more added lines, more surface for a defect
+ *
+ * Deliberately deterministic: two runs over the same MR must pick the same files,
+ * or the review changes shape between pushes for no reason the author can see.
+ *
+ * @param {Array<object>} files
+ * @param {object} t - thresholds
+ * @returns {Array<object>}
+ */
+export function selectFilesForPartialReview(files, t = DEFAULT_THRESHOLDS) {
+    const GENERATED_RE = /(^|\/)(vendor|third_party|node_modules|dist|build|generated|__generated__)\//i;
+    const GENERATED_NAME_RE = /\.(min\.js|min\.css|pb\.go|pb\.cc)$|_pb2\.py$|\.snap$/i;
+
+    const scored = (files ?? []).map((f, index) => {
+        const path = f?.filename ?? f?.path ?? f?.new_path ?? '';
+        const churn = (f?.additions ?? 0) + (f?.deletions ?? 0);
+        return {
+            file: f,
+            index,                                        // stable tiebreak
+            generated: GENERATED_RE.test(path) || GENERATED_NAME_RE.test(path) ? 1 : 0,
+            test: t.TEST_PATH_RE.test(path) ? 1 : 0,
+            churn,
+        };
+    });
+
+    scored.sort((a, b) =>
+        a.generated - b.generated
+        || a.test - b.test
+        || b.churn - a.churn
+        || a.index - b.index,
+    );
+
+    const out = [];
+    let loc = 0;
+    for (const s of scored) {
+        if (out.length >= t.PARTIAL_MAX_FILES) break;
+        // Always take at least one file, even a pathologically large one, so an MR
+        // of a single 10k-line file is not silently reduced to nothing.
+        if (out.length > 0 && loc + s.churn > t.PARTIAL_MAX_LOC) continue;
+        out.push(s.file);
+        loc += s.churn;
+    }
+    return out;
 }
 
 /**
@@ -103,19 +182,38 @@ export function evaluateSkipRules(pr, opts = {}) {
         return { action: 'DEFER', reason: 'failing_pipeline' };
     }
 
-    // 7. Oversized → SKIP (better as separate small PRs).
+    // 7. Oversized → still review, but only a bounded, prioritised subset.
+    //
+    // `opts.allowPartialReview: false` restores the old hard SKIP for callers that
+    // genuinely cannot afford a large run (e.g. an automated hook on a metered key).
     const files = pr.files ?? [];
     const fileCount = files.length;
     const loc = (pr.stats?.additions ?? 0) + (pr.stats?.deletions ?? 0);
-    if (fileCount > t.OVERSIZED_FILES || loc > t.OVERSIZED_LOC) {
+    const oversized = fileCount > t.OVERSIZED_FILES || loc > t.OVERSIZED_LOC;
+
+    // 8. Classify. Needed before the oversized branch so an oversized docs-only or
+    //    binary-only MR still short-circuits instead of paying for a partial review
+    //    of files nobody wants reviewed.
+    const classification = classifyChanges(files, t);
+
+    if (oversized && classification === 'CODE_CHANGES') {
+        if (opts.allowPartialReview === false) {
+            return { action: 'SKIP', reason: `oversized:files=${fileCount},loc=${loc}` };
+        }
+        const selected = selectFilesForPartialReview(files, t);
         return {
-            action: 'SKIP',
-            reason: `oversized:files=${fileCount},loc=${loc}`,
+            action: 'REVIEW',
+            classification,
+            partial: {
+                reason: `oversized:files=${fileCount},loc=${loc}`,
+                totalFiles: fileCount,
+                totalLoc: loc,
+                reviewedFiles: selected.map(f => f.filename ?? f.path ?? f.new_path),
+                skippedFileCount: fileCount - selected.length,
+            },
         };
     }
 
-    // 8. Classify and route to auto-verdict.
-    const classification = classifyChanges(files, t);
     switch (classification) {
         case 'EMPTY':
             return { action: 'SKIP', reason: 'no_files_changed' };
@@ -127,13 +225,16 @@ export function evaluateSkipRules(pr, opts = {}) {
                 classification,
             };
         case 'DOCS_ONLY':
-        case 'TESTS_ONLY':
             return {
                 action: 'AUTO_VERDICT',
                 verdict: VERDICT.APPROVE,
                 reason: classification.toLowerCase(),
                 classification,
             };
+        case 'TESTS_ONLY':
+            // Reviewed like any other change — see the module note. Tagged so the
+            // prompt layer can bias toward assertion correctness and skipped tests.
+            return { action: 'REVIEW', classification, testsOnly: true };
         case 'CI_ONLY':
         case 'DEPS_ONLY':
             return {

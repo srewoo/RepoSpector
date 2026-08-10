@@ -54,6 +54,8 @@ import { createIndexingHandlers } from './handlers/indexingHandlers.js';
 import { createChatHandlers } from './handlers/chatHandlers.js';
 import { createGeneratorHandlers } from './handlers/generatorHandlers.js';
 import { createPrReviewHandlers } from './handlers/prReviewHandlers.js';
+import { parseHostList } from './handlers/settingsHandlers.js';
+import { setGitLabHosts, getGitLabHosts } from '../utils/gitHosts.js';
 
 class BackgroundService {
     constructor() {
@@ -251,6 +253,17 @@ class BackgroundService {
             if (settings && settings.apiKey) {
                 this.ragService.apiKey = settings.apiKey;
                 console.log('✅ RAG API key loaded on startup');
+            }
+
+            // Self-hosted GitLab instances must be registered before the first
+            // URL is parsed — platform detection reads this list, and a worker
+            // restart mid-session would otherwise forget the user's host.
+            try {
+                setGitLabHosts(parseHostList(settings?.gitlabHosts ?? settings?.gitlabHost));
+                const hosts = getGitLabHosts();
+                if (hosts.length > 1) console.log(`✅ GitLab hosts: ${hosts.join(', ')}`);
+            } catch (e) {
+                console.warn('Could not load GitLab host settings:', e?.message);
             }
 
             // Load EOL cache from storage
@@ -1747,7 +1760,7 @@ Format your response in a developer-friendly way with code examples where approp
         const settings = result.aiRepoSpectorSettings || {};
 
         // Decrypt all sensitive keys
-        const sensitiveKeys = ['apiKey', 'githubToken', 'gitlabToken', 'anthropicApiKey', 'googleApiKey', 'cohereApiKey', 'mistralApiKey', 'groqApiKey', 'huggingfaceApiKey'];
+        const sensitiveKeys = ['apiKey', 'githubToken', 'gitlabToken', 'jiraToken', 'anthropicApiKey', 'googleApiKey', 'cohereApiKey', 'mistralApiKey', 'groqApiKey', 'huggingfaceApiKey'];
 
         for (const key of sensitiveKeys) {
             if (settings[key]) {
@@ -1810,7 +1823,7 @@ Format your response in a developer-friendly way with code examples where approp
         });
 
         // Decrypt all sensitive keys
-        const sensitiveKeys = ['apiKey', 'githubToken', 'gitlabToken', 'anthropicApiKey', 'googleApiKey', 'cohereApiKey', 'mistralApiKey', 'groqApiKey', 'huggingfaceApiKey'];
+        const sensitiveKeys = ['apiKey', 'githubToken', 'gitlabToken', 'jiraToken', 'anthropicApiKey', 'googleApiKey', 'cohereApiKey', 'mistralApiKey', 'groqApiKey', 'huggingfaceApiKey'];
 
         // Track keys whose ciphertext is unreadable so we can wipe them from
         // storage in one write. Without this, every getStoredSettings() call

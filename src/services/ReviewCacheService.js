@@ -31,7 +31,28 @@ const DEFAULT_TTL_MS = 72 * 60 * 60 * 1000;  // 72h, matching Bastion's default
 const DEFAULT_MAX_ENTRIES = 50;
 
 /** Verdicts that must never be cached — see the module note. */
-const UNCACHEABLE_VERDICTS = new Set(['SKIP', 'DEFER']);
+const UNCACHEABLE_VERDICTS = new Set(['SKIP', 'DEFER', 'SKIPPED', 'DEFERRED']);
+
+/**
+ * The verdict of a report, whichever field the producer used.
+ *
+ * `store` only ever read `report.verdict`, but the multi-pass handler stores its
+ * `responseData`, which names the field `reviewVerdict`. So the guard above read
+ * `undefined` for every real call and the "SKIP/DEFER never touches the cache"
+ * hard rule was silently inert — gated runs were cached, then replayed as though
+ * they were reviews. Read every field a producer actually sets.
+ */
+function verdictOf(report) {
+    const raw = report?.verdict ?? report?.reviewVerdict ?? report?.gate?.outcome?.gateVerdict;
+    return String(raw ?? '').toUpperCase();
+}
+
+/** Would `report` be refused by the cache? Exported so callers can avoid the call. */
+export function isCacheableReport(report) {
+    if (!report) return false;
+    if (report.reviewSkipped === true) return false;
+    return !UNCACHEABLE_VERDICTS.has(verdictOf(report));
+}
 
 /**
  * Normalize a PR URL into a stable cache key.
@@ -138,7 +159,7 @@ export class ReviewCacheService {
         if (!key || !report) return false;
 
         // Never cache a short-circuit outcome.
-        if (UNCACHEABLE_VERDICTS.has(String(report.verdict || '').toUpperCase())) return false;
+        if (!isCacheableReport(report)) return false;
 
         const all = await this._readAll();
         all[key] = {

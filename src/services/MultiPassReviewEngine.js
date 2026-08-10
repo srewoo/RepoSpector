@@ -33,9 +33,24 @@ export class MultiPassReviewEngine {
         const { focusAreas = ['security', 'bugs', 'performance', 'style'] } = options;
         const maxConcurrent = options.maxConcurrent || 3;
 
-        // Service worker keepalive — ping every 25s to prevent MV3 termination
+        // Service-worker keepalive — every 25s, inside MV3's 30s idle window.
+        //
+        // This used to be `chrome.runtime.sendMessage({type:'KEEPALIVE'})`, which was
+        // a NO-OP twice over: nothing in the extension listens for `KEEPALIVE`, and
+        // Chrome does not deliver a service worker's own message back to itself — so
+        // the send rejected every time and the `.catch(() => {})` hid it. The worker
+        // could be torn down mid-review, which with `stream: false` is exactly the
+        // long quiet window where nothing else resets the timer.
+        //
+        // Calling an extension API that actually crosses into the browser process
+        // does reset it. `getPlatformInfo` is the cheapest such call and needs no
+        // permission.
         const keepAlive = setInterval(() => {
-            try { chrome.runtime.sendMessage({ type: 'KEEPALIVE' }).catch(() => {}); } catch (e) { /* ignore */ }
+            try {
+                const info = chrome.runtime.getPlatformInfo?.();
+                // Chrome ≥ 99 returns a promise; older signatures take a callback.
+                if (info?.catch) info.catch(() => {});
+            } catch (e) { /* never let the keepalive break a review */ }
         }, 25000);
 
         try {
@@ -100,7 +115,9 @@ export class MultiPassReviewEngine {
                         // change was supposed to do. Both are optional — a review
                         // still runs (patch-only, as before) when they're absent.
                         fileContext: context.fileContext || null,
-                        intentBlock: context.intentBlock || ''
+                        intentBlock: context.intentBlock || '',
+                        // How much retrieved repo context this prompt may carry.
+                        contextBudget: context.contextBudget || null
                     });
 
                     const response = await this.llmService.streamChat(

@@ -8,6 +8,7 @@ import { DiffParser } from '../utils/diffParser.js';
 import { CODE_SELECTORS, SUPPORTED_LANGUAGES as _SUPPORTED_LANGUAGES } from '../utils/constants.js';
 import { Sanitizer } from '../utils/sanitizer.js';
 import { initDiffOverlay } from './diffOverlay.js';
+import { phaseLabelFor } from '../utils/reviewProgressLabel.js';
 import {
     cleanLineNumbers as cleanLineNumbersFn,
     cleanupExtractedCode as cleanupExtractedCodeFn,
@@ -2146,10 +2147,19 @@ class FloatingPanelManager {
             // could expose keys; this returns only booleans).
             const resp = await chrome.runtime.sendMessage({ type: 'GET_AUTO_REVIEW_SETTING' });
             if (resp?.enabled === true) {
-                // Auto-review runs a full review, which already indexes the repo.
+                // Index FIRST, then review. The background pipeline blocks on indexing
+                // itself (autoIndexOwnRepo defaults to 'blocking'), so ordering is
+                // guaranteed there rather than here — this branch used to comment that
+                // "a full review already indexes the repo", which was only true in the
+                // fire-and-forget sense: the review proceeded against an empty index,
+                // so the FIRST auto-review of a repo had no retrieval or code graph.
+                //
+                // The indicator follows the pipeline's own progress events, so a long
+                // first-time index reads as "Indexing" rather than a hung "Reviewing".
                 this.runBackgroundReview();
             } else if (resp?.autoIndexOnOpen === true) {
-                // No auto-review, but index the repo on open so context is ready.
+                // No auto-review, but index the repo on open so context is ready for
+                // whenever the user does ask for one.
                 this.runIndexOnOpen();
             }
         } catch (_e) { /* setting unavailable → skip */ }
@@ -2316,19 +2326,31 @@ class FloatingPanelManager {
             boxShadow: '0 4px 12px rgba(139, 92, 246, 0.25)',
             whiteSpace: 'nowrap'
         });
-        el.textContent = label;
+        // Label lives in its own span so the phase can be updated in place. A first
+        // review now blocks on indexing the repo, which on a large repo is by far the
+        // longest phase — a frozen "Reviewing" for minutes reads as a hang.
+        const labelEl = document.createElement('span');
+        labelEl.textContent = label;
+        el.appendChild(labelEl);
         const dots = document.createElement('span');
         Object.assign(dots.style, { display: 'inline-block', width: '18px', textAlign: 'left', marginLeft: '2px', letterSpacing: '1px' });
         el.appendChild(dots);
         document.body.appendChild(el);
         this._reviewingEl = el;
+        this._reviewingLabelEl = labelEl;
         let n = 0;
         this._reviewingTimer = setInterval(() => { n = (n % 3) + 1; dots.textContent = '.'.repeat(n); }, 400);
+    }
+
+    /** Update the indicator's phase text, if it is showing. */
+    updateReviewingIndicator(label) {
+        if (this._reviewingLabelEl && label) this._reviewingLabelEl.textContent = label;
     }
 
     hideReviewingIndicator() {
         if (this._reviewingTimer) { clearInterval(this._reviewingTimer); this._reviewingTimer = null; }
         if (this._reviewingEl) { this._reviewingEl.remove(); this._reviewingEl = null; }
+        this._reviewingLabelEl = null;
     }
 
     createToggleButton() {
@@ -2388,6 +2410,12 @@ class FloatingPanelManager {
             } else if (message.action === 'TOGGLE_PANEL') {
                 this.togglePanel();
                 sendResponse({ success: true });
+            } else if (message.type === 'PR_REVIEW_PROGRESS') {
+                // Keep the on-page indicator in step with the pipeline. Matters most
+                // for the indexing phase, which a first review now waits on and which
+                // can take minutes on a large repo.
+                const label = phaseLabelFor(message.data);
+                if (label) this.updateReviewingIndicator(label);
             }
             return true;
         });

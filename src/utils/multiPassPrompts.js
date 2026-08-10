@@ -1,5 +1,8 @@
 // Multi-pass PR review prompts for per-file analysis and aggregation
 
+import { formatPatchWithLineNumbers } from './patchLines.js';
+import { resolveBudget } from './reviewContextBudget.js';
+
 /**
  * Language-specific review rules injected into per-file prompts
  */
@@ -325,6 +328,8 @@ Report every real issue found in Steps 1-2. Each finding MUST have:
 Respond with ONLY a valid JSON object. No markdown, no explanation text outside the JSON.
 Assign confidence honestly: 0.9+ for certain issues, 0.6-0.8 for likely issues, below 0.5 for uncertain.
 Focus on CHANGED lines (+ lines), but use context lines to understand intent.
+Every diff is presented as numbered hunks: the number at the start of each line
+in \`__new hunk__\` IS that line's number in the file. Report it verbatim.
 If the code is genuinely clean with no issues, return an empty findings array — but this should be RARE. Most real-world diffs have at least one issue.`;
 
 export const AGGREGATION_SYSTEM_PROMPT = `You are RepoSpector performing the final synthesis of a multi-pass Pull Request review. You received structured per-file findings from individual file reviews.
@@ -365,6 +370,10 @@ export function buildPRContextSummary(prData) {
  * Build per-file review prompt
  * @param {Object} unit - ReviewUnit from FileGroupingStrategy
  * @param {Object} context - { prContext, focusAreas, ragChunks, staticFindings, languageRules }
+ * @returns {Array<{text: string, cache?: boolean}>} content parts — the shared
+ *   preamble first (marked cacheable), then this unit's own material. Pass
+ *   straight through as a message's `content`; LLMService joins them for any
+ *   provider that has no cache-breakpoint format.
  */
 export function buildPerFileReviewPrompt(unit, context = {}) {
     const {
@@ -379,7 +388,10 @@ export function buildPerFileReviewPrompt(unit, context = {}) {
         // Phase 2 additions — see ReviewFileContextService / reviewIntentContext.
         fileContext = null,   // Map<filename, {fullContent, testPath, testContent, testFileMissing}>
         intentBlock = '',     // rendered Jira / pipeline / description context
+        contextBudget = null, // see reviewContextBudget.js; defaults when absent
     } = context;
+
+    const budget = resolveBudget({ overrides: contextBudget || undefined });
 
     const primaryLang = unit.files[0]?.language || 'unknown';
     // Tolerate a caller that passes a pre-rendered string: fall back to the real
@@ -389,11 +401,22 @@ export function buildPerFileReviewPrompt(unit, context = {}) {
         : getLanguageRules(primaryLang);
 
     // ── Section 1: PR Context (brief) ──
-    let prompt = `## PR Context
+    //
+    // Identical for every review unit in the PR, and first in the prompt, so it
+    // forms the head of a prefix shared by all of them.
+    //
+    // The file list is NOT filtered to exclude this unit's own files, though
+    // that reads like the obvious thing to do and is what this did before. A
+    // per-unit filter makes line 1 of the prompt different for every call, and
+    // since caching is a prefix match, that alone defeated caching for the whole
+    // per-file pass. The unfiltered list is also the more accurate statement —
+    // it is what the PR touches — and the diff below already tells the model
+    // which files it is being asked about.
+    let preamble = `## PR Context
 - **Title**: ${prContext?.title || 'Unknown'}
 - **Purpose**: ${prContext?.purpose || 'No description'}
 - **Branch**: \`${prContext?.sourceBranch || '?'}\` → \`${prContext?.targetBranch || '?'}\`
-- **Other files in this PR**: ${(prContext?.otherFiles || []).filter(f => !unit.files.some(uf => uf.filename === f)).slice(0, 15).join(', ') || 'none'}
+- **Files in this PR**: ${(prContext?.otherFiles || []).slice(0, 15).join(', ') || 'none'}
 
 ---
 
@@ -404,31 +427,31 @@ export function buildPerFileReviewPrompt(unit, context = {}) {
     // "is this the change that was asked for?". Bastion treats an unmet
     // acceptance criterion as a legitimate finding; so do we.
     if (intentBlock && String(intentBlock).trim()) {
-        prompt += `${String(intentBlock).trim()}\n\n---\n\n`;
+        preamble += `${String(intentBlock).trim()}\n\n---\n\n`;
     }
 
     // ── Section 2: Language rules FIRST (so LLM reads rules before the diff) ──
-    prompt += `## Language-Specific Checks for ${primaryLang} — APPLY THESE TO EVERY LINE IN THE DIFF\n\n`;
+    preamble += `## Language-Specific Checks for ${primaryLang} — APPLY THESE TO EVERY LINE IN THE DIFF\n\n`;
     if (rules.deprecated?.length) {
-        prompt += `### Deprecated APIs (flag EVERY occurrence):\n`;
-        for (const d of rules.deprecated) prompt += `- ${d}\n`;
+        preamble += `### Deprecated APIs (flag EVERY occurrence):\n`;
+        for (const d of rules.deprecated) preamble += `- ${d}\n`;
     }
     if (rules.securityChecks?.length) {
-        prompt += `\n### Security Patterns (flag if found):\n`;
-        for (const s of rules.securityChecks) prompt += `- ${s}\n`;
+        preamble += `\n### Security Patterns (flag if found):\n`;
+        for (const s of rules.securityChecks) preamble += `- ${s}\n`;
     }
     if (rules.patterns?.length) {
-        prompt += `\n### Common Bugs (flag if found):\n`;
-        for (const p of rules.patterns) prompt += `- ${p}\n`;
+        preamble += `\n### Common Bugs (flag if found):\n`;
+        for (const p of rules.patterns) preamble += `- ${p}\n`;
     }
     if (rules.performanceChecks?.length) {
-        prompt += `\n### Performance Anti-patterns:\n`;
-        for (const p of rules.performanceChecks) prompt += `- ${p}\n`;
+        preamble += `\n### Performance Anti-patterns:\n`;
+        for (const p of rules.performanceChecks) preamble += `- ${p}\n`;
     }
 
     // Focus areas
     if (focusAreas.length > 0) {
-        prompt += `\n**Additional Focus**: ${focusAreas.join(', ')}\n`;
+        preamble += `\n**Additional Focus**: ${focusAreas.join(', ')}\n`;
     }
 
     // ── Section 2a: Written standards (bundled, or org-synced) ──
@@ -436,7 +459,7 @@ export function buildPerFileReviewPrompt(unit, context = {}) {
     // sanitised upstream (StandardsSyncService.sanitize) precisely because it can
     // come from a remote document.
     if (standardsText && String(standardsText).trim()) {
-        prompt += `\n### Written Coding Standards
+        preamble += `\n### Written Coding Standards
 Cite the rule ID in \`rule\` when a finding violates one of these.
 
 ${String(standardsText).slice(0, 6000)}
@@ -448,7 +471,7 @@ ${String(standardsText).slice(0, 6000)}
     // the findings a generic reviewer structurally cannot produce, so they get
     // their own heading rather than being buried in the generic rules.
     if (conventionBlock && String(conventionBlock).trim()) {
-        prompt += `\n### This Repository's Own Review Conventions (mined from past review comments)
+        preamble += `\n### This Repository's Own Review Conventions (mined from past review comments)
 These are what THIS team actually asks for in review. Violations are real findings,
 usually severity medium, category "conventions". Cite the convention in \`rule\`.
 
@@ -456,41 +479,49 @@ ${String(conventionBlock).trim()}
 `;
     }
 
+    // ── Sections 3+ are per-unit: static findings, retrieved chunks, the
+    // code-graph slice for these files, and the diff itself. They start a
+    // new part so the shared preamble above can carry the cache breakpoint.
+    let rest = '';
+
     // ── Section 3: Static analysis findings (if any) ──
     if (staticFindings && staticFindings.length > 0) {
-        prompt += `\n---\n\n## Pre-detected Static Analysis Findings\n`;
+        rest += `\n---\n\n## Pre-detected Static Analysis Findings\n`;
         for (const f of staticFindings.slice(0, 10)) {
-            prompt += `- **${(f.severity || 'info').toUpperCase()}** [${f.ruleId || f.category || 'rule'}] ${f.filePath || ''}:${f.line || '?'} — ${f.message}\n`;
+            rest += `- **${(f.severity || 'info').toUpperCase()}** [${f.ruleId || f.category || 'rule'}] ${f.filePath || ''}:${f.line || '?'} — ${f.message}\n`;
         }
-        prompt += `\nValidate these AND find issues the static analyzers missed.\n`;
+        rest += `\nValidate these AND find issues the static analyzers missed.\n`;
     }
 
     // ── Section 4: RAG context ──
+    // Budgets come from `reviewContextBudget` rather than literals here: the
+    // repo is fully indexed, so how much of it reaches the model is a tuning
+    // decision the eval harness has to be able to vary.
     if (ragChunks && ragChunks.length > 0) {
-        prompt += `\n---\n\n## Related Repository Code (for understanding context)\n`;
-        for (const chunk of ragChunks.slice(0, 3)) {
+        rest += `\n---\n\n## Related Repository Code (for understanding context)\n`;
+        for (const chunk of ragChunks.slice(0, budget.ragChunks)) {
             const source = chunk.filePath || chunk.file || 'context';
-            const content = (chunk.content || chunk.text || '').substring(0, 600);
-            prompt += `\`\`\`\n// ${source}\n${content}\n\`\`\`\n\n`;
+            const content = (chunk.content || chunk.text || '').substring(0, budget.ragChunkChars);
+            rest += `\`\`\`\n// ${source}\n${content}\n\`\`\`\n\n`;
         }
     }
 
     // ── Section 4b: Code-graph cross-file context ──
     if (graphContext && String(graphContext).trim()) {
-        prompt += `\n---\n\n## Cross-File Context from the Code Knowledge Graph
+        rest += `\n---\n\n## Cross-File Context from the Code Knowledge Graph
 Use this to catch issues that depend on code OUTSIDE this diff — callers that would break, callees whose contract changed, functions the changed symbols impact. If a changed signature/behavior breaks one of these callers, that is a finding.
 
-${String(graphContext).slice(0, 4000)}
+${String(graphContext).slice(0, budget.graphContextChars)}
 `;
     }
 
     // ── Section 5: The diff (LAST — so LLM applies rules while reading it) ──
-    prompt += `\n---\n\n## Files Under Review — APPLY ALL CHECKS ABOVE TO EVERY + LINE\n\n`;
+    rest += `\n---\n\n## Files Under Review — APPLY ALL CHECKS ABOVE TO EVERY + LINE\n\n`;
 
     for (const f of unit.files) {
         const ctx = fileContext?.get?.(f.filename) || null;
 
-        prompt += `### File: ${f.filename} (${f.status || 'modified'})
+        rest += `### File: ${f.filename} (${f.status || 'modified'})
 **Language**: ${f.language || 'unknown'} | **Changes**: +${f.additions || 0} -${f.deletions || 0}
 
 `;
@@ -500,7 +531,7 @@ ${String(graphContext).slice(0, 4000)}
         // this break the caller below", "is this the right abstraction", or
         // "is this state already tracked elsewhere in the file".
         if (ctx?.fullContent) {
-            prompt += `#### Full file after the change${ctx.truncated ? ' (truncated to fit budget)' : ''}
+            rest += `#### Full file after the change${ctx.truncated ? ' (truncated to fit budget)' : ''}
 Use this for context and to judge whether the change fits the file. Only report issues on lines the diff below actually touches.
 
 \`\`\`${f.language || ''}
@@ -512,7 +543,7 @@ ${ctx.fullContent}
 
         // The test file — present or conspicuously absent.
         if (ctx?.testPath && ctx.testContent) {
-            prompt += `#### Existing test file: ${ctx.testPath}
+            rest += `#### Existing test file: ${ctx.testPath}
 Check that the behavior changed in the diff is actually covered here. A changed
 branch, error path, or signature with no corresponding test change is a finding.
 
@@ -522,7 +553,7 @@ ${ctx.testContent}
 
 `;
         } else if (ctx?.testFileMissing) {
-            prompt += `#### Test file: NONE FOUND
+            rest += `#### Test file: NONE FOUND
 No test file was located for this source file. If this diff adds or changes an
 exported/public function, missing test coverage is a legitimate finding — report
 it once for this file, not once per function.
@@ -530,9 +561,18 @@ it once for this file, not once per function.
 `;
         }
 
-        prompt += `#### Diff — THIS is what you are reviewing
-\`\`\`diff
-${f.patch || 'No patch available'}
+        // Line-numbered hunks, not a raw ```diff block. The model previously had
+        // to count lines from the @@ header to name a location, and got it wrong
+        // silently — a correct finding on the wrong line still reads as
+        // authoritative. The number is now printed next to the code, so `line`
+        // is a value to COPY rather than compute.
+        rest += `#### Diff — THIS is what you are reviewing
+Each line in \`__new hunk__\` is prefixed with its REAL line number in the file.
+Lines marked \`+\` are added by this PR. Lines in \`__old hunk__\` were REMOVED —
+never report a finding against them; the PR has already deleted that code.
+
+\`\`\`
+${formatPatchWithLineNumbers(f.patch, f.filename)}
 \`\`\`
 
 `;
@@ -540,7 +580,7 @@ ${f.patch || 'No patch available'}
 
     // ── Section 6: Required output ──
     const fileNames = unit.files.map(f => `"${f.filename}"`).join(' or ');
-    prompt += `---
+    rest += `---
 
 ## Required Response — JSON ONLY
 
@@ -555,7 +595,7 @@ Respond with ONLY a JSON object. No markdown fences. No text before or after.
     {
       "id": "F1",
       "file": "filename_where_issue_is",
-      "line": 42,
+      "line": 42,                        // COPY the number shown in __new hunk__; do not count lines
       "severity": "critical | high | medium | low",
       "type": "security | bug | performance | style | deprecated",
       "cwe": "CWE-ID or null",
@@ -580,9 +620,20 @@ IMPORTANT REMINDERS:
 - Check every function call against the deprecated list above. Each deprecated call = one finding.
 - If a filter/query/condition changed, report what behavior changed and whether it's intentional.
 - "missing tests" go in testCoverage, NEVER in findings.
-- Every finding needs a specific line number and a concrete fix.`;
+- Every finding needs a specific line number and a concrete fix.
+- The line number MUST be one printed in the \`__new hunk__\` gutter for that file.
+  Do not compute it, do not offset it, do not cite a line from \`__old hunk__\`.`;
 
-    return prompt;
+    // Two parts, not one string, so the transport can put a cache breakpoint at
+    // the end of the shared preamble. The per-file pass makes one call per
+    // review unit and every one of them re-sends that preamble — PR context,
+    // intent, language rules, the standards block (up to 6KB), and the mined
+    // conventions — unchanged. Providers with no breakpoint format receive the
+    // two joined, which is exactly the string this returned before.
+    return [
+        { text: preamble, cache: true },
+        { text: rest },
+    ];
 }
 
 /**

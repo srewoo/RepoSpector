@@ -2,115 +2,47 @@
  * GitLabService - Fetch repository files from GitLab API
  */
 
+import { gitlabApiBase, hostOf, rememberGitLabHost } from '../utils/gitHosts.js';
+import {
+    CODE_EXTENSIONS,
+    EXCLUDE_EXTENSIONS,
+    EXCLUDE_DIRS,
+    MAX_FILE_SIZE,
+    filterIndexableFiles,
+} from '../utils/codeFileFilter.js';
+
 export class GitLabService {
     constructor(token = null) {
         this.token = token;
         this.baseUrl = 'https://gitlab.com/api/v4';
 
-        // Code file extensions to index (including documentation) - matches GitHubService
-        this.codeExtensions = [
-            // JavaScript/TypeScript
-            'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs',
-            // Python
-            'py', 'pyw', 'pyx', 'pyi',
-            // Java/JVM
-            'java', 'kt', 'scala', 'groovy',
-            // Go
-            'go',
-            // Rust
-            'rs',
-            // Ruby
-            'rb', 'rake',
-            // PHP
-            'php', 'phtml',
-            // C/C++
-            'c', 'cpp', 'cc', 'cxx', 'h', 'hpp', 'hxx',
-            // C#/.NET
-            'cs', 'vb', 'fs',
-            // Swift
-            'swift',
-            // Dart
-            'dart',
-            // Shell scripts
-            'sh', 'bash', 'zsh',
-            // Config files (useful for context)
-            'yaml', 'yml', 'json', 'toml', 'ini',
-            // Query languages
-            'sql', 'graphql',
-            // Web frameworks
-            'vue', 'svelte',
-            // Documentation (IMPORTANT for context!)
-            'md', 'markdown', 'mdx', 'txt', 'rst',
-            // Other useful files
-            'proto', 'thrift', 'gradle', 'cmake'
-        ];
-
-        // File extensions to EXCLUDE (ignore these completely)
-        this.excludeExtensions = [
-            // Styles
-            'css', 'scss', 'sass', 'less', 'styl',
-            // Images
-            'png', 'jpg', 'jpeg', 'gif', 'svg', 'ico', 'webp', 'bmp', 'tiff',
-            // Media
-            'mp4', 'avi', 'mov', 'wmv', 'flv', 'mp3', 'wav', 'ogg',
-            // Archives
-            'zip', 'tar', 'gz', 'rar', '7z', 'bz2',
-            // Databases
-            'db', 'sqlite', 'sqlite3', 'mdb', 'accdb',
-            // Binary/Compiled
-            'exe', 'dll', 'so', 'dylib', 'o', 'obj', 'class', 'jar', 'war',
-            // Lock files
-            'lock', 'lockb',
-            // Map files
-            'map',
-            // Fonts
-            'woff', 'woff2', 'ttf', 'eot', 'otf',
-            // Other binary/non-code
-            'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx'
-        ];
-
-        // Directories to exclude
-        this.excludeDirs = [
-            'node_modules',
-            'vendor',
-            'dist',
-            'build',
-            '.git',
-            '.gitlab',
-            'coverage',
-            '__pycache__',
-            '.pytest_cache',
-            '.venv',
-            'venv',
-            'env',
-            '.idea',
-            '.vscode',
-            'target',  // Maven/Rust
-            'out',
-            'bin'
-        ];
-
-        // No hard file cap — extension/directory filters and MAX_FILE_SIZE
-        // are the natural limits. All matching code files get indexed.
+        // Shared with GitHubService via `codeFileFilter` — see that module for why
+        // two hand-maintained copies of these lists were a problem.
+        this.codeExtensions = [...CODE_EXTENSIONS];
+        this.excludeExtensions = [...EXCLUDE_EXTENSIONS];
+        this.excludeDirs = [...EXCLUDE_DIRS];
     }
 
     /**
      * Parse GitLab URL to extract project path
      * @param {string} url - GitLab URL
-     * @returns {{projectPath: string, branch: string} | null}
+     * @returns {{projectPath: string, branch: string, host: string|null, apiBase: string} | null}
      */
     parseGitLabUrl(url) {
         // GitLab supports nested groups: gitlab.com/group/subgroup/project
         // We need to match everything before /-/ or end of URL
         console.log('🔍 Parsing GitLab URL:', url);
 
+        // Host-agnostic: a self-hosted instance serves the exact same routes, and
+        // pinning these patterns to gitlab.com meant every internal repo URL
+        // failed to parse and could not be indexed at all.
         const patterns = [
-            // With branch (tree or blob): gitlab.com/path/to/project/-/tree/branch or /-/blob/branch
-            /gitlab\.com\/(.+?)\/-\/(?:tree|blob)\/([^/]+)/,
-            // Without branch but with /-/: gitlab.com/path/to/project/-/
-            /gitlab\.com\/(.+?)\/-\//,
-            // Simple format: gitlab.com/path/to/project (no /-/)
-            /gitlab\.com\/([^?#]+)/
+            // With branch (tree or blob): <host>/path/to/project/-/tree/branch or /-/blob/branch
+            /^https?:\/\/[^/]+\/(.+?)\/-\/(?:tree|blob)\/([^/]+)/,
+            // Without branch but with /-/: <host>/path/to/project/-/
+            /^https?:\/\/[^/]+\/(.+?)\/-\//,
+            // Simple format: <host>/path/to/project (no /-/)
+            /^https?:\/\/[^/]+\/([^?#]+)/
         ];
 
         for (const pattern of patterns) {
@@ -130,9 +62,14 @@ export class GitLabService {
                     pattern: pattern.toString()
                 });
 
+                // Carry the instance forward: every API call below must target
+                // the host the URL came from, not the public one.
+                rememberGitLabHost(url);
                 return {
                     projectPath: projectPath,
-                    branch: branch
+                    branch: branch,
+                    host: hostOf(url),
+                    apiBase: gitlabApiBase(url)
                 };
             }
         }
@@ -155,7 +92,7 @@ export class GitLabService {
      * @param {string} projectPath
      * @returns {Promise<string>}
      */
-    async getDefaultBranch(projectPath) {
+    async getDefaultBranch(projectPath, apiBase = this.baseUrl) {
         const encoded = this.encodeProjectPath(projectPath);
         const headers = {
             'Content-Type': 'application/json'
@@ -167,7 +104,7 @@ export class GitLabService {
 
         try {
             const response = await fetch(
-                `${this.baseUrl}/projects/${encoded}`,
+                `${apiBase}/projects/${encoded}`,
                 { headers }
             );
 
@@ -201,7 +138,7 @@ export class GitLabService {
      * @param {string} branch
      * @returns {Promise<Array>}
      */
-    async fetchRepoTree(projectPath, branch = null) {
+    async fetchRepoTree(projectPath, branch = null, apiBase = this.baseUrl) {
         // If no branch specified, get the default branch
         if (!branch) {
             branch = await this.getDefaultBranch(projectPath);
@@ -228,7 +165,7 @@ export class GitLabService {
 
             while (page <= MAX_PAGES) {
                 const response = await fetch(
-                    `${this.baseUrl}/projects/${encoded}/repository/tree?recursive=true&ref=${branch}&per_page=100&page=${page}`,
+                    `${apiBase}/projects/${encoded}/repository/tree?recursive=true&ref=${branch}&per_page=100&page=${page}`,
                     { headers }
                 );
 
@@ -286,30 +223,17 @@ export class GitLabService {
      * @param {Array} tree
      * @returns {Array}
      */
+    /**
+     * Filter a repo tree down to the files worth indexing.
+     * Shared implementation — see `GitHubService.filterCodeFiles`.
+     */
     filterCodeFiles(tree) {
-        return tree
-            .filter(item => item.type === 'blob') // Only files, not directories
-            .filter(item => {
-                // Check if file is in excluded directory
-                const pathParts = item.path.split('/');
-                const isInExcludedDir = pathParts.some(part =>
-                    this.excludeDirs.includes(part)
-                );
-                if (isInExcludedDir) {
-                    return false;
-                }
-
-                // Get file extension
-                const ext = item.path.split('.').pop().toLowerCase();
-
-                // First check exclusion list (explicit deny)
-                if (this.excludeExtensions.includes(ext)) {
-                    return false;
-                }
-
-                // Then check inclusion list (explicit allow)
-                return this.codeExtensions.includes(ext);
-            });
+        return filterIndexableFiles(tree, {
+            codeExtensions: this.codeExtensions,
+            excludeExtensions: this.excludeExtensions,
+            excludeDirs: this.excludeDirs,
+            maxFileSize: MAX_FILE_SIZE,
+        });
     }
 
     /**
@@ -319,7 +243,7 @@ export class GitLabService {
      * @param {string} branch
      * @returns {Promise<string>}
      */
-    async fetchFileContent(projectPath, filePath, branch = 'main') {
+    async fetchFileContent(projectPath, filePath, branch = 'main', apiBase = this.baseUrl) {
         const encoded = this.encodeProjectPath(projectPath);
         const encodedPath = encodeURIComponent(filePath);
         const headers = {
@@ -330,7 +254,7 @@ export class GitLabService {
             headers['PRIVATE-TOKEN'] = this.token;
         }
 
-        const url = `${this.baseUrl}/projects/${encoded}/repository/files/${encodedPath}/raw?ref=${branch}`;
+        const url = `${apiBase}/projects/${encoded}/repository/files/${encodedPath}/raw?ref=${branch}`;
 
         try {
             const response = await fetch(url, { headers });
@@ -374,17 +298,18 @@ export class GitLabService {
         }
 
         let { projectPath, branch } = parsed;
+        const apiBase = parsed.apiBase || this.baseUrl;
         console.log('🌿 Detected branch from URL:', branch || '(will auto-detect)');
 
         // Resolve the branch if not specified
         if (!branch) {
-            branch = await this.getDefaultBranch(projectPath);
+            branch = await this.getDefaultBranch(projectPath, apiBase);
             console.log('📌 Using resolved branch:', branch);
         }
 
         // Fetch tree
         if (onProgress) onProgress({ status: 'fetching_tree', message: 'Fetching repository structure...' });
-        const { tree, truncated } = await this.fetchRepoTree(projectPath, branch);
+        const { tree, truncated } = await this.fetchRepoTree(projectPath, branch, apiBase);
 
         if (truncated && onProgress) {
             onProgress({
@@ -418,7 +343,15 @@ export class GitLabService {
             // Download batch in parallel with retry
             const batchPromises = batch.map(async (file) => {
                 try {
-                    const content = await this.fetchFileContentWithRetry(projectPath, file.path, branch);
+                    const content = await this.fetchFileContentWithRetry(projectPath, file.path, branch, 3, apiBase);
+                    // Post-download size guard. GitLab's tree entries carry no `size`,
+                    // so the pre-download filter cannot catch an oversized blob here —
+                    // and a multi-megabyte generated file would otherwise be chunked
+                    // and embedded in full, which is slow and pollutes retrieval.
+                    if (content && content.length > MAX_FILE_SIZE) {
+                        console.warn(`⏭️  Skipping ${file.path}: ${content.length} bytes exceeds the ${MAX_FILE_SIZE}-byte index limit`);
+                        return null;
+                    }
                     if (content) {
                         return { path: file.path, content };
                     }
@@ -464,12 +397,12 @@ export class GitLabService {
      * Fetch file content with retry logic
      * RELIABILITY: Retries up to 3 times with exponential backoff
      */
-    async fetchFileContentWithRetry(projectPath, path, branch, maxRetries = 3) {
+    async fetchFileContentWithRetry(projectPath, path, branch, maxRetries = 3, apiBase = this.baseUrl) {
         let lastError;
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                const content = await this.fetchFileContent(projectPath, path, branch);
+                const content = await this.fetchFileContent(projectPath, path, branch, apiBase);
                 return content;
             } catch (error) {
                 lastError = error;

@@ -31,8 +31,14 @@ import { VERDICT } from '../../services/reviewSchema.js';
 import { detectLanguages, buildStandardsBlock } from '../../utils/standardsLoader.js';
 import { FindingVerificationService } from '../../services/FindingVerificationService.js';
 import { FixRecommendationService } from '../../services/FixRecommendationService.js';
+import { SuggestionScorer } from '../../services/SuggestionScorer.js';
 import { ReviewGraphContextService } from '../../services/ReviewGraphContextService.js';
 import { MultiFinderService } from '../../services/MultiFinderService.js';
+import { RepoExplorerService } from '../../services/RepoExplorerService.js';
+import { freshFindings } from '../../utils/findingDedup.js';
+import { assessGraphCoverage, graphCoverageWarning } from '../../utils/graphCoverage.js';
+import { shouldExplore } from '../../utils/modelCapabilities.js';
+import { LLMService } from '../../services/LLMService.js';
 import { OffscreenLintService } from '../../services/OffscreenLintService.js';
 import { ReviewCrossRepoService } from '../../services/ReviewCrossRepoService.js';
 import { buildBrief } from '../../services/MRChunker.js';
@@ -51,12 +57,86 @@ import { collectPriorBotComments, suppressAlreadyPosted } from '../../utils/comm
 import { stripFeedbackFooter } from '../../utils/feedbackFooter.js';
 import { ReviewFileContextService } from '../../services/ReviewFileContextService.js';
 import { buildIntentBlock } from '../../utils/reviewIntentContext.js';
+import { LinkedIssueService } from '../../services/LinkedIssueService.js';
+import { resolveBudget } from '../../utils/reviewContextBudget.js';
 import { FeedbackCollectorService } from '../../services/FeedbackCollectorService.js';
 import {
     ReviewCacheService,
     CACHE_STATUS,
     renderPrimingContext
 } from '../../services/ReviewCacheService.js';
+import { detectPlatformOrGitHub, gitlabApiBase, parseRepoRef } from '../../utils/gitHosts.js';
+
+/**
+ * Load `.repospector.yaml` for the repo a PR/MR belongs to.
+ *
+ * Both call sites used to inline `prUrl.match(/(?:github\.com|gitlab\.com)\/([^/]+)\/([^/]+)/)`,
+ * which never matched a self-hosted GitLab URL and mis-parsed subgroup paths — so
+ * repo config (custom rules, model pin, severity floor, cross-repo workspace) was
+ * silently unavailable to most enterprise GitLab users. One helper, host-aware.
+ *
+ * @returns {Promise<object|null>} validated config, or null when there is none
+ */
+async function loadRepoConfig(svc, prUrl, settings) {
+    try {
+        const ref = parseRepoRef(prUrl);
+        if (!ref) {
+            console.warn(`Could not identify a repo in ${prUrl}; skipping .repospector.yaml`);
+            return null;
+        }
+        const token = ref.platform === 'gitlab' ? settings.gitlabToken : settings.githubToken;
+        return await svc.customRulesService.fetchConfig(
+            ref.platform, ref.owner, ref.repo, token,
+            { projectPath: ref.projectPath, apiBase: gitlabApiBase(prUrl) },
+        );
+    } catch (e) {
+        console.warn('Failed to fetch custom config:', e.message);
+        return null;
+    }
+}
+
+/**
+ * Repository URL for a PR/MR URL — everything before the `/pull/` or
+ * `/merge_requests/` route. Used to fetch the repo tree for indexing.
+ */
+function repoUrlFromPrUrl(prUrl) {
+    return String(prUrl).split(/\/(?:pull|pull-requests|-\/merge_requests|merge_requests)\//)[0];
+}
+
+/**
+ * The ticket this PR says it implements, or null.
+ *
+ * Kept soft and out of the critical path: a tracker that is unreachable,
+ * private, or simply not referenced must cost the review nothing. Every failure
+ * mode collapses to null and the reviewer proceeds on the diff alone, which is
+ * exactly what it did before this lookup existed.
+ */
+async function resolveLinkedIssue(svc, prUrl, prData) {
+    try {
+        const prs = svc.pullRequestService;
+        const prInfo = prs.parsePullRequestUrl(prUrl);
+        if (!prInfo) return null;
+
+        // Reuse the tokens updatePRServiceTokens already resolved for this run
+        // rather than reading storage a second time.
+        // Jira credentials are optional and read fresh: a team that configures
+        // them mid-session should not have to reload the extension.
+        const stored = await svc.getStoredSettings();
+        const service = new LinkedIssueService({
+            githubToken: prs.githubToken,
+            gitlabToken: prs.gitlabToken,
+            githubBaseUrl: prs.githubBaseUrl,
+            gitlabBaseUrl: prs.gitlabBaseUrl,
+            jiraBaseUrl: stored.jiraBaseUrl,
+            jiraEmail: stored.jiraEmail,
+            jiraToken: stored.jiraToken,
+        });
+        return await service.fetchForPR(prData, prInfo);
+    } catch (e) {
+        console.warn('Linked-issue lookup failed (non-fatal):', e?.message);
+        return null;
+    }
+}
 
 /** Stable identity for a finding — used to dedupe carried vs freshly derived. */
 function findingKey(f) {
@@ -84,6 +164,63 @@ function onIncrementalProgress(prUrl, plan) {
             }
         }).catch(() => { });
     } catch { /* popup may be closed */ }
+}
+
+/**
+ * Did a skip rule short-circuit this review, and if so what should we report?
+ *
+ * A gated run legitimately produces zero findings, so "no blocking findings"
+ * cannot be read as "approved" — the pipeline never looked. Returns null for a
+ * genuine review (gate.action === 'REVIEW', or the legacy engine path which has
+ * no gate), letting the caller fall back to the finding-count verdict.
+ *
+ * `reviewEvent` is deliberately COMMENT for every non-approving outcome: the
+ * popup forwards it straight to the host, and neither APPROVE nor
+ * REQUEST_CHANGES is an honest thing to say about a PR we declined to read.
+ *
+ * @param {object} result - engine/adapter result (carries `_orchestrated`)
+ * @returns {{verdict:string, reviewEvent:string, gateVerdict:string, reason:string}|null}
+ */
+export function describeGateOutcome(result) {
+    const gate = result?._orchestrated?.meta?.gate ?? result?.gate ?? null;
+    const action = String(gate?.action ?? '').toUpperCase();
+
+    if (action === 'REVIEW' || !action) {
+        // A PARTIAL review is a real review, so the finding count governs — except
+        // that it may never APPROVE. It deliberately did not read every file, and
+        // "approved" on an unread file is the same false assurance a silent SKIP
+        // gave. Blocking findings still yield REQUEST_CHANGES: those were found in
+        // code it actually read.
+        if (gate?.partial?.skippedFileCount > 0) {
+            return {
+                partialOnly: true,
+                verdict: 'NEEDS_DISCUSSION',
+                reviewEvent: 'COMMENT',
+                gateVerdict: 'PARTIAL',
+                reason: gate.partial.reason,
+            };
+        }
+        return null;
+    }
+
+    const reason = gate.reason || gate.classification || action.toLowerCase();
+
+    if (action === 'SKIP') {
+        return { verdict: 'SKIPPED', reviewEvent: 'COMMENT', gateVerdict: 'SKIP', reason };
+    }
+    if (action === 'DEFER') {
+        return { verdict: 'DEFERRED', reviewEvent: 'COMMENT', gateVerdict: 'DEFER', reason };
+    }
+    if (action === 'AUTO_VERDICT') {
+        // The only auto-verdict that may approve is one the rule explicitly
+        // chose to approve (docs-only). Everything else is a discussion prompt.
+        const approved = String(gate.verdict ?? '').toUpperCase() === 'APPROVE';
+        return approved
+            ? { verdict: 'APPROVED', reviewEvent: 'APPROVE', gateVerdict: 'APPROVE', reason }
+            : { verdict: 'NEEDS_DISCUSSION', reviewEvent: 'COMMENT', gateVerdict: String(gate.verdict ?? 'NEEDS_DISCUSSION'), reason };
+    }
+    // Unknown action — be conservative rather than approving.
+    return { verdict: 'NEEDS_DISCUSSION', reviewEvent: 'COMMENT', gateVerdict: action, reason };
 }
 
 /**
@@ -129,6 +266,9 @@ function adaptOrchestratorReport(report) {
         processingTime: report.meta?.durationMs ?? 0,
         isMultiPass: true,
         verdict: report.verdict,
+        // Carried so the response verdict can tell "nothing was wrong" apart from
+        // "nothing was reviewed" without reaching into `_orchestrated`.
+        gate: report.meta?.gate ?? null,
     };
 }
 
@@ -154,7 +294,7 @@ export function createPrReviewHandlers(svc) {
     // id and everything looked "not indexed". Always prefer the URL-derived path.
     function canonicalRepoId(prUrl, prData) {
         try {
-            const platform = prUrl.includes('gitlab.com') ? 'gitlab' : 'github';
+            const platform = detectPlatformOrGitHub(prUrl);
             const service = platform === 'gitlab' ? svc.gitlabService : svc.githubService;
             const id = service?.getRepoId?.(prUrl);
             if (id) return id;
@@ -192,14 +332,19 @@ export function createPrReviewHandlers(svc) {
             if (!indexed) { try { indexed = await svc.ragService?.vectorStore?.isIndexed?.(repoId); } catch { /* ignore */ } }
             if (indexed) { sendResponse({ success: true, alreadyIndexed: true, repoId }); return; }
 
-            const repoUrl = prUrl.split(/\/(?:pull|-\/merge_requests|merge_requests)\//)[0];
-            const platform = prUrl.includes('gitlab.com') ? 'gitlab' : 'github';
+            const repoUrl = repoUrlFromPrUrl(prUrl);
+            const platform = detectPlatformOrGitHub(prUrl);
             const service = platform === 'gitlab' ? svc.gitlabService : svc.githubService;
             const files = await service.fetchRepositoryFiles(repoUrl);
             await svc.ragService.init();
             await svc.ragService.indexRepositoryIncremental(repoId, files);
             await svc.codeGraphPipeline.updateGraph(repoId, files);
             console.log(`📚 Indexed ${repoId} on open (${files.length} files)`);
+            // The graph parses far fewer languages than the index accepts. Say so
+            // when most of the repo is unparseable, or the cross-file findings
+            // simply go missing with no explanation.
+            const coverageWarning = graphCoverageWarning(assessGraphCoverage(files));
+            if (coverageWarning) console.warn(`⚠️ ${coverageWarning}`);
             sendResponse({ success: true, indexed: true, repoId });
         } catch (e) {
             console.warn('Index-on-open failed:', e?.message);
@@ -209,7 +354,7 @@ export function createPrReviewHandlers(svc) {
 
     /** Content-script-safe: run a full review, but ONLY if auto-review is enabled
      *  server-side (so a page script can't trigger reviews unless the user opted in). */
-    async function handleAutoReviewPr(message, sendResponse) {
+    async function handleAutoReviewPr(message, sendResponse, sender = null) {
         const { prUrl } = message.data || {};
         if (!prUrl) { sendResponse({ success: false, error: 'PR URL is required' }); return; }
         try {
@@ -222,13 +367,16 @@ export function createPrReviewHandlers(svc) {
             sendResponse({ success: false, error: svc.getErrorMessage(e) });
             return;
         }
-        // Delegate to the full multi-pass pipeline (auto-index + everything).
+        // Delegate to the full multi-pass pipeline (index-first + everything).
+        // `sender` is forwarded so progress events reach the PR page's indicator —
+        // this call arrives FROM the content script, and it is the one review that
+        // blocks on indexing with nothing else on screen to show it is working.
         return handleMultiPassPRReview({
             data: {
                 prUrl,
                 options: { focusAreas: ['security', 'bugs', 'performance', 'style'], enableESLint: true, enableSemgrep: true, enableDependency: true }
             }
-        }, sendResponse);
+        }, sendResponse, sender);
     }
 
     /** Return the cached review result (if any) for a PR URL. */
@@ -326,7 +474,7 @@ export function createPrReviewHandlers(svc) {
                 systemPrompt = PR_ANALYSIS_SYSTEM_PROMPT;
                 // #19 — build language-aware standards block in background (not in prompts.js)
                 const prLangs = detectLanguages(prData.files);
-                const standardsBlock = buildStandardsBlock(prLangs, prData.files);
+                const standardsBlock = buildStandardsBlock(prLangs);
                 userPrompt = buildPRAnalysisPrompt(prData, {
                     focusAreas: options.focusAreas || ['security', 'bugs', 'performance', 'style'],
                     maxFilesToReview: options.maxFiles || 100,
@@ -656,20 +804,7 @@ export function createPrReviewHandlers(svc) {
             // Derive repoId from PR data for adaptive learning
             const repoId = canonicalRepoId(prUrl, prData);
 
-            // Detect platform and parse owner/repo from PR URL
-            let customConfig = null;
-            try {
-                const urlMatch = prUrl.match(/(?:github\.com|gitlab\.com)\/([^/]+)\/([^/]+)/);
-                if (urlMatch) {
-                    const platform = prUrl.includes('gitlab.com') ? 'gitlab' : 'github';
-                    const owner = urlMatch[1];
-                    const repo = urlMatch[2];
-                    const token = platform === 'gitlab' ? settings.gitlabToken : settings.githubToken;
-                    customConfig = await svc.customRulesService.fetchConfig(platform, owner, repo, token);
-                }
-            } catch (e) {
-                console.warn('Failed to fetch custom config:', e.message);
-            }
+            const customConfig = await loadRepoConfig(svc, prUrl, settings);
 
             const staticAnalysisResult = await svc.staticAnalysisService.analyzePullRequest(prData, {
                 enableESLint: options.enableESLint !== false,
@@ -833,7 +968,7 @@ export function createPrReviewHandlers(svc) {
      * Multi-pass PR review: per-file analysis → cross-file aggregation.
      * Falls back to single-pass for small PRs (≤5 files).
      */
-    async function handleMultiPassPRReview(message, sendResponse) {
+    async function handleMultiPassPRReview(message, sendResponse, sender = null) {
         try {
             const { prUrl, options = {} } = message.data || message.payload || {};
 
@@ -850,13 +985,26 @@ export function createPrReviewHandlers(svc) {
             const prData = await svc.pullRequestService.fetchPullRequest(prUrl);
             console.log(`📊 PR fetched: ${prData.files.length} files, +${prData.stats.additions} -${prData.stats.deletions}`);
 
+            const multiPassStartedAt = Date.now();
+            const settings = await svc.getStoredSettings();
+            const reviewSettings = settings.reviewSettings || {};
+
+            // How much of the fully-indexed repo may enter the prompt.
+            // Resolved before any context producer runs so one switch moves
+            // them all together — which is what makes an eval A/B meaningful.
+            const contextBudget = resolveBudget({
+                profile: options.contextProfile || reviewSettings.contextProfile,
+                settings: reviewSettings.contextBudget,
+                overrides: options.contextBudget,
+            });
+
             // Enhance files with full content if enabled (not just patch lines)
             if (options.fetchFullFiles !== false) {
                 try {
                     const headRef = prData.branches?.source;
                     prData.files = await svc.pullRequestService.enhanceFilesWithFullContent(
                         prUrl, prData.files,
-                        { maxFiles: options.maxFullFiles || 10, ref: headRef }
+                        { maxFiles: options.maxFullFiles || contextBudget.maxFullFiles, ref: headRef }
                     );
                     const enhanced = prData.files.filter(f => f.fullContent).length;
                     if (enhanced > 0) {
@@ -867,9 +1015,6 @@ export function createPrReviewHandlers(svc) {
                 }
             }
 
-            const multiPassStartedAt = Date.now();
-            const settings = await svc.getStoredSettings();
-            const reviewSettings = settings.reviewSettings || {};
             const repoId = canonicalRepoId(prUrl, prData);
 
             // ── Review cache ─────────────────────────────────────────────────
@@ -920,35 +1065,62 @@ export function createPrReviewHandlers(svc) {
             }
 
             // #16b — honour model pin from .repospector.yaml in multi-pass path
-            let customConfig = null;
-            try {
-                const urlMatch = prUrl.match(/(?:github\.com|gitlab\.com)\/([^/]+)\/([^/]+)/);
-                if (urlMatch) {
-                    const platform = prUrl.includes('gitlab.com') ? 'gitlab' : 'github';
-                    const owner = urlMatch[1];
-                    const repo = urlMatch[2];
-                    const token = platform === 'gitlab' ? settings.gitlabToken : settings.githubToken;
-                    customConfig = await svc.customRulesService.fetchConfig(platform, owner, repo, token);
-                }
-            } catch (e) {
-                console.warn('Failed to fetch custom config:', e.message);
-            }
+            const customConfig = await loadRepoConfig(svc, prUrl, settings);
 
             // Review-quality toggles (default ON), overridable via .repospector.yaml
             // `settings` block or the extension's reviewSettings. Everything below
             // runs on the user's own BYOK model — nothing leaves the machine.
             const rqCfg = { ...(reviewSettings || {}), ...(customConfig?.settings || {}) };
             const graphContextEnabled = rqCfg.graphContext !== false && options.graphContext !== false;
+            // Verification ALWAYS runs — but "verification" now means the
+            // deterministic evidence gates (cited line absent, construct only on
+            // removed lines, documented handler, duplicates). Those are free and
+            // are what actually removes false positives.
             const verificationEnabled = rqCfg.verifyFindings !== false && options.verifyFindings !== false;
+            // The LLM refuter on top of them is OPT-IN. It kept 42 of 42 findings
+            // that adjudication rejected on the measured set, so paying a
+            // round-trip per batch for it by default was cost without effect.
+            const llmRefutationEnabled = rqCfg.llmRefutation === true || options.llmRefutation === true;
             const autofixEnabled = rqCfg.autofix !== false && options.autofix !== false;
             const multiFinderEnabled = rqCfg.multiFinder !== false && options.multiFinder !== false;
+            // Pull-based retrieval: the model asks the index for what it needs
+            // mid-review. The default is decided per model rather than globally
+            // — see `shouldExplore`. Resolved below, once the review model is
+            // known; an explicit setting overrides in either direction.
+            const explorationSetting = options.repoExploration ?? rqCfg.repoExploration;
+            const explorationIterations = Number(
+                rqCfg.explorationIterations || options.explorationIterations || 4,
+            );
             // Mine team conventions from this repo's own past review comments.
             const conventionsEnabled = rqCfg.teamConventions !== false && options.teamConventions !== false;
             const verificationVotes = Number(rqCfg.verificationVotes || options.verificationVotes || 1);
             const finderRounds = Number(rqCfg.finderRounds || options.finderRounds || 2);
-            // 'background' (default) | 'blocking' | false. Without this, RAG + graph
-            // context are dark for any repo the user never manually indexed.
-            const autoIndexOwnRepo = rqCfg.autoIndexOwnRepo ?? options.autoIndexOwnRepo ?? 'background';
+            // Which rule set the specialist finders run under. `recall` existed
+            // but nothing ever selected it, so it was dead code; it is now
+            // selectable and was A/B'd on the 5-PR public corpus:
+            //
+            //   default  35 generated → 32 kept → recall 8/26  (30.8%)
+            //   recall   35 generated → 25 kept → recall 7/26  (26.9%)
+            //
+            // No measurable gain — the intervals overlap almost entirely — and
+            // the recall lens lost MORE findings to the evidence gates, which is
+            // what a looser rule set should do. `default` stays the default on
+            // the evidence. Re-measure with a bigger corpus before flipping;
+            // n=26 cannot separate these.
+            const finderMode = rqCfg.finderMode || options.finderMode || 'default';
+            // Self-reflection scoring. On by default because the score ORDERS
+            // what gets posted, which is a strict improvement over the old
+            // severity-only sort — every self-declared `high` used to be
+            // interchangeable, so the inline cap truncated arbitrarily.
+            // The DROP threshold is separately off by default (0): with the
+            // pipeline currently under-producing findings, gating on score
+            // would cut recall to buy precision we have not yet earned.
+            const scoringEnabled = rqCfg.scoreFindings !== false && options.scoreFindings !== false;
+            const minScore = Number(rqCfg.minScore ?? options.minScore ?? 0);
+            // 'blocking' (default) | 'background' | false — see the indexing block below.
+            // Without this, RAG + graph context are dark for any repo the user never
+            // manually indexed.
+            const autoIndexOwnRepo = rqCfg.autoIndexOwnRepo ?? options.autoIndexOwnRepo ?? 'blocking';
 
             // ── Incremental re-review: only re-read what moved since last time ──
             // Authors push fixes; re-running the whole pipeline each push is what
@@ -996,8 +1168,43 @@ export function createPrReviewHandlers(svc) {
                 ? reviewPlan.filesToReview
                 : allPrFiles;
 
-            // ── Auto-index the PR's own repo so the context layer actually has data ──
+            // Progress channel. Defined BEFORE indexing so the indexing phase can
+            // report itself — a blocking index is the longest part of a first review
+            // and a silent UI during it looks like a hang.
+            //
+            // TWO transports, because they reach different places: `runtime.sendMessage`
+            // reaches extension pages (the popup), and `tabs.sendMessage` reaches the
+            // content script on the PR page. A service worker's `runtime.sendMessage`
+            // does NOT reach content scripts, so the on-page indicator saw nothing
+            // without the second call.
+            const progressTabId = sender?.tab?.id ?? null;
+            const onProgress = (event) => {
+                const payload = { type: 'PR_REVIEW_PROGRESS', data: event };
+                try {
+                    chrome.runtime.sendMessage(payload).catch(() => { });
+                } catch (e) { /* popup may be closed */ }
+                try {
+                    if (progressTabId != null) {
+                        chrome.tabs.sendMessage(progressTabId, payload).catch(() => { });
+                    }
+                } catch (e) { /* tab closed or navigated away */ }
+            };
+
+            // ── Index the PR's own repo BEFORE reviewing it ──────────────────────
+            //
+            // `autoIndexOwnRepo`:
+            //   'blocking'  — index, THEN review. The review sees RAG + graph context.
+            //   'background' — start indexing, review immediately without it.
+            //   false        — do not index.
+            //
+            // 'blocking' is the default. 'background' was, and it made the promise the
+            // setting appears to make false: the review proceeded against an empty
+            // index, so the FIRST review of any repo had no retrieval, no code graph
+            // and a cold convention miner — which is precisely the context class the
+            // measured misses are dominated by. Fire-and-forget indexing helps the
+            // *next* review, and the user is looking at this one.
             let indexStatus = 'unknown';
+            let indexError = null;
             try {
                 let indexed = false;
                 try { indexed = await svc.codeGraphPipeline.hasGraph(repoId); } catch { /* ignore */ }
@@ -1007,23 +1214,57 @@ export function createPrReviewHandlers(svc) {
                 if (indexed) {
                     indexStatus = 'already-indexed';
                 } else if (autoIndexOwnRepo) {
-                    const repoUrl = prUrl.split(/\/(?:pull|-\/merge_requests|merge_requests)\//)[0];
-                    const platform = prUrl.includes('gitlab.com') ? 'gitlab' : 'github';
+                    const repoUrl = repoUrlFromPrUrl(prUrl);
+                    const platform = detectPlatformOrGitHub(prUrl);
                     const service = platform === 'gitlab' ? svc.gitlabService : svc.githubService;
-                    const doIndex = async () => {
-                        const files = await service.fetchRepositoryFiles(repoUrl);
+                    const doIndex = async (reportProgress) => {
+                        const files = await service.fetchRepositoryFiles(
+                            repoUrl,
+                            reportProgress
+                                ? (p) => onProgress({
+                                    step: 'indexing',
+                                    phase: 'indexing',
+                                    message: p?.message || 'Indexing repository…',
+                                    current: p?.current,
+                                    total: p?.total,
+                                })
+                                : null,
+                        );
+                        if (reportProgress) {
+                            onProgress({
+                                step: 'indexing',
+                                phase: 'indexing',
+                                message: `Embedding ${files.length} file(s) — building review context…`,
+                                total: files.length,
+                            });
+                        }
                         await svc.ragService.init();
                         await svc.ragService.indexRepositoryIncremental(repoId, files);
                         await svc.codeGraphPipeline.updateGraph(repoId, files);
+                        // Surface this on the review path too: it predicts which
+                        // findings the run cannot produce, which is worth knowing
+                        // before the results come back rather than after.
+                        const warning = graphCoverageWarning(assessGraphCoverage(files));
+                        if (warning) {
+                            console.warn(`⚠️ ${warning}`);
+                            onProgress({ step: 'indexing', phase: 'indexing', message: warning });
+                        }
+                        return files.length;
                     };
+
                     if (autoIndexOwnRepo === 'blocking') {
-                        await doIndex();
+                        onProgress({
+                            step: 'indexing',
+                            phase: 'indexing',
+                            message: 'Indexing the repository before reviewing…',
+                        });
+                        const fileCount = await doIndex(true);
                         indexStatus = 'indexed-now';
-                        console.log(`📚 Auto-indexed ${repoId} (blocking) before review`);
+                        console.log(`📚 Auto-indexed ${repoId} (${fileCount} files, blocking) before review`);
                     } else {
-                        // Non-blocking: this review runs on diff + full-file content; the
-                        // NEXT review of this repo gets full RAG + graph context.
-                        doIndex()
+                        // Explicit opt-out of index-first: this review runs on diff +
+                        // full-file content only; the NEXT one gets full context.
+                        doIndex(false)
                             .then(() => console.log(`📚 Auto-index of ${repoId} complete (context ready next review)`))
                             .catch(e => console.warn('Auto-index (background) failed:', e?.message));
                         indexStatus = 'indexing-started';
@@ -1032,7 +1273,19 @@ export function createPrReviewHandlers(svc) {
                     indexStatus = 'not-indexed';
                 }
             } catch (e) {
-                console.warn('Auto-index-own-repo (non-fatal):', e?.message);
+                // Fail OPEN: a repo we cannot index (permissions, rate limit, a tree
+                // GitHub truncates) must still get a patch-level review. But say so —
+                // having asked for index-first, silently reviewing without context is
+                // the failure mode this change exists to remove.
+                indexStatus = 'index-failed';
+                indexError = e?.message || String(e);
+                console.warn(`⚠️ Could not index ${repoId} before review — reviewing without repo context:`, indexError);
+                onProgress({
+                    step: 'indexing',
+                    phase: 'indexing',
+                    message: `Indexing failed (${indexError}); reviewing without repo context.`,
+                    failed: true,
+                });
             }
 
             // Small PRs used to short-circuit to the single-pass handler, which
@@ -1057,7 +1310,11 @@ export function createPrReviewHandlers(svc) {
             }
 
             // Gather context in parallel (graph context is best-effort/non-fatal)
-            const graphService = new ReviewGraphContextService({ codeGraphPipeline: svc.codeGraphPipeline });
+            const graphService = new ReviewGraphContextService({
+                codeGraphPipeline: svc.codeGraphPipeline,
+                // Enables caller-source inlining; absent, the service emits summaries only.
+                vectorStore: svc.ragService?.vectorStore,
+            });
             const [ragContext, repoDocumentation, staticResult, graphContextObj] = await Promise.all([
                 svc._fetchRAGContextForMultiPass(repoId, prData, options),
                 svc._fetchRepoDocForMultiPass(repoId, options),
@@ -1071,7 +1328,7 @@ export function createPrReviewHandlers(svc) {
                     customConfig
                 }),
                 graphContextEnabled
-                    ? graphService.buildForReview(prData, repoId).catch((e) => {
+                    ? graphService.buildForReview(prData, repoId, { budget: contextBudget }).catch((e) => {
                         console.warn('Graph context (non-fatal):', e?.message);
                         return { available: false, byFile: {}, combined: '' };
                     })
@@ -1125,16 +1382,6 @@ export function createPrReviewHandlers(svc) {
             }
             const cachedScores = svc.prScoreCache.get(prUrl);
 
-            // Progress callback
-            const onProgress = (event) => {
-                try {
-                    chrome.runtime.sendMessage({
-                        type: 'PR_REVIEW_PROGRESS',
-                        data: event
-                    }).catch(() => { });
-                } catch (e) { /* popup may be closed */ }
-            };
-
             // #16b — apply model pin from .repospector.yaml
             const multiPassPinnedModel = customConfig?.settings?.model;
             const multiPassModel = multiPassPinnedModel || settings.model;
@@ -1180,18 +1427,39 @@ export function createPrReviewHandlers(svc) {
             });
             console.log(`🤖 Review model: ${resolvedModel.provider} / ${resolvedModel.modelId}`);
 
-            // Execute review — orchestrated pipeline (Bastion-style: skip rules +
-            // chunking + assigned-hunks normalization) when the feature flag is on,
-            // legacy multi-pass otherwise. The flag is opt-in for now so the new
-            // pipeline can be validated against real PRs side-by-side before
-            // becoming the default.
+            // Exploration costs extra round trips on the user's own key. A
+            // reasoning model means that cost has already been accepted, and
+            // those are the models that use tools well rather than calling each
+            // one once because it exists. The reason is logged either way, so a
+            // user who expected exploration can see why it did not run.
+            const exploration = shouldExplore({
+                setting: explorationSetting,
+                model: resolvedModel.modelIdentifier,
+                provider: resolvedModel.provider,
+                supportsTools: LLMService.supportsTools(resolvedModel.provider),
+            });
+            const repoExplorationEnabled = exploration.enabled;
+            console.log(
+                `🔭 Repo exploration ${exploration.enabled ? 'ON' : 'off'} — ${exploration.reason}`,
+            );
+
+            // Execute review — the orchestrated pipeline (skip rules + chunking +
+            // assigned-hunks normalization) is the DEFAULT.
+            //
+            // It was opt-in while it was validated side-by-side, which meant the
+            // common path skipped hunk normalization entirely and findings on
+            // lines the PR never touched reached the summary. Now opt-OUT: set
+            // `orchestratedReview: false` in reviewSettings, .repospector.yaml, or
+            // per-call options to fall back to the legacy engine.
             const engine = new MultiPassReviewEngine({
                 llmService: svc.llmService,
                 ragService: svc.ragService
             });
 
-            const useOrchestrator = settings.experimental?.orchestratedReview === true
-                || reviewSettings.orchestratedReview === true;
+            const useOrchestrator = options.orchestratedReview !== false
+                && rqCfg.orchestratedReview !== false
+                && reviewSettings.orchestratedReview !== false
+                && settings.experimental?.orchestratedReview !== false;
 
             // On an incremental run the engine sees only the changed files, but it
             // still needs the whole-PR framing (title, description, commits, and
@@ -1238,7 +1506,17 @@ export function createPrReviewHandlers(svc) {
             // CI state, author's description. Pure/synchronous — cannot fail.
             let intentBlock = '';
             try {
-                intentBlock = buildIntentBlock(prData, { issue: options.issue || null });
+                // The ticket, when the PR names one. `options.issue` lets a
+                // caller supply it directly (tests, or a future tracker
+                // integration); otherwise resolve it from the host. Until this
+                // lookup existed nothing ever populated `issue`, so the
+                // acceptance-criteria branch inside buildIntentBlock had never
+                // run in production.
+                const issue = options.issue || await resolveLinkedIssue(svc, prUrl, prData);
+                if (issue) {
+                    console.log(`🎫 Linked issue ${issue.key}: ${issue.summary}`);
+                }
+                intentBlock = buildIntentBlock(prData, { issue });
                 if (intentBlock) console.log('🎯 Intent context attached to review prompt');
             } catch (e) {
                 console.warn('Intent context build failed (non-fatal):', e?.message);
@@ -1260,7 +1538,7 @@ export function createPrReviewHandlers(svc) {
             let standardsText = '';
             try {
                 const prLangs = detectLanguages(prData.files);
-                let block = buildStandardsBlock(prLangs, prData.files);
+                let block = buildStandardsBlock(prLangs);
 
                 const stdSource = rqCfg.standardsSource || reviewSettings.standardsSource || null;
                 if (stdSource) {
@@ -1292,6 +1570,7 @@ export function createPrReviewHandlers(svc) {
                 standardsText,
                 fileContext,
                 intentBlock,
+                contextBudget,
                 incremental: reviewPlan?.mode === REVIEW_MODE.INCREMENTAL
                     ? {
                         previouslyReviewedSha: reviewPlan.prevHeadSha,
@@ -1347,11 +1626,19 @@ export function createPrReviewHandlers(svc) {
             let droppedFindings = [];
             let fixStats = null;
             let finderStats = null;
+            let explorationStats = null;
 
             // 1) Canonical flat list (LLM per-file findings + deterministic static)
+            //
+            // The orchestrator has ALREADY lifted the static findings into its
+            // report as the standards phase, and filtered them to the MR's
+            // assigned hunks. Adding `staticResult.findings` again here would
+            // list every static finding twice — once hunk-filtered, once not —
+            // and double its weight in the blocking count. Take the report's
+            // copy, which is the filtered one.
             let verifiedFindings = buildCanonicalFindings(
                 result.perFileFindings || [],
-                staticResult.findings || []
+                result._orchestrated ? [] : (staticResult.findings || [])
             );
 
             // 1b) Multi-finder diversity pass — independent specialist lenses surface
@@ -1365,15 +1652,52 @@ export function createPrReviewHandlers(svc) {
                         settings: reviewSettings_,
                         graphContext: graphContextObj?.combined || '',
                         maxRounds: finderRounds,
+                        promptMode: finderMode,
                         onProgress
                     });
                     if (fres.findings.length) verifiedFindings = [...verifiedFindings, ...fres.findings];
                     finderStats = fres.stats;
                     postUsage.input += fres.usage.input;
                     postUsage.output += fres.usage.output;
-                    console.log(`🔎 Multi-finder added ${fres.stats.added} findings across ${fres.stats.rounds} round(s)`);
+                    console.log(`🔎 Multi-finder (${finderMode}) added ${fres.stats.added} findings across ${fres.stats.rounds} round(s)`);
                 } catch (e) {
                     console.warn('Multi-finder pass failed (using baseline findings):', e?.message);
+                }
+            }
+
+            // 1b) Repo exploration — the only pass that can ASK the index a
+            //     question mid-review. Runs before citations and verification so
+            //     its findings face exactly the same scrutiny as every other
+            //     finding; exploration buys recall, it does not buy trust.
+            if (repoExplorationEnabled) {
+                try {
+                    const explorer = new RepoExplorerService({
+                        llmService: svc.llmService,
+                        ragService: svc.ragService,
+                        codeGraphPipeline: svc.codeGraphPipeline,
+                    });
+                    const xres = await explorer.findWithExploration(verifiedFindings, {
+                        prData,
+                        settings: reviewSettings_,
+                        repoId,
+                        maxIterations: explorationIterations,
+                        onProgress,
+                    });
+                    if (xres.findings.length) {
+                        const fresh = freshFindings(verifiedFindings, xres.findings);
+                        verifiedFindings = [...verifiedFindings, ...fresh];
+                        explorationStats = { ...xres.stats, kept: fresh.length };
+                        console.log(
+                            `🔭 Repo exploration: ${xres.stats.toolCalls} tool call(s) over `
+                            + `${xres.stats.iterations} iteration(s) → ${fresh.length} new finding(s)`,
+                        );
+                    } else {
+                        explorationStats = xres.stats;
+                    }
+                    postUsage.input += xres.usage.input;
+                    postUsage.output += xres.usage.output;
+                } catch (e) {
+                    console.warn('Repo exploration failed (continuing without it):', e?.message);
                 }
             }
 
@@ -1390,6 +1714,7 @@ export function createPrReviewHandlers(svc) {
                         prData,
                         settings: reviewSettings_,
                         votes: verificationVotes,
+                        llmRefutation: llmRefutationEnabled,
                         onProgress
                     });
                     verifiedFindings = vres.findings;
@@ -1397,9 +1722,37 @@ export function createPrReviewHandlers(svc) {
                     verificationStats = vres.stats;
                     postUsage.input += vres.usage.input;
                     postUsage.output += vres.usage.output;
-                    console.log(`✅ Verification: kept ${vres.stats.kept}, dropped ${vres.stats.dropped} likely FPs`);
+                    console.log(
+                        `✅ Verification (${llmRefutationEnabled ? 'gates + LLM refuter' : 'deterministic gates'}): ` +
+                        `kept ${vres.stats.kept}, dropped ${vres.stats.dropped} likely FPs`
+                    );
                 } catch (e) {
                     console.warn('Verification pass failed (keeping all findings):', e?.message);
+                }
+            }
+
+            // 3b) Self-reflection scoring — how much is each finding WORTH SAYING?
+            //     Verification settled whether findings are real; this ranks the
+            //     survivors so the inline cap keeps the valuable ones.
+            let scoringStats = null;
+            if (scoringEnabled && verifiedFindings.length > 0) {
+                try {
+                    const scorer = new SuggestionScorer({ llmService: svc.llmService });
+                    const sres = await scorer.score(verifiedFindings, {
+                        prData,
+                        settings: reviewSettings_,
+                        onProgress
+                    });
+                    verifiedFindings = sres.findings;
+                    scoringStats = sres.stats;
+                    postUsage.input += sres.usage.input;
+                    postUsage.output += sres.usage.output;
+                    console.log(
+                        `🏅 Scored ${sres.stats.scored}/${sres.stats.input} findings ` +
+                        `(min ${sres.stats.min}, mean ${sres.stats.mean}, max ${sres.stats.max})`
+                    );
+                } catch (e) {
+                    console.warn('Scoring pass failed (findings keep their order):', e?.message);
                 }
             }
 
@@ -1455,13 +1808,17 @@ export function createPrReviewHandlers(svc) {
             let crossRepoReport = null;
             try {
                 const indexRepo = async (url) => {
-                    const platform = url.includes('gitlab.com') ? 'gitlab' : 'github';
+                    const platform = detectPlatformOrGitHub(url);
                     const service = platform === 'gitlab' ? svc.gitlabService : svc.githubService;
                     const rid = service.getRepoId(url);
                     const files = await service.fetchRepositoryFiles(url);
                     await svc.codeGraphPipeline.updateGraph(rid, files);
                 };
-                const xrepo = new ReviewCrossRepoService({ indexRepo });
+                const xrepo = new ReviewCrossRepoService({
+                    indexRepo,
+                    // Enables the discovery fallback when no workspace is declared.
+                    vectorStore: svc.ragService?.vectorStore,
+                });
                 crossRepoReport = await xrepo.run({
                     prData, customConfig, currentRepoId: repoId, onProgress
                 });
@@ -1489,6 +1846,24 @@ export function createPrReviewHandlers(svc) {
                 }
             } catch (e) {
                 console.warn('Cross-repo impact (non-fatal):', e?.message);
+            }
+
+            // A review that ran WITHOUT repo context is a weaker review, and the reader
+            // has to know which kind they are looking at — otherwise "it found nothing
+            // about our conventions" is indistinguishable from "it had no idea what our
+            // conventions are". Only stated when context was expected and missing.
+            if (indexStatus === 'index-failed' || indexStatus === 'indexing-started') {
+                const note = indexStatus === 'index-failed'
+                    ? `> ⚠️ **Reviewed without repository context.** Indexing \`${repoId}\` failed`
+                      + `${indexError ? ` (${indexError})` : ''}, so this review saw the diff and the`
+                      + ` changed files but no retrieval, code graph or mined team conventions.`
+                      + ` Re-run once indexing succeeds for a better-informed review.\n`
+                    : `> ℹ️ **Reviewed without repository context.** Indexing of \`${repoId}\` was`
+                      + ` started in the background rather than awaited, so this review saw the diff`
+                      + ` and the changed files only. The next review of this repo will have full context.\n`;
+                if (typeof result.analysis === 'string') {
+                    result.analysis = `${note}\n${result.analysis}`;
+                }
             }
 
             // Generate AI summary
@@ -1552,9 +1927,31 @@ export function createPrReviewHandlers(svc) {
 
             // #22 — mechanical verdict from the VERIFIED finding set (post-FP-removal
             // and severity re-calibration), not the raw generated list.
+            //
+            // A short-circuit gate (draft, bot author, revert, merge conflict,
+            // failing pipeline, oversized) produces ZERO findings by design. Deriving
+            // the verdict from the finding count ALONE therefore reported
+            // `APPROVED` / `APPROVE` for a PR nothing had looked at — and because
+            // the popup forwards `reviewEvent` to the host verbatim, one click
+            // posted a real approval on an unreviewed PR. Gate outcomes must win
+            // over the finding count.
             const multiPassBlocking = countBlocking(verifiedFindings);
-            const multiPassVerdict = multiPassBlocking > 0 ? 'CHANGES_REQUESTED' : 'APPROVED';
-            const multiPassReviewEvent = multiPassBlocking > 0 ? 'REQUEST_CHANGES' : 'APPROVE';
+            const gateOutcome = describeGateOutcome(result);
+            // A partial run still escalates on what it DID read; it just cannot approve.
+            const blockingVerdict = multiPassBlocking > 0 ? 'CHANGES_REQUESTED' : null;
+            const blockingEvent = multiPassBlocking > 0 ? 'REQUEST_CHANGES' : null;
+            const multiPassVerdict = gateOutcome
+                ? (gateOutcome.partialOnly ? (blockingVerdict ?? gateOutcome.verdict) : gateOutcome.verdict)
+                : (blockingVerdict ?? 'APPROVED');
+            const multiPassReviewEvent = gateOutcome
+                ? (gateOutcome.partialOnly ? (blockingEvent ?? gateOutcome.reviewEvent) : gateOutcome.reviewEvent)
+                : (blockingEvent ?? 'APPROVE');
+            if (gateOutcome) {
+                console.log(
+                    `🚦 Gate outcome ${gateOutcome.gateVerdict} (${gateOutcome.reason}) — ` +
+                    `reporting ${multiPassVerdict}/${multiPassReviewEvent} instead of an approval`
+                );
+            }
 
             const responseData = {
                     reviewedAt: Date.now(),
@@ -1562,6 +1959,20 @@ export function createPrReviewHandlers(svc) {
                     reviewVerdict: multiPassVerdict,
                     reviewEvent: multiPassReviewEvent,
                     blockingCount: multiPassBlocking,
+                    // Canonical verdict + the gate that produced it. `verdict` is what
+                    // ReviewCacheService checks before storing, so a SKIP/DEFER run is
+                    // recognisable as one instead of being cached as an approval.
+                    verdict: gateOutcome?.gateVerdict ?? result.verdict ?? null,
+                    gate: gateOutcome
+                        ? { ...(result.gate ?? {}), outcome: gateOutcome }
+                        : (result.gate ?? null),
+                    // True only when the pipeline read NO code. A partial review read
+                    // real files and may legitimately request changes on them, so it is
+                    // not "skipped" — it is reported via `partial` instead.
+                    reviewSkipped: !!gateOutcome
+                        && !gateOutcome.partialOnly
+                        && gateOutcome.gateVerdict !== 'APPROVE',
+                    partial: result._orchestrated?.meta?.partial ?? null,
                     aiSummary,
                     isMultiPass: true,
                     perFileFindings: result.perFileFindings,
@@ -1571,13 +1982,21 @@ export function createPrReviewHandlers(svc) {
                     verifiedFindings,
                     reviewQuality: {
                         citation: citationStats,
+                        scoring: scoringStats,
+                        minScore,
                         multiFinder: finderStats,
+                        repoExploration: explorationStats,
                         verification: verificationStats,
                         droppedFalsePositives: droppedFindings,
                         fixes: fixStats,
                         graphContextUsed: !!graphContextObj?.available,
                         crossRepo: crossRepoReport,
-                        indexStatus
+                        indexStatus,
+                        indexError,
+                        // True when the review had the repo indexed before it ran, i.e.
+                        // when RAG and code-graph context were actually available to it.
+                        repoContextAvailable: indexStatus === 'already-indexed'
+                            || indexStatus === 'indexed-now',
                     },
                     incremental: reviewPlan
                         ? {
@@ -1618,12 +2037,20 @@ export function createPrReviewHandlers(svc) {
                     },
                     isTestAutomationPR: svc.isTestAutomationPR(prData)
             };
-            reviewResultCache.set(prUrl, responseData);
+            // A gated run reviewed nothing, so it must not seed any cache. Caching it
+            // would make the in-memory UNCHANGED fast-path replay "skipped" forever,
+            // and recording incremental state would mark every file as already
+            // reviewed — so the review that SHOULD happen once the PR leaves draft
+            // (or the pipeline goes green) would carry forward zero findings.
+            const cacheableRun = !gateOutcome
+                || gateOutcome.partialOnly            // real review of a subset — worth caching
+                || gateOutcome.gateVerdict === 'APPROVE';
+            if (cacheableRun) reviewResultCache.set(prUrl, responseData);
             reviewStatus.set(prUrl, 'done');
 
             // Persist the revision + verified findings so the NEXT push only
             // re-reads what actually moved. Never let this break a completed review.
-            if (incrementalEnabled) {
+            if (incrementalEnabled && cacheableRun) {
                 try {
                     // Record against the full file set — the next plan diffs every
                     // file, including the ones this run carried rather than re-read.
@@ -1640,7 +2067,7 @@ export function createPrReviewHandlers(svc) {
             // Cache the completed review against this head SHA. Serves the next
             // open of an unchanged PR outright, and primes the next run after a
             // push. `store` refuses SKIP/DEFER verdicts itself.
-            if (reviewSettings.reviewCache !== false) {
+            if (reviewSettings.reviewCache !== false && cacheableRun) {
                 try {
                     await reviewCache.store(prUrl, {
                         headSha: prData.headSha,
@@ -1725,6 +2152,13 @@ export function createPrReviewHandlers(svc) {
                     options.minConfidence
                     ?? repoConfig?.settings?.minConfidence
                     ?? null,
+                // Value-score floor. 0 (the default) disables the gate; the
+                // score still orders what goes inline.
+                minScore:
+                    options.minScore
+                    ?? repoConfig?.settings?.minScore
+                    ?? reviewSettings.minScore
+                    ?? null,
                 blockingOnlyInline: options.blockingOnlyInline !== false,
                 maxInline: options.maxInlineComments || 15,
             });
@@ -1795,11 +2229,25 @@ export function createPrReviewHandlers(svc) {
                 )
                 : [];
 
+            // A review that was short-circuited by a skip rule read no code, so it
+            // may only ever be posted as a COMMENT. This is a second, independent
+            // check: the verdict computation upstream already refuses to emit
+            // APPROVE for a gated run, and posting is irreversible enough to
+            // deserve a guard that does not depend on that one being right.
+            let postEvent = options.event || 'COMMENT';
+            if (analysisResult?.reviewSkipped === true && postEvent !== 'COMMENT') {
+                console.warn(
+                    `⚠️ Refusing to post "${postEvent}" for a review that was skipped ` +
+                    `(${analysisResult?.gate?.outcome?.reason || 'gated'}) — posting as COMMENT`
+                );
+                postEvent = 'COMMENT';
+            }
+
             // Post the review
             const result = await svc.pullRequestService.postReview(prUrl, {
                 summary: summaryBody,
                 inlineComments,
-                event: options.event || 'COMMENT', // COMMENT, APPROVE, REQUEST_CHANGES
+                event: postEvent, // COMMENT, APPROVE, REQUEST_CHANGES
                 diffRefs: prDataForLines?.diffRefs || null
             });
 
@@ -1931,7 +2379,10 @@ export function createPrReviewHandlers(svc) {
      * Handle fetching full file content (not just patch)
      */
     async function handleFetchFullFile(message, sendResponse) {
-        const { repoId, filePath, platform, ref } = message.payload || message.data || {};
+        // `host` (or any URL on the instance) lets this resolve a self-hosted
+        // GitLab. Absent, it falls back to gitlab.com, which is what it always
+        // assumed unconditionally.
+        const { repoId, filePath, platform, ref, host } = message.payload || message.data || {};
 
         try {
             const settings = await svc.getStoredSettings();
@@ -1951,7 +2402,7 @@ export function createPrReviewHandlers(svc) {
                 const token = settings.gitlabToken;
                 const projectPath = encodeURIComponent(repoId);
                 const encodedPath = encodeURIComponent(filePath);
-                const url = `https://gitlab.com/api/v4/projects/${projectPath}/repository/files/${encodedPath}/raw${ref ? `?ref=${ref}` : '?ref=main'}`;
+                const url = `${gitlabApiBase(host)}/projects/${projectPath}/repository/files/${encodedPath}/raw${ref ? `?ref=${ref}` : '?ref=main'}`;
                 const headers = token ? { 'PRIVATE-TOKEN': token } : {};
                 const resp = await fetch(url, { headers });
                 if (!resp.ok) throw new Error(`Failed to fetch file: ${resp.status}`);
@@ -1974,13 +2425,13 @@ export function createPrReviewHandlers(svc) {
         // two must accept content-script messages. Both are server-gated on the
         // autoReviewOnLoad setting and never return secrets.
         GET_AUTO_REVIEW_SETTING: { fn: (m, send) => handleGetAutoReviewSetting(m, send), allowContentScript: true },
-        AUTO_REVIEW_PR: { fn: (m, send) => handleAutoReviewPr(m, send), allowContentScript: true },
+        AUTO_REVIEW_PR: { fn: (m, send, sender) => handleAutoReviewPr(m, send, sender), allowContentScript: true },
         ENSURE_REPO_INDEXED: { fn: (m, send) => handleEnsureRepoIndexed(m, send), allowContentScript: true },
         GET_PR_SUMMARY: (m, send) => handleGetPRSummary(m, send),
         SECURITY_REVIEW_PR: (m, send) => handleSecurityReviewPR(m, send),
         REVIEW_TEST_AUTOMATION: (m, send) => handleReviewTestAutomation(m, send),
         ANALYZE_PR_WITH_STATIC_ANALYSIS: (m, send) => handleAnalyzePRWithStaticAnalysis(m, send),
-        MULTI_PASS_PR_REVIEW: (m, send) => handleMultiPassPRReview(m, send),
+        MULTI_PASS_PR_REVIEW: (m, send, sender) => handleMultiPassPRReview(m, send, sender),
         RUN_STATIC_ANALYSIS: (m, send) => handleRunStaticAnalysis(m, send),
         POST_PR_REVIEW: (m, send) => handlePostPRReview(m, send),
         FETCH_FULL_FILE: (m, send) => handleFetchFullFile(m, send),

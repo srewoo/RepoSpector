@@ -29,6 +29,13 @@ export class FindingVerificationService {
      * @param {number} [opts.batchSize=8]
      * @param {number} [opts.dropThreshold=0.6] - min confidence to actually drop
      * @param {boolean} [opts.verifyStatic=false] - also verify deterministic findings
+     * @param {boolean} [opts.llmRefutation=false] - run the LLM refuter after the
+     *        deterministic gates. Off by default: on the measured 50-MR set the
+     *        refuter kept 42 of 42 findings that adjudication then rejected, so it
+     *        cost a full round-trip per batch for no measured discrimination. The
+     *        gates below carry the whole effect and are free. Turn it on to
+     *        re-measure, or when a repo's findings are dominated by claims the
+     *        gates cannot mechanically check.
      * @param {Function} [opts.onProgress]
      * @returns {Promise<{ findings: Array, dropped: Array, stats: Object, usage: {input:number,output:number} }>}
      */
@@ -40,6 +47,7 @@ export class FindingVerificationService {
             batchSize = 8,
             dropThreshold = 0.6,
             verifyStatic = false,
+            llmRefutation = false,
             onProgress = null
         } = opts;
 
@@ -97,14 +105,16 @@ export class FindingVerificationService {
             else toVerify.push(tagged);
         });
 
-        // No LLM available, or nothing left for it: the deterministic gates still
-        // stand on their own and their drops are reported.
-        if (!this.llmService || toVerify.length === 0) {
+        // No LLM available, the refuter disabled, or nothing left for it: the
+        // deterministic gates still stand on their own and their drops are
+        // reported. This is the DEFAULT path — see `llmRefutation`.
+        if (!this.llmService || !llmRefutation || toVerify.length === 0) {
             const stats = this._emptyStats(findings.length, passthrough.length);
             stats.duplicates = duplicates.length;
             stats.evidenceRefuted = evidenceDropped.length;
             stats.kept = passthrough.length + toVerify.length;
             stats.dropped = duplicates.length + evidenceDropped.length;
+            stats.llmRefutation = false;
             return {
                 findings: [...passthrough, ...toVerify].map(this._strip),
                 dropped: [...duplicates, ...evidenceDropped],
@@ -188,7 +198,8 @@ export class FindingVerificationService {
             kept: finalFindings.length,
             dropped: allDropped.length,
             droppedByLlm: dropped.length,
-            resurfacedSeverity: survivors.filter(s => s._originalSeverity).length
+            resurfacedSeverity: survivors.filter(s => s._originalSeverity).length,
+            llmRefutation: true
         };
 
         onProgress?.({ phase: 'verifying', message: `Verified — dropped ${dropped.length} likely false positives.`, ...stats });
@@ -226,10 +237,22 @@ export class FindingVerificationService {
         return ['critical', 'high', 'medium', 'low'].includes(k) ? k : null;
     }
 
+    /**
+     * filename -> unified patch, accepting every shape a caller may pass.
+     *
+     * `PullRequestService` normalizes both hosts to `{filename, patch}`, but the
+     * orchestrator, the eval harness and tests all hand raw host shapes through
+     * (`new_path`/`diff` on GitLab, `path` on some paths). A missed key here does
+     * not throw — it yields an empty map, every gate sees `patch === ''` and
+     * fails open, and the deterministic gates (the ONLY false-positive filter
+     * enabled by default) become a silent no-op. Be liberal about the keys.
+     */
     _buildDiffsByFile(prData) {
         const map = {};
         for (const f of (prData?.files || [])) {
-            if (f.filename && f.patch) map[f.filename] = f.patch;
+            const name = f?.filename || f?.new_path || f?.path || f?.file;
+            const patch = f?.patch ?? f?.diff ?? '';
+            if (name && patch) map[name] = patch;
         }
         return map;
     }

@@ -13,6 +13,7 @@ import { EOLService } from './EOLService.js';
 import { ImportGraphService } from './ImportGraphService.js';
 import { SecretsScanner } from './SecretsScanner.js';
 import { SymbolExtractor } from './SymbolExtractor.js';
+import { extractAddedLines, mapAddedBlockLine } from '../utils/patchLines.js';
 
 export class StaticAnalysisService {
     constructor(options = {}) {
@@ -175,6 +176,20 @@ export class StaticAnalysisService {
             }
         }
 
+        // Restore real file line numbers before anything downstream reads them.
+        // Callers that pass whole-file content (dependency manifests) supply no
+        // map and are already in file coordinates, so they are left alone.
+        let unresolved = 0;
+        fileResults.forEach((result, i) => {
+            const lineNumbers = files[i]?.lineNumbers;
+            if (!lineNumbers?.length || !result?.findings?.length) return;
+            result.findings = this.remapFindingsToFileLines(result.findings, lineNumbers);
+            unresolved += result.findings.filter(f => f?.lineUnresolved).length;
+        });
+        if (unresolved) {
+            console.warn(`[StaticAnalysis] ${unresolved} finding(s) had a line outside the added-code block; reported without a line`);
+        }
+
         // Collect all findings
         for (const result of fileResults) {
             if (result.success && result.findings) {
@@ -226,13 +241,16 @@ export class StaticAnalysisService {
 
             // Only analyze files with patches (changed content)
             if (file.patch) {
-                // Extract added/modified code from patch
-                const addedCode = this.extractAddedCode(file.patch);
+                // Extract added/modified code from patch, keeping the map back to
+                // real file lines — analyzers report block-relative numbers and
+                // `analyzeFiles` uses this to restore file coordinates.
+                const { code: addedCode, lineNumbers } = extractAddedLines(file.patch);
 
                 if (addedCode.trim()) {
                     filesToAnalyze.push({
                         path: file.filename,
                         content: addedCode,
+                        lineNumbers,
                         fullPatch: file.patch,
                         additions: file.additions,
                         deletions: file.deletions,
@@ -338,13 +356,19 @@ export class StaticAnalysisService {
             if (changedSourceFiles.length > 0 && changedTestFiles.length === 0) {
                 const uncoveredFunctions = [];
                 for (const file of changedSourceFiles) {
-                    const addedCode = this.extractAddedCode(file.patch || '');
+                    // Symbols are extracted from the added-lines block, so their
+                    // startLine is block-relative like every other analyzer's.
+                    const { code: addedCode, lineNumbers } = extractAddedLines(file.patch || '');
                     const symbols = this.symbolExtractor.extractFromJavaScript(addedCode, {
                         filePath: file.filename
                     });
                     const exportedFns = (symbols?.functions || []).filter(s => s.isExported);
                     for (const fn of exportedFns) {
-                        uncoveredFunctions.push({ file: file.filename, fn: fn.name, line: fn.startLine });
+                        uncoveredFunctions.push({
+                            file: file.filename,
+                            fn: fn.name,
+                            line: mapAddedBlockLine(fn.startLine, lineNumbers)
+                        });
                     }
                 }
 
@@ -441,18 +465,55 @@ export class StaticAnalysisService {
      */
     extractAddedCode(patch) {
         if (!patch) return '';
+        // Delegates to the shared patch parser so the code block and the
+        // block-line → file-line map produced by `extractAddedLines` are always
+        // built by the same scanner. See `remapFindingsToFileLines`.
+        return extractAddedLines(patch).code;
+    }
 
-        const lines = patch.split('\n');
-        const addedLines = [];
+    /**
+     * Rewrite analyzer line numbers from added-block coordinates to real file
+     * coordinates.
+     *
+     * Analyzers are given the added lines concatenated (see `extractAddedCode`),
+     * so a finding's `line` counts lines within that block. Left unmapped it is
+     * off by however many context and removed lines precede it, which sends an
+     * inline comment to the wrong code — and the comment still looks
+     * authoritative, so the reviewer has no way to tell.
+     *
+     * A finding whose block line falls outside the map is marked
+     * `lineUnresolved` and stripped of its line rather than guessed at: it can
+     * still be reported against the file, but it will not be posted inline.
+     *
+     * @param {Array<Object>} findings
+     * @param {number[]} lineNumbers - from `extractAddedLines`
+     * @returns {Array<Object>}
+     */
+    remapFindingsToFileLines(findings, lineNumbers) {
+        if (!Array.isArray(findings) || !lineNumbers?.length) return findings || [];
 
-        for (const line of lines) {
-            // Lines starting with + (but not ++ for header)
-            if (line.startsWith('+') && !line.startsWith('++')) {
-                addedLines.push(line.substring(1));
+        return findings.map((f) => {
+            if (!f || typeof f !== 'object') return f;
+
+            const mapped = mapAddedBlockLine(f.line, lineNumbers);
+            if (mapped == null) {
+                // Keep the finding; drop the coordinate we cannot trust.
+                const { line: _line, endLine: _endLine, ...rest } = f;
+                return { ...rest, blockLine: f.line ?? null, lineUnresolved: true };
             }
-        }
 
-        return addedLines.join('\n');
+            const out = { ...f, line: mapped, blockLine: f.line };
+            // endLine is in the same coordinate space; map it too, and never let
+            // it land before the start line if the range crossed a hunk edge.
+            if (f.endLine != null) {
+                const mappedEnd = mapAddedBlockLine(f.endLine, lineNumbers);
+                out.endLine = mappedEnd != null && mappedEnd >= mapped ? mappedEnd : mapped;
+            }
+            if (f.startLine != null) {
+                out.startLine = mapAddedBlockLine(f.startLine, lineNumbers) ?? mapped;
+            }
+            return out;
+        });
     }
 
     /**

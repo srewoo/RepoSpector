@@ -75,9 +75,16 @@ describe('SkipRuleEngine.evaluateSkipRules', () => {
         expect(r.action).toBe('SKIP');
         expect(r.reason).toMatch(/^bot_author:/);
     });
-    it('SKIPs revert PRs by title', () => {
+    it('SKIPs pure revert PRs by title', () => {
         const r = evaluateSkipRules(pr({ title: 'Revert "broken commit"' }));
         expect(r).toEqual({ action: 'SKIP', reason: 'revert_pr' });
+    });
+    it('does NOT skip a revert that also adds new code', () => {
+        // The new code is exactly what needs reviewing; `/^revert\b/` swallowed it.
+        const r = evaluateSkipRules(pr({
+            title: 'Revert the cache layer and add a bounded LRU',
+        }));
+        expect(r.action).toBe('REVIEW');
     });
     it('DEFERs on merge conflict', () => {
         const r = evaluateSkipRules(pr({ mergeable: false }));
@@ -91,10 +98,45 @@ describe('SkipRuleEngine.evaluateSkipRules', () => {
         const r = evaluateSkipRules(pr({ pipelineStatus: 'failed' }));
         expect(r).toEqual({ action: 'DEFER', reason: 'failing_pipeline' });
     });
-    it('SKIPs oversized PRs', () => {
-        const r = evaluateSkipRules(pr({ stats: { additions: 9999, deletions: 0 } }));
+    it('reviews oversized PRs partially rather than skipping them', () => {
+        const files = Array.from({ length: 300 }, (_, i) => ({
+            filename: `src/mod${i}.js`, additions: 30, deletions: 0,
+        }));
+        const r = evaluateSkipRules(pr({ files, stats: { additions: 9000, deletions: 0 } }));
+        expect(r.action).toBe('REVIEW');
+        expect(r.partial.reason).toMatch(/^oversized/);
+        expect(r.partial.totalFiles).toBe(300);
+        expect(r.partial.reviewedFiles.length).toBeGreaterThan(0);
+        expect(r.partial.reviewedFiles.length).toBeLessThan(300);
+        expect(r.partial.skippedFileCount).toBe(300 - r.partial.reviewedFiles.length);
+    });
+    it('still hard-SKIPs oversized PRs when partial review is disabled', () => {
+        const r = evaluateSkipRules(
+            pr({ stats: { additions: 9999, deletions: 0 } }),
+            { allowPartialReview: false },
+        );
         expect(r.action).toBe('SKIP');
         expect(r.reason).toMatch(/^oversized/);
+    });
+    it('prioritises high-churn non-generated source in a partial review', () => {
+        const files = [
+            { filename: 'vendor/huge.js', additions: 5000, deletions: 0 },
+            { filename: 'src/small.js', additions: 5, deletions: 0 },
+            { filename: 'src/big.js', additions: 900, deletions: 0 },
+            { filename: 'src/big.test.js', additions: 900, deletions: 0 },
+        ];
+        const r = evaluateSkipRules(pr({ files, stats: { additions: 6805, deletions: 0 } }));
+        expect(r.action).toBe('REVIEW');
+        // Real source before tests, tests before vendored code.
+        expect(r.partial.reviewedFiles[0]).toBe('src/big.js');
+        expect(r.partial.reviewedFiles).toContain('src/small.js');
+        expect(r.partial.reviewedFiles.indexOf('vendor/huge.js')).toBe(-1);
+    });
+    it('never reduces a single-huge-file MR to nothing', () => {
+        const files = [{ filename: 'src/monolith.js', additions: 20000, deletions: 0 }];
+        const r = evaluateSkipRules(pr({ files, stats: { additions: 20000, deletions: 0 } }));
+        expect(r.action).toBe('REVIEW');
+        expect(r.partial.reviewedFiles).toEqual(['src/monolith.js']);
     });
     it('AUTO_VERDICT APPROVE for docs-only', () => {
         const r = evaluateSkipRules(pr({
@@ -104,11 +146,17 @@ describe('SkipRuleEngine.evaluateSkipRules', () => {
         expect(r.verdict).toBe(VERDICT.APPROVE);
         expect(r.classification).toBe('DOCS_ONLY');
     });
-    it('AUTO_VERDICT APPROVE for tests-only', () => {
+    it('REVIEWS tests-only PRs instead of auto-approving them', () => {
+        // Wrong assertions and silently-disabled tests are real defects, and the
+        // dedicated test-quality finder lens can only run if the gate lets the
+        // review happen at all.
         const r = evaluateSkipRules(pr({
             files: [{ filename: 'src/foo.test.js' }],
         }));
-        expect(r.verdict).toBe(VERDICT.APPROVE);
+        expect(r.action).toBe('REVIEW');
+        expect(r.classification).toBe('TESTS_ONLY');
+        expect(r.testsOnly).toBe(true);
+        expect(r.verdict).toBeUndefined();
     });
     it('AUTO_VERDICT NEEDS_DISCUSSION for deps-only', () => {
         const r = evaluateSkipRules(pr({

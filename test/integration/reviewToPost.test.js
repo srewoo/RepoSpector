@@ -131,6 +131,33 @@ describe('review → post seam', () => {
         expect(line12.body).toContain('execFile(ALLOWED[cmd]);');
     });
 
+    describe('static findings are merged exactly once', () => {
+        // The orchestrator lifts static findings into its report itself, as the
+        // standards phase, hunk-filtered. The handler must therefore NOT pass
+        // staticResult.findings in again — doing so listed every static finding
+        // twice and doubled its weight in the blocking count. This was harmless
+        // while the orchestrator was opt-in and became the default path's bug
+        // the moment it was switched on.
+        const orchestratorReportFindings = [
+            ...orchestratorResult.perFileFindings,
+            // what the orchestrator's standards phase already merged in
+            { severity: 'high', title: 'Detected command execution with user input', file: 'src/api.js', line: 12, source: 'static' },
+        ];
+
+        it('double-counts when the caller re-adds them (the bug)', () => {
+            const wrong = buildCanonicalFindings(orchestratorReportFindings, staticFindings);
+            const execFindings = wrong.filter(f => f.source === 'static');
+            expect(execFindings).toHaveLength(2);
+            expect(countBlocking(wrong)).toBe(3);
+        });
+
+        it('counts each once when the caller defers to the report (the fix)', () => {
+            const right = buildCanonicalFindings(orchestratorReportFindings, []);
+            expect(right.filter(f => f.source === 'static')).toHaveLength(1);
+            expect(countBlocking(right)).toBe(2);
+        });
+    });
+
     it('never emits a comment on a line absent from the diff', () => {
         const bogus = [{ severity: 'critical', title: 'Phantom', file: 'src/api.js', line: 500, source: 'llm' }];
         const comments = formatInlineComments(bogus, { commentableLines: lineMap });

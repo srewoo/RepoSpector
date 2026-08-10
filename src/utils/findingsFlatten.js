@@ -69,12 +69,30 @@ export function buildCanonicalFindings(perFileFindings = [], staticFindings = []
 }
 
 /**
- * Count blocking (critical/high) findings.
+ * Severities that mean "this must not merge as-is".
+ *
+ * Three vocabularies reach this function and they must all be understood here:
+ *   - legacy/display  `critical` | `high`   (static analysis, adaptOrchestratorReport)
+ *   - canonical       `blocking`            (reviewSchema, ReviewCrossRepoService.toFindings)
+ *   - LLM prose       `error` | `blocker`   (some provider paths)
+ *
+ * Only `critical|high` used to count. Cross-repo impact findings — a symbol this
+ * PR removed that a linked repo still calls, the single highest-confidence
+ * blocking signal the pipeline produces — are emitted as canonical `blocking`,
+ * so a breaking change could not flip the verdict to CHANGES_REQUESTED.
+ */
+const BLOCKING_SEVERITIES = new Set(['critical', 'high', 'blocking', 'blocker', 'error']);
+
+/**
+ * Count blocking findings across every producer's severity vocabulary.
  * @param {Array<Object>} findings
  * @returns {number}
  */
 export function countBlocking(findings = []) {
-    return findings.filter(f => f.severity === 'critical' || f.severity === 'high').length;
+    return findings.filter(
+        f => BLOCKING_SEVERITIES.has(String(f?.severity ?? '').toLowerCase()),
+    ).length;
 }
 
-export default { flattenPerFileFindings, normalizeStaticFinding, buildCanonicalFindings, countBlocking };
+export default { flattenPerFileFindings, normalizeStaticFinding, buildCanonicalFindings, countBlocking, BLOCKING_SEVERITIES };
+export { BLOCKING_SEVERITIES };

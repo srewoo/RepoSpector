@@ -2,102 +2,38 @@
  * GitHubService - Fetch repository files from GitHub API
  */
 
+import {
+    CODE_EXTENSIONS,
+    EXCLUDE_EXTENSIONS,
+    EXCLUDE_DIRS,
+    MAX_FILE_SIZE,
+    filterIndexableFiles,
+} from '../utils/codeFileFilter.js';
+
 export class GitHubService {
     constructor(token = null) {
         this.token = token;
         this.baseUrl = 'https://api.github.com';
 
-        // Code file extensions to index (including documentation)
-        this.codeExtensions = [
-            // JavaScript/TypeScript
-            'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs',
-            // Python
-            'py', 'pyw', 'pyx', 'pyi',
-            // Java/JVM
-            'java', 'kt', 'scala', 'groovy',
-            // Go
-            'go',
-            // Rust
-            'rs',
-            // Ruby
-            'rb', 'rake',
-            // PHP
-            'php', 'phtml',
-            // C/C++
-            'c', 'cpp', 'cc', 'cxx', 'h', 'hpp', 'hxx',
-            // C#/.NET
-            'cs', 'vb', 'fs',
-            // Swift
-            'swift',
-            // Dart
-            'dart',
-            // Shell scripts
-            'sh', 'bash', 'zsh',
-            // Config files (useful for context)
-            'yaml', 'yml', 'json', 'toml', 'ini',
-            // Query languages
-            'sql', 'graphql',
-            // Web frameworks
-            'vue', 'svelte',
-            // Documentation (IMPORTANT for context!)
-            'md', 'markdown', 'mdx', 'txt', 'rst',
-            // Other useful files
-            'proto', 'thrift', 'gradle', 'cmake'
-        ];
-
-        // File extensions to EXCLUDE (ignore these completely)
-        this.excludeExtensions = [
-            // Styles
-            'css', 'scss', 'sass', 'less', 'styl',
-            // Images
-            'png', 'jpg', 'jpeg', 'gif', 'svg', 'ico', 'webp', 'bmp', 'tiff',
-            // Media
-            'mp4', 'avi', 'mov', 'wmv', 'flv', 'mp3', 'wav', 'ogg',
-            // Archives
-            'zip', 'tar', 'gz', 'rar', '7z', 'bz2',
-            // Databases
-            'db', 'sqlite', 'sqlite3', 'mdb', 'accdb',
-            // Binary/Compiled
-            'exe', 'dll', 'so', 'dylib', 'o', 'obj', 'class', 'jar', 'war',
-            // Lock files
-            'lock', 'lockb',
-            // Map files
-            'map',
-            // Fonts
-            'woff', 'woff2', 'ttf', 'eot', 'otf',
-            // Other binary/non-code
-            'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx'
-        ];
-
-        // Directories to exclude
-        this.excludeDirs = [
-            'node_modules',
-            'vendor',
-            'dist',
-            'build',
-            '.git',
-            '.github',
-            'coverage',
-            '__pycache__',
-            '.pytest_cache',
-            '.venv',
-            'venv',
-            'env',
-            '.idea',
-            '.vscode',
-            'target',  // Maven/Rust
-            'out',
-            'bin'
-        ];
-
-        // No hard file cap — extension/directory filters and MAX_FILE_SIZE
-        // are the natural limits. All matching code files get indexed.
+        // Shared with GitLabService via `codeFileFilter`. Kept as instance fields so
+        // a caller can still narrow or widen them per repo.
+        this.codeExtensions = [...CODE_EXTENSIONS];
+        this.excludeExtensions = [...EXCLUDE_EXTENSIONS];
+        this.excludeDirs = [...EXCLUDE_DIRS];
     }
 
     /**
-     * Parse GitHub URL to extract owner and repo
+     * Parse GitHub URL to extract owner and repo.
+     *
+     * `branch` is `null` when the URL names no branch, NOT `'main'`. Defaulting
+     * here erased the difference between "the user asked for main" and "we don't
+     * know yet", and the caller then requested `git/trees/main` on repos whose
+     * default is `master` — a 404, surfaced to the user as "Repository not
+     * found. Check the URL." Every repo that never renamed its default branch
+     * was unindexable.
+     *
      * @param {string} url - GitHub URL
-     * @returns {{owner: string, repo: string, branch: string} | null}
+     * @returns {{owner: string, repo: string, branch: string|null} | null}
      */
     parseGitHubUrl(url) {
         console.log('🔍 Parsing GitHub URL:', url);
@@ -113,7 +49,7 @@ export class GitHubService {
             if (match) {
                 const owner = match[1];
                 const repo = match[2].replace(/\.git$/, '');
-                const branch = match[3] || 'main';
+                const branch = match[3] || null;
 
                 console.log('✅ Parsed GitHub URL:', {
                     owner,
@@ -141,7 +77,31 @@ export class GitHubService {
      * @param {string} branch
      * @returns {Promise<Array>}
      */
-    async fetchRepoTree(owner, repo, branch = 'main') {
+    /**
+     * The repository's default branch, or null when it cannot be determined.
+     *
+     * Mirrors `GitLabService.getDefaultBranch`, which has always done this
+     * correctly; the two hosts should not disagree about how to find a repo's
+     * starting point.
+     *
+     * @param {string} owner
+     * @param {string} repo
+     * @param {Object} headers
+     * @returns {Promise<string|null>}
+     */
+    async getDefaultBranch(owner, repo, headers) {
+        try {
+            const response = await fetch(`${this.baseUrl}/repos/${owner}/${repo}`, { headers });
+            if (!response.ok) return null;
+            const data = await response.json();
+            return data.default_branch || null;
+        } catch (e) {
+            console.warn(`Could not resolve default branch for ${owner}/${repo}:`, e?.message);
+            return null;
+        }
+    }
+
+    async fetchRepoTree(owner, repo, branch = null) {
         const headers = {
             'Accept': 'application/vnd.github.v3+json'
         };
@@ -151,11 +111,19 @@ export class GitHubService {
         }
 
         try {
-            // Get default branch if 'main' doesn't exist
-            const repoResponse = await fetch(`${this.baseUrl}/repos/${owner}/${repo}`, { headers });
-            if (!repoResponse.ok && branch === 'main') {
-                const repoData = await repoResponse.json();
-                branch = repoData.default_branch || 'master';
+            // Resolve the default branch when the URL did not name one. This
+            // reads `default_branch` on SUCCESS — the previous version only
+            // looked at it when the metadata request had already failed, i.e.
+            // exactly when the field is absent from the response.
+            if (!branch) {
+                branch = await this.getDefaultBranch(owner, repo, headers);
+            }
+            // Still unknown means the metadata call failed. `main` is the better
+            // guess for a repo we know nothing about, and the tree request's own
+            // 404 handler explains the failure from here.
+            if (!branch) {
+                console.warn(`Could not determine default branch for ${owner}/${repo}; trying "main"`);
+                branch = 'main';
             }
 
             // Fetch tree recursively
@@ -198,7 +166,9 @@ export class GitHubService {
                 console.warn(`⚠️ GitHub tree is TRUNCATED — repo has more than ${(data.tree || []).length} entries. Some files may not be indexed.`);
             }
 
-            return { tree: data.tree || [], truncated: !!data.truncated };
+            // The resolved branch goes back to the caller: file downloads must
+            // use the SAME ref the tree came from, or every path 404s.
+            return { tree: data.tree || [], truncated: !!data.truncated, branch };
         } catch (error) {
             console.error('Error fetching repo tree:', error);
             throw error;
@@ -210,30 +180,21 @@ export class GitHubService {
      * @param {Array} tree
      * @returns {Array}
      */
+    /**
+     * Filter a repo tree down to the files worth indexing.
+     *
+     * Delegates to the shared `codeFileFilter` so GitHub and GitLab index the SAME
+     * corpus. Two hand-maintained copies of the list had already diverged in
+     * coverage, and a repo indexed from one host retrieving different context than
+     * the same repo indexed from the other is not a difference a user can debug.
+     */
     filterCodeFiles(tree) {
-        return tree
-            .filter(item => item.type === 'blob') // Only files, not directories
-            .filter(item => {
-                // Check if file is in excluded directory
-                const pathParts = item.path.split('/');
-                const isInExcludedDir = pathParts.some(part =>
-                    this.excludeDirs.includes(part)
-                );
-                if (isInExcludedDir) {
-                    return false;
-                }
-
-                // Get file extension
-                const ext = item.path.split('.').pop().toLowerCase();
-
-                // First check exclusion list (explicit deny)
-                if (this.excludeExtensions.includes(ext)) {
-                    return false;
-                }
-
-                // Then check inclusion list (explicit allow)
-                return this.codeExtensions.includes(ext);
-            });
+        return filterIndexableFiles(tree, {
+            codeExtensions: this.codeExtensions,
+            excludeExtensions: this.excludeExtensions,
+            excludeDirs: this.excludeDirs,
+            maxFileSize: MAX_FILE_SIZE,
+        });
     }
 
     /**
@@ -284,11 +245,14 @@ export class GitHubService {
             throw new Error('Invalid GitHub URL');
         }
 
-        const { owner, repo, branch } = parsed;
+        const { owner, repo } = parsed;
 
         // Fetch tree
         if (onProgress) onProgress({ status: 'fetching_tree', message: 'Fetching repository structure...' });
-        const { tree, truncated } = await this.fetchRepoTree(owner, repo, branch);
+        // `branch` is re-read from the result rather than the URL: when the URL
+        // named none, the tree was fetched from the resolved default and the
+        // file downloads below have to use that same ref.
+        const { tree, truncated, branch } = await this.fetchRepoTree(owner, repo, parsed.branch);
 
         if (truncated && onProgress) {
             onProgress({
@@ -323,6 +287,13 @@ export class GitHubService {
             const batchPromises = batch.map(async (file) => {
                 try {
                     const content = await this.fetchFileContentWithRetry(owner, repo, file.path, branch);
+                    // Belt-and-braces size guard: the tree filter already drops blobs
+                    // whose reported `size` is over the limit, but the field is absent
+                    // on some entries and an unbounded file must never reach the index.
+                    if (content && content.length > MAX_FILE_SIZE) {
+                        console.warn(`⏭️  Skipping ${file.path}: ${content.length} bytes exceeds the ${MAX_FILE_SIZE}-byte index limit`);
+                        return null;
+                    }
                     if (content) {
                         return { path: file.path, content };
                     }

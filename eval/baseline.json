@@ -1,0 +1,15 @@
+{
+  "corpus": "eval/fixtures/synthetic.json",
+  "cases": 3,
+  "tolerance": 5,
+  "measured": {
+    "precision": 0.75,
+    "precisionLow": 0.30063605244263664,
+    "recall": 0.25,
+    "recallLow": 0.045586062644636216
+  },
+  "thresholds": {
+    "precisionLow": 0.30063605244263664,
+    "recallLow": 0.045586062644636216
+  }
+}

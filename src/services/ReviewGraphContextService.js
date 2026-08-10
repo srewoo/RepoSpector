@@ -20,6 +20,9 @@
  * Fully local: the graph lives in IndexedDB and is queried in-process. No network.
  */
 
+import { resolveBudget } from '../utils/reviewContextBudget.js';
+import { CallerSourceService } from './CallerSourceService.js';
+
 /** Identifiers that are never worth a graph lookup. */
 const NOISE = new Set([
     'if', 'else', 'for', 'while', 'return', 'function', 'const', 'let', 'var',
@@ -47,8 +50,18 @@ const DECL_PATTERNS = [
 ];
 
 export class ReviewGraphContextService {
-    constructor({ codeGraphPipeline } = {}) {
+    /**
+     * @param {Object} deps
+     * @param {Object} deps.codeGraphPipeline
+     * @param {Object} [deps.vectorStore] - when present, the callers the graph
+     *   names also get their SOURCE inlined; without it the service behaves
+     *   exactly as it did before, emitting summaries only.
+     */
+    constructor({ codeGraphPipeline, vectorStore } = {}) {
         this.pipeline = codeGraphPipeline;
+        this.callerSource = vectorStore
+            ? new CallerSourceService({ codeGraphPipeline, vectorStore })
+            : null;
     }
 
     /** Is a usable graph available for this repo? Loads it if persisted. */
@@ -75,10 +88,11 @@ export class ReviewGraphContextService {
      * @returns {Promise<{available:boolean, byFile:Record<string,string>, combined:string, stats:Object}>}
      */
     async buildForReview(prData, repoId, opts = {}) {
+        const budget = resolveBudget({ overrides: opts.budget || undefined });
         const {
-            maxFiles = 12,
-            maxCharsPerFile = 2500,
-            maxSymbolsPerFile = 4,
+            maxFiles = budget.graphMaxFiles,
+            maxCharsPerFile = budget.graphCharsPerFile,
+            maxSymbolsPerFile = budget.graphSymbolsPerFile,
         } = opts;
         const empty = { available: false, byFile: {}, combined: '', stats: { symbols: 0, filesWithContext: 0 } };
 
@@ -90,6 +104,19 @@ export class ReviewGraphContextService {
         let symbolCount = 0;
         const impactedFiles = new Set();
         const changedFileNames = new Set(files.map(f => f.filename).filter(Boolean));
+
+        // Caller SOURCE, resolved once for every changed symbol in the PR.
+        // Batched deliberately: the vector store is indexed by repo, so a
+        // per-file read would rescan every chunk in the repository.
+        const allSymbols = [];
+        for (const f of files) {
+            if (!f.filename) continue;
+            const declared = this._extractDeclaredSymbols(this._addedLines(f.patch));
+            allSymbols.push(...declared.slice(0, maxSymbolsPerFile));
+        }
+        const callerSource = await this._buildCallerSource(
+            [...new Set(allSymbols)], repoId, budget, changedFileNames,
+        );
 
         for (const f of files) {
             if (!f.filename) continue;
@@ -104,6 +131,17 @@ export class ReviewGraphContextService {
                 if (section) {
                     sections.push(section);
                     symbolCount++;
+                }
+                // The callers' actual code, right under the summary that names
+                // them. This is what lets the model decide whether a contract
+                // change breaks them instead of only noting that it might.
+                const source = callerSource.bySymbol[sym];
+                if (source) {
+                    sections.push(
+                        `**Source of the callers of \`${sym}\`** — judge against this whether the change breaks them. `
+                        + 'These excerpts come from the repository index, not the diff; do not report findings on their line numbers.\n\n'
+                        + source,
+                    );
                 }
             }
 
@@ -161,6 +199,31 @@ export class ReviewGraphContextService {
                 externalImpactedFiles: externalImpact.length,
             },
         };
+    }
+
+    /**
+     * Caller source for every changed symbol, or an empty result.
+     *
+     * Soft in every direction: no vector store, no budget, or a failed read all
+     * degrade to the summaries-only behaviour this service had before.
+     */
+    async _buildCallerSource(symbols, repoId, budget, changedFileNames) {
+        const empty = { bySymbol: {}, stats: { callers: 0 } };
+        if (!this.callerSource || !repoId) return empty;
+        if (!budget?.callerSources) return empty;
+
+        const result = await this.callerSource.build(symbols, repoId, {
+            perSymbol: budget.callerSources,
+            maxLines: budget.callerSourceLines,
+            excludeFiles: changedFileNames,
+        });
+        if (result.stats.callers > 0) {
+            console.log(
+                `🔗 Inlined source for ${result.stats.callers} caller(s) `
+                + `across ${result.stats.symbols} changed symbol(s)`,
+            );
+        }
+        return result;
     }
 
     /**

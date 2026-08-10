@@ -82,6 +82,7 @@ export function PRReviewInterface({
         reviewEffort, isMultiPass,
         standardsChecklist, summaryCounts,
         reviewVerdict, reviewEvent, blockingCount,
+        reviewSkipped, gate,
         handleOpenThread, handleSendMessage, handleQuickAction,
         handleMarkResolved, handleDismiss, handleDismissFinding,
         repoId
@@ -148,6 +149,11 @@ export function PRReviewInterface({
                     analysisResult: {
                         ...(staticAnalysisResult ?? {}),
                         findings,
+                        // Let the post handler refuse an APPROVE/REQUEST_CHANGES for a
+                        // run that a skip rule short-circuited. Without these two
+                        // fields its guard has nothing to check.
+                        reviewSkipped: reviewSkipped === true,
+                        gate: gate ?? null,
                     },
                     aiSummary,
                     options: {
@@ -175,7 +181,7 @@ export function PRReviewInterface({
             // Clear result after 5 seconds
             setTimeout(() => setPostResult(null), 5000);
         }
-    }, [prUrl, findings, staticAnalysisResult, aiSummary, postingReview, reviewEvent, setPostingReview, setPostResult]);
+    }, [prUrl, findings, staticAnalysisResult, aiSummary, postingReview, reviewEvent, reviewSkipped, gate, setPostingReview, setPostResult]);
 
     // Generate PR description
     const handleGenerateDescription = useCallback(async (apply = false) => {

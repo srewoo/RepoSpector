@@ -167,6 +167,12 @@ Tests requiring a real DB, Redis, Kafka, or HTTP server must use \`testcontainer
 ## GO-TEST-005: No \`time.Sleep\` in tests
 Use channels or \`sync.WaitGroup\` to synchronise test goroutines.`;
 
+// ---- Extended corpus (perf aspect + Java) ----
+//
+// Kept in a sibling module rather than inline: this file was already at the
+// project's 300-line ceiling, and the added text is data, not logic.
+import { PERF_STANDARDS, HYGIENE_STANDARDS, JAVA_STANDARDS } from './standardsCorpus.js';
+
 // ---- Language detection ----
 
 /**
@@ -182,7 +188,8 @@ const EXT_TO_LANG = {
     cjs: 'javascript',
     py: 'python',
     pyw: 'python',
-    go: 'go'
+    go: 'go',
+    java: 'java'
 };
 
 /**
@@ -202,49 +209,66 @@ export function detectLanguages(files) {
 // ---- Standards registry ----
 
 const STANDARDS = {
-    javascript: { coding: JS_CODING, testing: JS_TESTING },
-    python: { coding: PY_CODING, testing: PY_TESTING },
-    go: { coding: GO_CODING, testing: GO_TESTING }
+    javascript: {
+        coding: JS_CODING,
+        testing: JS_TESTING,
+        perf: PERF_STANDARDS.javascript,
+        hygiene: HYGIENE_STANDARDS.javascript,
+    },
+    python: {
+        coding: PY_CODING,
+        testing: PY_TESTING,
+        perf: PERF_STANDARDS.python,
+        hygiene: HYGIENE_STANDARDS.python,
+    },
+    go: {
+        coding: GO_CODING,
+        testing: GO_TESTING,
+        perf: PERF_STANDARDS.go,
+        hygiene: HYGIENE_STANDARDS.go,
+    },
+    java: JAVA_STANDARDS
 };
 
 /**
- * Builds a combined standards block for the detected languages.
- * Only includes testing standards when JSX/TSX files are in the diff
- * (consistent with the PR description's "adapter from the skill" note).
+ * Builds a combined standards block for the detected languages, covering all
+ * three aspects: coding, testing, and performance.
+ *
+ * Took a `files` argument until the JSX/TSX gate it fed was removed (see the
+ * note in the loop). Call sites that still pass one are harmless — the extra
+ * argument is ignored — but there is nothing left for it to decide.
  *
  * @param {Set<string>} langs - detected language families
- * @param {Array<{filename: string}>} files - changed files (for UI-testing gate)
  * @returns {{ text: string, ruleIds: string[] }}
  */
-export function buildStandardsBlock(langs, files = []) {
+export function buildStandardsBlock(langs) {
     const parts = [];
     const ruleIds = [];
 
-    const hasUI = files.some(f => /\.(jsx|tsx)$/i.test(f.filename || ''));
+    /** Harvest the citable IDs out of a section as it is added. */
+    const add = (text) => {
+        if (!text) return;
+        parts.push(text);
+        for (const match of text.matchAll(/^## ([A-Z]+-[A-Z]+-\d+):/gm)) {
+            ruleIds.push(match[1]);
+        }
+    };
 
     for (const lang of langs) {
         const std = STANDARDS[lang];
         if (!std) continue;
 
-        parts.push(std.coding);
-        // Extract rule IDs (lines matching `## ID:`)
-        for (const match of std.coding.matchAll(/^## ([A-Z]+-[A-Z]+-\d+):/gm)) {
-            ruleIds.push(match[1]);
-        }
-
-        // Only include testing standards for UI files (JS) or non-UI languages
-        if (lang !== 'javascript' || hasUI) {
-            parts.push(std.testing);
-            for (const match of std.testing.matchAll(/^## ([A-Z]+-[A-Z]+-\d+):/gm)) {
-                ruleIds.push(match[1]);
-            }
-        } else if (lang === 'javascript') {
-            // Always include JS testing standards (they apply to all JS, not just UI)
-            parts.push(std.testing);
-            for (const match of std.testing.matchAll(/^## ([A-Z]+-[A-Z]+-\d+):/gm)) {
-                ruleIds.push(match[1]);
-            }
-        }
+        // All three aspects apply to every detected language. Testing used to
+        // sit behind a JSX/TSX gate for JavaScript, but both branches of that
+        // condition pushed the same section — the gate had no effect and its
+        // two comments contradicted each other. Dropped rather than repaired,
+        // since the behaviour it described (withhold testing standards from
+        // non-UI JavaScript) is not one we want: a missing test on a service
+        // module is as much a finding as one on a component.
+        add(std.coding);
+        add(std.testing);
+        add(std.perf);
+        add(std.hygiene);
     }
 
     return { text: parts.join('\n\n---\n\n'), ruleIds };

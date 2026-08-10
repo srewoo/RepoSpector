@@ -26,7 +26,7 @@ describe('FindingVerificationService', () => {
         const { findings, dropped, stats } = await svc.verify([
             { file: 'a.py', line: 1, severity: 'high', title: 'fp' },
             { file: 'a.py', line: 2, severity: 'high', title: 'real' }
-        ], { prData, settings });
+        ], { prData, settings, llmRefutation: true });
 
         expect(dropped).toHaveLength(1);
         expect(dropped[0].title).toBe('fp');
@@ -41,7 +41,7 @@ describe('FindingVerificationService', () => {
         const svc = new FindingVerificationService({ llmService: llm });
         const { findings } = await svc.verify([
             { file: 'a.py', line: 1, severity: 'high', title: 'overrated' }
-        ], { prData, settings });
+        ], { prData, settings, llmRefutation: true });
         expect(findings[0].severity).toBe('low');
         expect(findings[0]._originalSeverity).toBe('high');
     });
@@ -51,7 +51,7 @@ describe('FindingVerificationService', () => {
         const svc = new FindingVerificationService({ llmService: llm });
         const { findings, dropped } = await svc.verify([
             { file: 'a.py', line: 1, severity: 'high', title: 'keep-me' }
-        ], { prData, settings });
+        ], { prData, settings, llmRefutation: true });
         expect(dropped).toHaveLength(0);
         expect(findings).toHaveLength(1);
     });
@@ -61,7 +61,7 @@ describe('FindingVerificationService', () => {
         const svc = new FindingVerificationService({ llmService: llm });
         const { findings, dropped } = await svc.verify([
             { file: 'a.py', line: 1, severity: 'high', title: 'uncertain' }
-        ], { prData, settings });
+        ], { prData, settings, llmRefutation: true });
         expect(dropped).toHaveLength(0);
         expect(findings).toHaveLength(1);
     });
@@ -71,8 +71,63 @@ describe('FindingVerificationService', () => {
         const svc = new FindingVerificationService({ llmService: llm });
         const { findings } = await svc.verify([
             { file: 'a.py', line: 1, severity: 'high', title: 'secret', source: 'static' }
-        ], { prData, settings });
+        ], { prData, settings, llmRefutation: true });
         expect(llm.streamChat).not.toHaveBeenCalled();
         expect(findings).toHaveLength(1);
+    });
+});
+
+describe('llmRefutation defaults', () => {
+    it('does not call the model unless the refuter is explicitly enabled', async () => {
+        const llm = mockLLM([{ vid: 'V0', keep: false, confidence: 0.99, reason: 'no' }]);
+        const svc = new FindingVerificationService({ llmService: llm });
+
+        const { findings, stats, usage } = await svc.verify(
+            [{ file: 'a.py', line: 1, severity: 'high', title: 'kept by default' }],
+            { prData, settings }   // no llmRefutation
+        );
+
+        expect(llm.streamChat).not.toHaveBeenCalled();
+        expect(stats.llmRefutation).toBe(false);
+        expect(usage).toEqual({ input: 0, output: 0 });
+        // A high-confidence refutation the model WOULD have returned must not
+        // apply when the model was never consulted.
+        expect(findings).toHaveLength(1);
+    });
+
+    it('still runs the deterministic gates with the refuter off', async () => {
+        const llm = mockLLM([]);
+        const svc = new FindingVerificationService({ llmService: llm });
+
+        // Line 99 does not exist in this file's diff — the evidence gate refutes
+        // it mechanically, with no model involved.
+        const { findings, dropped, stats } = await svc.verify(
+            [{ file: 'a.py', line: 99, severity: 'high', title: 'phantom' }],
+            {
+                prData: {
+                    title: 'PR',
+                    files: [{ filename: 'a.py', patch: '@@ -1,1 +1,2 @@\n a = 1\n+b = 2' }],
+                },
+                settings,
+            }
+        );
+
+        expect(llm.streamChat).not.toHaveBeenCalled();
+        expect(findings).toHaveLength(0);
+        expect(dropped).toHaveLength(1);
+        expect(stats.evidenceRefuted).toBe(1);
+    });
+
+    it('reports which mode ran, so a review can be attributed', async () => {
+        const llm = mockLLM([{ vid: 'V0', keep: true, confidence: 0.9 }]);
+        const svc = new FindingVerificationService({ llmService: llm });
+
+        const { stats } = await svc.verify(
+            [{ file: 'a.py', line: 1, severity: 'high', title: 't' }],
+            { prData, settings, llmRefutation: true }
+        );
+
+        expect(stats.llmRefutation).toBe(true);
+        expect(llm.streamChat).toHaveBeenCalled();
     });
 });

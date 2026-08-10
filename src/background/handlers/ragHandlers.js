@@ -8,6 +8,8 @@
  * factory returns the handler map so index.js can register them with the router.
  */
 
+import { detectPlatform } from '../../utils/gitHosts.js';
+
 /**
  * @param {object} opts
  * @param {object} opts.svc      - the BackgroundService instance
@@ -95,10 +97,10 @@ export function createRagHandlers({ svc, ragState, RAGService, GitHubService, Gi
 
             let service;
             let repoId;
-            if (url.includes('github.com')) {
+            if (detectPlatform(url) === 'github') {
                 service = new GitHubService(token);
                 repoId = service.getRepoId(url);
-            } else if (url.includes('gitlab.com')) {
+            } else if (detectPlatform(url) === 'gitlab') {
                 service = new GitLabService(token);
                 repoId = service.getRepoId(url);
             } else {

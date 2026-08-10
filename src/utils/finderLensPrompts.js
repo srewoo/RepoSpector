@@ -155,16 +155,26 @@ ${lens.instruction}
 
 ${RULES[mode] || RULES.default}`;
 
-    let user = `## PR: ${prTitle}\n\n`;
+    // Section order is load-bearing for prompt caching, not just readability.
+    // Everything a second round re-sends unchanged — PR title, graph context,
+    // the diff — comes FIRST, and the only part that grows between rounds
+    // (`existingTitles`) comes after it.
+    //
+    // This used to be the other way round, with the already-reported list above
+    // the diff. Because caching is a prefix match, round 2 diverged from round 1
+    // at the first new title and the diff below it — by far the largest block in
+    // the prompt — was re-read at full price on every round and every lens.
+    let stable = `## PR: ${prTitle}\n\n`;
     if (graphContext && String(graphContext).trim()) {
-        user += `## Cross-file context (code graph)\n${String(graphContext).slice(0, 1500)}\n\n`;
+        stable += `## Cross-file context (code graph)\n${String(graphContext).slice(0, 1500)}\n\n`;
     }
-    user += `## Already-reported issues (do NOT repeat these)\n`;
+    stable += `## Diff under review\n\`\`\`diff\n${String(diffText).slice(0, 12000)}\n\`\`\`\n\n`;
+
+    let user = `## Already-reported issues (do NOT repeat these)\n`;
     user += existingTitles.length
         ? existingTitles.slice(0, 40).map((t, i) => `${i + 1}. ${t}`).join('\n')
         : '(none yet)';
-    user += `\n\n## Diff under review\n\`\`\`diff\n${String(diffText).slice(0, 12000)}\n\`\`\`\n\n`;
-    user += `## Required output — JSON ONLY
+    user += `\n\n## Required output — JSON ONLY
 {
   "findings": [
     {
@@ -180,7 +190,18 @@ ${RULES[mode] || RULES.default}`;
     }
   ]
 }`;
-    return { system, user };
+
+    // `user` is returned as two parts so the transport can place a cache
+    // breakpoint at the end of the diff. Providers without a breakpoint format
+    // receive the two joined, which is byte-for-byte the single string this
+    // used to return.
+    return {
+        system,
+        user: [
+            { text: stable, cache: true },
+            { text: user },
+        ],
+    };
 }
 
 export default { FINDER_LENSES, buildLensFinderPrompt };

@@ -16,6 +16,68 @@
  * @returns {Record<string, Function>} handler map keyed by message type
  */
 import { ModelCatalogService } from '../../services/ModelCatalogService.js';
+import { setGitLabHosts, hostOf } from '../../utils/gitHosts.js';
+
+/**
+ * Split a user-entered host setting into a list.
+ *
+ * Accepts a single host, a comma/newline separated list, or an array — the
+ * settings field is free text and people paste whole MR URLs into it.
+ */
+export function parseHostList(value) {
+    if (Array.isArray(value)) return value.filter(Boolean);
+    if (typeof value !== 'string') return [];
+    return value.split(/[\s,;]+/).map(s => s.trim()).filter(Boolean);
+}
+
+/**
+ * Ask Chrome for access to the user's own GitLab instance.
+ *
+ * Self-hosted hostnames cannot be listed in the manifest at publish time, so
+ * they are `optional_host_permissions` granted at runtime. Also registers the
+ * content script for the host, which is what puts the review overlay on the MR
+ * page — without it the extension works only from the popup.
+ *
+ * Best-effort by design: a rejected prompt must not fail the settings save.
+ * The API path still works through the service worker once permission is
+ * granted, and if it is not, the user simply sees the existing error.
+ */
+export async function ensureHostAccess(value) {
+    const hosts = parseHostList(value)
+        .map(hostOf)
+        .filter(h => h && h !== 'gitlab.com');
+    if (hosts.length === 0) return { granted: false, hosts: [] };
+
+    const origins = hosts.map(h => `https://${h}/*`);
+
+    let granted = false;
+    try {
+        granted = await chrome.permissions.contains({ origins });
+        if (!granted) granted = await chrome.permissions.request({ origins });
+    } catch (e) {
+        console.warn('Host permission request failed:', e?.message);
+        return { granted: false, hosts };
+    }
+    if (!granted) return { granted: false, hosts };
+
+    // Content script for the granted hosts. Re-registering an existing id
+    // throws, so unregister first and ignore "not found".
+    try {
+        await chrome.scripting.unregisterContentScripts({ ids: ['repospector-selfhosted'] }).catch(() => {});
+        await chrome.scripting.registerContentScripts([{
+            id: 'repospector-selfhosted',
+            matches: origins,
+            js: ['assets/content.js'],
+            runAt: 'document_idle',
+            allFrames: false,
+        }]);
+        console.log(`🔧 Content script registered for ${hosts.join(', ')}`);
+    } catch (e) {
+        console.warn('Could not register content script for self-hosted host:', e?.message);
+    }
+
+    return { granted: true, hosts };
+}
 
 export function createSettingsHandlers({ svc, FindingFollowupService }) {
     async function handleFetchModels(message, sendResponse) {
@@ -58,7 +120,7 @@ export function createSettingsHandlers({ svc, FindingFollowupService }) {
             const { settings } = message.data || {};
 
             // Encrypt all sensitive keys before storing
-            const sensitiveKeys = ['apiKey', 'githubToken', 'gitlabToken', 'anthropicApiKey', 'googleApiKey', 'cohereApiKey', 'mistralApiKey', 'groqApiKey', 'huggingfaceApiKey'];
+            const sensitiveKeys = ['apiKey', 'githubToken', 'gitlabToken', 'jiraToken', 'anthropicApiKey', 'googleApiKey', 'cohereApiKey', 'mistralApiKey', 'groqApiKey', 'huggingfaceApiKey'];
 
             for (const key of sensitiveKeys) {
                 if (settings[key] && settings[key].trim() !== '') {
@@ -89,6 +151,16 @@ export function createSettingsHandlers({ svc, FindingFollowupService }) {
                 if (settings.gitlabToken) console.log('GitLab token updated');
             } catch (error) {
                 console.warn('Failed to decrypt platform tokens:', error);
+            }
+
+            // Self-hosted GitLab instances. Applied immediately so the very next
+            // review recognises a URL on the user's own host instead of falling
+            // through to the GitHub branch and 404ing against api.github.com.
+            try {
+                setGitLabHosts(parseHostList(settings.gitlabHosts ?? settings.gitlabHost));
+                await ensureHostAccess(settings.gitlabHosts ?? settings.gitlabHost);
+            } catch (error) {
+                console.warn('Could not apply GitLab host settings:', error?.message);
             }
 
             // Apply embedding-provider changes immediately so the next index/retrieve

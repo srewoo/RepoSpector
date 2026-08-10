@@ -696,7 +696,65 @@ export class VectorStore {
     }
 
     /**
+     * Get the stored chunks for specific files, in order.
+     *
+     * Returns chunks rather than a reconstructed file on purpose. The chunker
+     * overlaps consecutive chunks by ~200 tokens, so concatenating them
+     * duplicates lines — which is harmless for the retrieval and documentation
+     * paths that call `getFileContents`, but not for anything that needs to
+     * point at real source. A caller shown stitched-together text with drifting
+     * line numbers is worse than no caller at all.
+     *
+     * One pass over the repo's chunks regardless of how many paths are asked
+     * for: the object store is indexed by `repoId` only, so a per-file lookup
+     * would rescan the whole repo each time.
+     *
+     * @param {string} repoId
+     * @param {string[]} filePaths
+     * @returns {Promise<Map<string, Array<{chunkIndex: number, content: string}>>>}
+     */
+    async getChunksForFiles(repoId, filePaths) {
+        await this.init();
+        const wanted = new Set(filePaths || []);
+        if (wanted.size === 0) return new Map();
+
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction([this.storeName], 'readonly');
+            const store = transaction.objectStore(this.storeName);
+            const index = store.index('repoId');
+            const request = index.getAll(repoId);
+
+            request.onsuccess = () => {
+                const out = new Map();
+                for (const chunk of request.result || []) {
+                    if (!chunk.filePath || !chunk.content) continue;
+                    if (!wanted.has(chunk.filePath)) continue;
+                    if (!out.has(chunk.filePath)) out.set(chunk.filePath, []);
+                    out.get(chunk.filePath).push({
+                        chunkIndex: chunk.chunkIndex ?? 0,
+                        content: chunk.content,
+                        // Null on indexes built before line tracking existed;
+                        // consumers fall back to citing no lines at all.
+                        startLine: chunk.startLine ?? null,
+                    });
+                }
+                for (const list of out.values()) {
+                    list.sort((a, b) => a.chunkIndex - b.chunkIndex);
+                }
+                resolve(out);
+            };
+
+            request.onerror = (event) => reject(event.target.error);
+        });
+    }
+
+    /**
      * Get file contents for a repository (concatenated chunks per file)
+     *
+     * Note the chunks overlap, so the result repeats content at chunk
+     * boundaries. Fine for retrieval and summarisation; use `getChunksForFiles`
+     * where the exact text matters.
+     *
      * @param {string} repoId
      * @returns {Promise<Map<string, string>>} filePath -> content
      */

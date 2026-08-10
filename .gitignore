@@ -164,10 +164,13 @@ build/
 .qodo
 .claude
 graphify-out/
-# Evaluation corpus + outputs — contain proprietary MR diffs and review comments
-# fetched from private GitLab projects. Never commit these.
+# Evaluation DATA — proprietary MR diffs and review comments fetched from
+# private GitLab projects. Never commit these.
+#
+# The HARNESS (eval/lib, eval/*.js, eval/fixtures, eval/baseline.json) is
+# committed on purpose: `eval/` as a blanket ignore meant the scorer, the
+# thresholds and the numbers they produced all lived on one laptop, so no
+# accuracy claim about this reviewer could be reproduced or regression-gated.
 eval/corpus/
-eval/results/mr-findings-*.json
-eval/results/mr-worksheet-*.csv
-eval/results/mr-adjudication.md
-eval/
+eval/results/
+!eval/results/.gitkeep

@@ -5,6 +5,7 @@ import { HybridSearcher } from './HybridSearcher.js';
 import { IndexManifest, ManifestStore, hashContent } from './IndexManifest.js';
 import { RelevanceScorer } from './RelevanceScorer.js';
 import { expandQuery } from '../utils/queryExpander.js';
+import { assignChunkStartLines } from '../utils/chunkLines.js';
 
 export class RAGService {
     constructor(options = {}) {
@@ -115,7 +116,12 @@ export class RAGService {
         let emptyChunkFiles = 0;
 
         for (const file of files) {
-            const chunks = this.chunker.createSemanticChunks(file.content, 'embedding');
+            // Locate each chunk in the file so indexed excerpts can carry real
+            // line numbers instead of a warning telling the model not to cite them.
+            const chunks = assignChunkStartLines(
+                file.content,
+                this.chunker.createSemanticChunks(file.content, 'embedding'),
+            );
             const chunkIds = [];
             const chunkHashes = {};
 
@@ -143,6 +149,7 @@ export class RAGService {
                     filePath: file.path,
                     content: chunk.content,
                     chunkIndex: idx,
+                    startLine: chunk.startLine ?? null,
                     metadata: {
                         tokens: chunk.tokens,
                         type: chunk.type,
@@ -315,7 +322,12 @@ export class RAGService {
 
         // Process NEW files — all chunks need embedding
         for (const file of comparison.toAdd) {
-            const chunks = this.chunker.createSemanticChunks(file.content, 'embedding');
+            // Locate each chunk in the file so indexed excerpts can carry real
+            // line numbers instead of a warning telling the model not to cite them.
+            const chunks = assignChunkStartLines(
+                file.content,
+                this.chunker.createSemanticChunks(file.content, 'embedding'),
+            );
             const chunkIds = [];
             const chunkHashes = {};
 
@@ -330,6 +342,7 @@ export class RAGService {
                     filePath: file.path,
                     content: chunk.content,
                     chunkIndex: idx,
+                    startLine: chunk.startLine ?? null,
                     metadata: {
                         tokens: chunk.tokens,
                         type: chunk.type,
@@ -345,7 +358,12 @@ export class RAGService {
 
         // Process UPDATED files — chunk-level diff to minimize re-embedding
         for (const file of comparison.toUpdate) {
-            const chunks = this.chunker.createSemanticChunks(file.content, 'embedding');
+            // Locate each chunk in the file so indexed excerpts can carry real
+            // line numbers instead of a warning telling the model not to cite them.
+            const chunks = assignChunkStartLines(
+                file.content,
+                this.chunker.createSemanticChunks(file.content, 'embedding'),
+            );
             const newChunks = chunks.map((chunk, idx) => ({
                 id: `${repoId}:${file.path}:${idx}`,
                 content: chunk.content,
@@ -375,6 +393,7 @@ export class RAGService {
                         filePath: file.path,
                         content: chunk.content,
                         chunkIndex: newChunks.indexOf(chunk),
+                        startLine: chunk.startLine ?? null,
                         metadata: {
                             tokens: chunk.tokens,
                             type: chunk.type,

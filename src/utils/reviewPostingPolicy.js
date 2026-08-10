@@ -111,6 +111,10 @@ function normalizedConfidence(f) {
  * @param {Object} [options]
  * @param {string|null} [options.severityThreshold] - critical|high|medium|low|info|'all'
  * @param {number|null} [options.minConfidence] - 0..1; findings below are dropped
+ * @param {number|null} [options.minScore] - 1..10 self-reflection score floor. 0 or
+ *        absent disables the gate. A finding with NO score is never dropped by
+ *        it — an unscored finding means the scorer did not run or did not
+ *        answer, which is not evidence against the finding.
  * @param {boolean} [options.blockingOnlyInline=true] - the Bastion policy. Set
  *        false to restore the old "post everything" behaviour.
  * @param {number} [options.maxInline=15] - hard cap on inline comments
@@ -125,6 +129,7 @@ export function partitionForPosting(findings, options = {}) {
     const {
         severityThreshold = null,
         minConfidence = null,
+        minScore = null,
         blockingOnlyInline = true,
         maxInline = 15,
     } = options;
@@ -135,6 +140,7 @@ export function partitionForPosting(findings, options = {}) {
         total: flat.length,
         droppedBySeverityFloor: 0,
         droppedByConfidence: 0,
+        droppedByScore: 0,
         demotedToSummary: 0,
         inline: 0,
         cappedFromInline: 0,
@@ -146,6 +152,10 @@ export function partitionForPosting(findings, options = {}) {
 
     // ── Gate 2: confidence floor ─────────────────────────────────────────
     const confFloor = Number.isFinite(Number(minConfidence)) ? Number(minConfidence) : null;
+
+    // ── Gate 2b: self-reflection value-score floor ───────────────────────
+    const rawScore = Number(minScore);
+    const scoreFloor = Number.isFinite(rawScore) && rawScore > 0 ? rawScore : null;
 
     const kept = [];
     for (const f of flat) {
@@ -164,6 +174,13 @@ export function partitionForPosting(findings, options = {}) {
                 stats.droppedByConfidence++;
                 continue;
             }
+        }
+
+        // Same rule as confidence: an ABSENT score never drops a finding,
+        // because "the scorer did not answer" is not evidence of worthlessness.
+        if (scoreFloor != null && Number.isFinite(Number(f?.score)) && Number(f.score) < scoreFloor) {
+            stats.droppedByScore++;
+            continue;
         }
 
         kept.push(f);
@@ -205,6 +222,13 @@ export function partitionForPosting(findings, options = {}) {
             stats.demotedToSummary++;
         }
     }
+
+    // Order by self-reflection score before the cap bites, so what a reviewer
+    // sees inline is the most valuable subset rather than whichever findings
+    // happened to come first. Unscored sort as neutral, and sort is stable, so
+    // an unscored set keeps its existing order exactly.
+    const scoreOf = (f) => (Number.isFinite(Number(f?.score)) ? Number(f.score) : 5);
+    postable.sort((a, b) => scoreOf(b) - scoreOf(a));
 
     // Cap. Anything over the cap is demoted, not discarded.
     if (postable.length > maxInline) {
@@ -282,6 +306,7 @@ export function renderPolicyNote(stats) {
     if (stats.demotedToSummary) bits.push(`${stats.demotedToSummary} non-blocking finding(s) listed above rather than posted inline`);
     if (stats.droppedBySeverityFloor) bits.push(`${stats.droppedBySeverityFloor} below the configured severity floor`);
     if (stats.droppedByConfidence) bits.push(`${stats.droppedByConfidence} below the confidence floor`);
+    if (stats.droppedByScore) bits.push(`${stats.droppedByScore} below the value-score floor`);
     if (stats.suppressedAsDuplicate) bits.push(`${stats.suppressedAsDuplicate} already commented on`);
     if (!bits.length) return '';
     return `<sub>Only blocking findings are posted inline — ${bits.join('; ')}.</sub>`;

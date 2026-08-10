@@ -67,7 +67,14 @@ export function usePRReview({ analysisResult, staticAnalysisResult, prUrl, prDat
     const [generatedRepoInfo, setGeneratedRepoInfo] = useState(null);
     const [generating, setGenerating] = useState(null);
 
-    const { analysis, staticAnalysis, reviewEffort, isMultiPass, perFileFindings, verifiedFindings, reviewVerdict, reviewEvent, blockingCount } = analysisResult || {};
+    const {
+        analysis, staticAnalysis, reviewEffort, isMultiPass, perFileFindings,
+        verifiedFindings, reviewVerdict, reviewEvent, blockingCount,
+        // Set when a skip rule short-circuited the run. Carried all the way to the
+        // post handler so a review that read no code can never be posted as an
+        // approval — see `describeGateOutcome` in prReviewHandlers.
+        reviewSkipped, gate,
+    } = analysisResult || {};
     const staticFindings = staticAnalysisResult?.findings || staticAnalysis?.findings || [];
 
     // Derive findings
@@ -232,6 +239,7 @@ export function usePRReview({ analysisResult, staticAnalysisResult, prUrl, prDat
         reviewEffort, isMultiPass,
         standardsChecklist, summaryCounts,
         reviewVerdict, reviewEvent, blockingCount,
+        reviewSkipped, gate,
         // Handlers
         handleOpenThread, handleSendMessage, handleQuickAction,
         handleMarkResolved, handleDismiss, handleDismissFinding,

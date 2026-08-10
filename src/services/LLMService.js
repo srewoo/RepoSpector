@@ -5,12 +5,42 @@
 
 import { LLM_PROVIDERS, API_ENDPOINTS } from '../utils/constants.js';
 import { resolveModel } from '../utils/modelResolver.js';
+import {
+    buildAnthropicSystem,
+    extractCacheUsage,
+    flattenContent,
+    toAnthropicContent,
+} from '../utils/promptCache.js';
+import {
+    normalizeAnthropicToolCalls,
+    normalizeOpenAIToolCalls,
+} from '../utils/toolProtocol.js';
 
 export class LLMService {
     constructor() {
         this.activeRequests = new Map();
         this.maxRetries = 3;
         this.baseDelay = 1000; // 1 second
+    }
+
+    /**
+     * Can this provider drive a tool-use loop?
+     *
+     * Deliberately a short allow-list rather than a best-effort attempt
+     * everywhere. Google's function-calling uses a different request and
+     * response shape, and Ollama's support varies by model — a loop that
+     * half-works there would fail as "the model ignored the tools", which is
+     * indistinguishable from the model choosing not to call one. Callers check
+     * this and fall back to the ordinary single-shot path.
+     *
+     * @param {string} provider
+     * @returns {boolean}
+     */
+    static supportsTools(provider) {
+        return provider === LLM_PROVIDERS.OPENAI
+            || provider === LLM_PROVIDERS.ANTHROPIC
+            || provider === LLM_PROVIDERS.GROQ
+            || provider === LLM_PROVIDERS.MISTRAL;
     }
 
     /**
@@ -73,6 +103,12 @@ export class LLMService {
             model: resolved.modelIdentifier,
             messages
         };
+        // Tool definitions travel in the OpenAI shape; each provider adapter
+        // translates. Omitted entirely when absent so non-tool calls are
+        // byte-identical to what they were.
+        if (Array.isArray(options.tools) && options.tools.length > 0) {
+            requestData.tools = options.tools;
+        }
 
         const response = await this.callLLM(requestData, apiKey, {
             streaming: stream,
@@ -123,10 +159,22 @@ export class LLMService {
 
         console.log(`🤖 LLMService: Routing to provider '${provider}' with model '${modelId}'`);
 
-        // Update request data with actual model ID
+        // Update request data with actual model ID.
+        //
+        // A message's `content` may be an array of `{ text, cache }` parts so a
+        // caller can mark where its cacheable prefix ends. Only Anthropic has a
+        // wire format for that; for every other provider the parts are joined
+        // back into the exact string they would otherwise have sent, so those
+        // request bodies are byte-identical to before.
         const normalizedRequest = {
             ...requestData,
-            model: modelId
+            model: modelId,
+            messages: provider === LLM_PROVIDERS.ANTHROPIC
+                ? (requestData.messages || [])
+                : (requestData.messages || []).map(m => ({
+                    ...m,
+                    content: flattenContent(m.content),
+                })),
         };
 
         // Skip retry for streaming requests (can't replay partial chunks)
@@ -220,11 +268,22 @@ export class LLMService {
             }
 
             const data = await response.json();
+            const message = data.choices[0]?.message || {};
             return {
-                content: data.choices[0]?.message?.content || '',
+                content: message.content || '',
+                // Normalized so a caller driving a tool loop does not have to
+                // know which provider answered. Empty array when the model made
+                // no calls, so `.length` is always safe.
+                toolCalls: normalizeOpenAIToolCalls(message.tool_calls),
+                raw: message,
                 usage: {
                     input: data.usage?.prompt_tokens ?? 0,
                     output: data.usage?.completion_tokens ?? 0,
+                    // OpenAI caches automatically on a stable prefix — there is
+                    // no marker to send, only a result to read back. Surfaced
+                    // so a prefix that drifts shows up as cacheRead flatlining
+                    // at 0 rather than as a quiet cost increase.
+                    ...extractCacheUsage(data.usage, LLM_PROVIDERS.OPENAI),
                 },
             };
         } finally {
@@ -253,18 +312,37 @@ export class LLMService {
         try {
             // Convert OpenAI format to Anthropic format
             const messages = requestData.messages || [];
-            let systemPrompt = '';
-            const anthropicMessages = [];
+            const cache = options.cachePrompt !== false;
 
+            // System messages become the `system` field. Blocks with a
+            // `cache_control` breakpoint when they clear the provider's
+            // minimum, a plain string when they do not — in which case a marker
+            // would be silently ignored anyway.
+            const system = buildAnthropicSystem(messages, { cache });
+
+            // Anthropic renders tools → system → messages, and caching matches
+            // on that whole prefix. So the system text counts toward the
+            // minimum for a breakpoint placed in the first user message, and
+            // has to be carried in rather than measured per-message. In this
+            // codebase that is what makes user-turn caching viable at all: the
+            // system prompts run a few hundred tokens each, well under the bar
+            // on their own.
+            let rendered = typeof system === 'string'
+                ? system
+                : (system || []).map(b => b.text).join('');
+
+            const anthropicMessages = [];
             for (const msg of messages) {
-                if (msg.role === 'system') {
-                    systemPrompt += (systemPrompt ? '\n\n' : '') + msg.content;
-                } else {
-                    anthropicMessages.push({
-                        role: msg.role === 'user' ? 'user' : 'assistant',
-                        content: msg.content
-                    });
-                }
+                if (msg.role === 'system') continue;
+                const content = toAnthropicContent(msg.content, {
+                    cache,
+                    prefixText: rendered,
+                });
+                rendered += flattenContent(msg.content);
+                anthropicMessages.push({
+                    role: msg.role === 'user' ? 'user' : 'assistant',
+                    content,
+                });
             }
 
             const requestBody = {
@@ -274,8 +352,19 @@ export class LLMService {
                 stream: streaming
             };
 
-            if (systemPrompt) {
-                requestBody.system = systemPrompt;
+            if (system) {
+                requestBody.system = system;
+            }
+
+            // Tools arrive in the OpenAI shape (one shape for every caller) and
+            // are translated here. Anthropic nests the schema under
+            // `input_schema` rather than `function.parameters`.
+            if (Array.isArray(requestData.tools) && requestData.tools.length > 0) {
+                requestBody.tools = requestData.tools.map(t => ({
+                    name: t.function?.name ?? t.name,
+                    description: t.function?.description ?? t.description ?? '',
+                    input_schema: t.function?.parameters ?? t.input_schema ?? { type: 'object', properties: {} },
+                }));
             }
 
             const response = await fetch(endpoint, {
@@ -303,11 +392,30 @@ export class LLMService {
             const data = await response.json();
             // Anthropic returns content as an array of content blocks
             const textBlocks = data.content?.filter(block => block.type === 'text') || [];
+            const cacheUsage = extractCacheUsage(data.usage, LLM_PROVIDERS.ANTHROPIC);
             return {
                 content: textBlocks.map(block => block.text).join('') || '',
+                toolCalls: normalizeAnthropicToolCalls(data.content),
+                // The assistant turn must be echoed back verbatim on the next
+                // request of a tool loop, tool_use blocks included — rebuilding
+                // it from `content` alone would drop them and orphan the results.
+                raw: { role: 'assistant', content: data.content || [] },
+                stopReason: data.stop_reason || null,
                 usage: {
-                    input: data.usage?.input_tokens ?? 0,
+                    // `input` is the TOTAL prompt size, matching what it means
+                    // on every other provider and what it meant here before
+                    // caching existed. Anthropic's own `input_tokens` counts
+                    // only the uncached remainder, so reporting it directly
+                    // would have made every caller that sums `usage.input`
+                    // under-report by exactly the amount caching saved — the
+                    // token totals would have appeared to fall for a reason
+                    // that has nothing to do with how much work was done.
+                    input: cacheUsage.promptTotal,
                     output: data.usage?.output_tokens ?? 0,
+                    // The uncached remainder, kept under its own name for
+                    // anyone reasoning about spend rather than prompt size.
+                    inputUncached: data.usage?.input_tokens ?? 0,
+                    ...cacheUsage,
                 },
             };
         } finally {
@@ -338,11 +446,17 @@ export class LLMService {
             // Convert OpenAI format to Gemini format
             const messages = requestData.messages || [];
             const contents = [];
-            let systemInstruction = null;
+            // Accumulate system parts rather than assigning. This used to be a
+            // plain assignment, so a request with more than one system message
+            // silently kept only the LAST — the instructions in the first were
+            // dropped with no error. Callers now split stable instructions and
+            // large stable context across two system messages to form a
+            // cacheable prefix, which would have hit that bug every time.
+            const systemParts = [];
 
             for (const msg of messages) {
                 if (msg.role === 'system') {
-                    systemInstruction = { parts: [{ text: msg.content }] };
+                    systemParts.push({ text: String(msg.content ?? '') });
                 } else {
                     contents.push({
                         role: msg.role === 'user' ? 'user' : 'model',
@@ -359,8 +473,8 @@ export class LLMService {
                 }
             };
 
-            if (systemInstruction) {
-                requestBody.systemInstruction = systemInstruction;
+            if (systemParts.length > 0) {
+                requestBody.systemInstruction = { parts: systemParts };
             }
 
             const response = await fetch(endpoint, {
@@ -449,6 +563,7 @@ export class LLMService {
                 usage: {
                     input: data.usage?.prompt_tokens ?? 0,
                     output: data.usage?.completion_tokens ?? 0,
+                    ...extractCacheUsage(data.usage, LLM_PROVIDERS.OPENAI),
                 },
             };
         } finally {
@@ -507,6 +622,7 @@ export class LLMService {
                 usage: {
                     input: data.usage?.prompt_tokens ?? 0,
                     output: data.usage?.completion_tokens ?? 0,
+                    ...extractCacheUsage(data.usage, LLM_PROVIDERS.OPENAI),
                 },
             };
         } finally {

@@ -109,21 +109,100 @@ export class MultiFinderService {
         return { findings: added, stats: { rounds, added: added.length, byLens }, usage };
     }
 
-    _buildDiffText(prData) {
-        const parts = [];
-        let budget = 12000;
-        for (const f of (prData.files || [])) {
-            if (!f.patch) continue;
-            const chunk = `### ${f.filename}\n${f.patch}`;
-            if (chunk.length > budget) {
-                parts.push(chunk.slice(0, budget));
-                break;
-            }
-            parts.push(chunk);
-            budget -= chunk.length;
-            if (budget <= 0) break;
+    /**
+     * Render the diff for the finder prompts under a total character budget.
+     *
+     * Every file gets a FAIR SHARE of the budget rather than the budget being
+     * consumed front-to-back. The old version walked the files in order and
+     * `break`ed the moment one did not fit — so a single large first file
+     * consumed the whole 12k allowance and **no other file in the MR was ever
+     * shown to any lens**. Since the multi-finder pass is what moved measured
+     * human-comment recall from 0% to ~31%, that silently capped recall on
+     * exactly the large MRs where the eval recorded its misses (`store.js`,
+     * `head_wal.go`, `scheduling_queue.go` — all big files).
+     *
+     * Two passes: give every file its share, then redistribute what the small
+     * files did not use to the ones that were truncated. Truncation is announced
+     * inline so a lens knows it is looking at a partial file and does not reason
+     * about "the rest of the function" it cannot see.
+     *
+     * @param {object} prData
+     * @param {number} [totalBudget=12000]
+     * @returns {string}
+     */
+    _buildDiffText(prData, totalBudget = 12000) {
+        const withPatch = (prData.files || []).filter(f => f.patch);
+        if (withPatch.length === 0) return '';
+
+        // Below this a per-file slice is too small to reason about — three lines of
+        // a hunk with no surrounding context is worse than not showing the file,
+        // because it invites a finding the lens cannot actually ground.
+        const MIN_SHARE = 400;
+
+        // On a very wide MR the budget cannot give every file a usable slice. Show
+        // as many as CAN get one, biggest-change first, and say what was left out.
+        //
+        // Applying the floor to every file instead — `max(MIN_SHARE, total/n)` —
+        // silently multiplied the prompt past the budget it was supposed to enforce:
+        // 100 files × 400 chars is 40k against a 12k budget. That is how a "budget"
+        // fix ends up producing bigger prompts than the bug it replaced, and on a
+        // slow reasoning model a bigger prompt is what pushes a call into the
+        // request timeout and drops the whole review unit.
+        const maxFiles = Math.max(1, Math.floor(totalBudget / MIN_SHARE));
+        const sorted = [...withPatch].sort(
+            (a, b) => String(b.patch).length - String(a.patch).length,
+        );
+        const omitted = Math.max(0, sorted.length - maxFiles);
+        const rendered = sorted.slice(0, maxFiles).map(f => ({
+            filename: f.filename,
+            body: String(f.patch),
+        }));
+
+        const share = Math.max(MIN_SHARE, Math.floor(totalBudget / rendered.length));
+
+        // Pass 1: what does each file actually need, capped at its share?
+        let spent = 0;
+        for (const r of rendered) {
+            r.take = Math.min(r.body.length, share);
+            spent += r.take;
         }
-        return parts.join('\n\n');
+
+        // Pass 2: hand leftover budget to the files that were cut, round-robin, so
+        // one huge file cannot reclaim everything the others freed up.
+        let spare = totalBudget - spent;
+        let starved = rendered.filter(r => r.take < r.body.length);
+        while (spare > 0 && starved.length) {
+            const slice = Math.max(1, Math.floor(spare / starved.length));
+            let usedThisRound = 0;
+            for (const r of starved) {
+                if (spare - usedThisRound <= 0) break;
+                const extra = Math.min(slice, r.body.length - r.take, spare - usedThisRound);
+                r.take += extra;
+                usedThisRound += extra;
+            }
+            if (usedThisRound === 0) break;  // nothing more can be placed
+            spare -= usedThisRound;
+            starved = starved.filter(r => r.take < r.body.length);
+        }
+
+        const sections = rendered.map((r) => {
+            const truncated = r.take < r.body.length;
+            const body = truncated ? r.body.slice(0, r.take) : r.body;
+            const note = truncated
+                ? `\n… (diff for this file truncated at ${r.take} of ${r.body.length} chars)`
+                : '';
+            return `### ${r.filename}\n${body}${note}`;
+        });
+
+        // Never let omission be silent: a lens told "here is the diff" will reason as
+        // though it saw all of it.
+        if (omitted > 0) {
+            sections.push(
+                `### (${omitted} further changed file(s) omitted — diff budget exhausted)`,
+            );
+        }
+
+        return sections.join('\n\n');
     }
 
     _parseFindings(text) {

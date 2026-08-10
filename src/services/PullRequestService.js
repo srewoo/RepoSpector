@@ -6,7 +6,8 @@
 
 import { detectLanguageFromPath } from '../utils/languageMap.js';
 import { formatInlineComments } from '../utils/inlineCommentFormatter.js';
-import { buildCommentableLineMap } from '../utils/patchLines.js';
+import { buildCommentableLineMap, oldLineForNewLine } from '../utils/patchLines.js';
+import { gitlabApiBase, rememberGitLabHost } from '../utils/gitHosts.js';
 
 export class PullRequestService {
     constructor(options = {}) {
@@ -103,31 +104,45 @@ export class PullRequestService {
             };
         }
 
-        // GitLab MR: https://gitlab.com/owner/repo/-/merge_requests/123
-        const gitlabMatch = url.match(/gitlab\.com\/([^/]+)\/([^/]+)\/-\/merge_requests\/(\d+)/);
+        // GitLab MR on ANY host: https://<host>/<group>/<...>/repo/-/merge_requests/123
+        //
+        // The host used to be pinned to gitlab.com, so a self-hosted MR fell
+        // through to `return null` and the caller reported "unsupported URL".
+        // `/-/merge_requests/` is a GitLab route wherever it is served, which
+        // makes the project path everything between the origin and that marker —
+        // nested groups included, with no separate nested-group branch needed.
+        const gitlabMatch = url.match(/^https?:\/\/([^/]+)\/(.+?)\/-\/merge_requests\/(\d+)/);
         if (gitlabMatch) {
+            const host = gitlabMatch[1];
+            const projectPath = gitlabMatch[2];
+            const pathParts = projectPath.split('/');
+
+            // Remember the instance so later repo-only URLs from it (indexing,
+            // cross-repo impact) are recognised without configuration.
+            rememberGitLabHost(host);
+
             return {
                 platform: 'gitlab',
-                owner: gitlabMatch[1],
-                repo: gitlabMatch[2],
+                host,
+                apiBase: gitlabApiBase(url),
+                projectPath,
+                owner: pathParts.slice(0, -1).join('/'),
+                repo: pathParts[pathParts.length - 1],
                 mrNumber: parseInt(gitlabMatch[3])
             };
         }
 
-        // GitLab with nested groups: https://gitlab.com/group/subgroup/repo/-/merge_requests/123
-        const gitlabNestedMatch = url.match(/gitlab\.com\/(.+)\/-\/merge_requests\/(\d+)/);
-        if (gitlabNestedMatch) {
-            const pathParts = gitlabNestedMatch[1].split('/');
-            return {
-                platform: 'gitlab',
-                projectPath: gitlabNestedMatch[1],
-                owner: pathParts.slice(0, -1).join('/'),
-                repo: pathParts[pathParts.length - 1],
-                mrNumber: parseInt(gitlabNestedMatch[2])
-            };
-        }
-
         return null;
+    }
+
+    /**
+     * API base for a parsed GitLab MR.
+     *
+     * Falls back to the instance-wide default so callers that constructed a
+     * prInfo by hand (tests, older paths) keep working.
+     */
+    gitlabApiFor(prInfo) {
+        return prInfo?.apiBase || this.gitlabBaseUrl;
     }
 
     /**
@@ -288,6 +303,7 @@ export class PullRequestService {
     async fetchGitLabMR(mrInfo) {
         const { projectPath, owner, repo, mrNumber } = mrInfo;
         const projectId = encodeURIComponent(projectPath || `${owner}/${repo}`);
+        const api = this.gitlabApiFor(mrInfo);
 
         const headers = {
             'Content-Type': 'application/json'
@@ -298,7 +314,7 @@ export class PullRequestService {
         }
 
         try {
-            const base = `${this.gitlabBaseUrl}/projects/${projectId}/merge_requests/${mrNumber}`;
+            const base = `${api}/projects/${projectId}/merge_requests/${mrNumber}`;
 
             // Fetch MR details (single object, no pagination)
             const mrResponse = await fetch(base, { headers });
@@ -330,7 +346,7 @@ export class PullRequestService {
             // reviewer nothing actionable; the job names are what let it reason
             // about whether this diff explains the failure. Only fetched when the
             // pipeline is red, so the happy path costs no extra call.
-            const failedJobs = await this._fetchFailedJobNames(projectId, mrData?.head_pipeline, headers);
+            const failedJobs = await this._fetchFailedJobNames(projectId, mrData?.head_pipeline, headers, api);
 
             return this.normalizeGitLabMR(mrData, changesData, commitsData, notesData, approvals, failedJobs);
         } catch (error) {
@@ -347,11 +363,11 @@ export class PullRequestService {
      *
      * @returns {Promise<string[]>}
      */
-    async _fetchFailedJobNames(projectId, headPipeline, headers) {
+    async _fetchFailedJobNames(projectId, headPipeline, headers, apiBase = this.gitlabBaseUrl) {
         if (!headPipeline?.id || headPipeline.status !== 'failed') return [];
         try {
             const resp = await fetch(
-                `${this.gitlabBaseUrl}/projects/${projectId}/pipelines/${headPipeline.id}/jobs?scope[]=failed&per_page=20`,
+                `${apiBase}/projects/${projectId}/pipelines/${headPipeline.id}/jobs?scope[]=failed&per_page=20`,
                 { headers }
             );
             if (!resp.ok) return [];
@@ -760,7 +776,7 @@ export class PullRequestService {
 
         const encodedProject = encodeURIComponent(projectPath || `${owner}/${repo}`);
         const response = await fetch(
-            `${this.gitlabBaseUrl}/projects/${encodedProject}/merge_requests/${mrNumber}`,
+            `${this.gitlabApiFor(prInfo)}/projects/${encodedProject}/merge_requests/${mrNumber}`,
             {
                 method: 'PUT',
                 headers: {
@@ -1020,7 +1036,7 @@ export class PullRequestService {
         // the first note starts the thread, the rest are replies. That structure
         // is exactly what we need, so no reply-stitching is required here.
         const discussions = await this.fetchAllPagesGitLab(
-            `${this.gitlabBaseUrl}/projects/${project}/merge_requests/${prInfo.mrNumber}/discussions?per_page=100`,
+            `${this.gitlabApiFor(prInfo)}/projects/${project}/merge_requests/${prInfo.mrNumber}/discussions?per_page=100`,
             headers
         );
 
@@ -1132,7 +1148,7 @@ export class PullRequestService {
             const project = encodeURIComponent(prInfo.projectPath || `${prInfo.owner}/${prInfo.repo}`);
             const headers = { 'PRIVATE-TOKEN': this.gitlabToken };
             const listRes = await fetch(
-                `${this.gitlabBaseUrl}/projects/${project}/merge_requests?state=merged&order_by=updated_at&per_page=${maxRequests}`,
+                `${this.gitlabApiFor(prInfo)}/projects/${project}/merge_requests?state=merged&order_by=updated_at&per_page=${maxRequests}`,
                 { headers }
             );
             if (!listRes.ok) return [];
@@ -1141,7 +1157,7 @@ export class PullRequestService {
             const all = await Promise.all((mrs || []).map(async (mr) => {
                 try {
                     const r = await fetch(
-                        `${this.gitlabBaseUrl}/projects/${project}/merge_requests/${mr.iid}/notes?per_page=100`,
+                        `${this.gitlabApiFor(prInfo)}/projects/${project}/merge_requests/${mr.iid}/notes?per_page=100`,
                         { headers }
                     );
                     if (!r.ok) return [];
@@ -1204,6 +1220,7 @@ export class PullRequestService {
         }
 
         const encodedProject = encodeURIComponent(projectPath || `${owner}/${repo}`);
+        const api = this.gitlabApiFor(prInfo);
         const headers = {
             'Content-Type': 'application/json',
             'PRIVATE-TOKEN': this.gitlabToken
@@ -1214,7 +1231,7 @@ export class PullRequestService {
         // Post summary as a general note
         if (summary) {
             const noteResponse = await fetch(
-                `${this.gitlabBaseUrl}/projects/${encodedProject}/merge_requests/${mrNumber}/notes`,
+                `${api}/projects/${encodedProject}/merge_requests/${mrNumber}/notes`,
                 {
                     method: 'POST',
                     headers,
@@ -1236,7 +1253,7 @@ export class PullRequestService {
         // never carried them — so `position` was all-undefined and every inline
         // note was rejected with a 400. Fetch the refs once for the whole batch.
         const diffRefs = options.diffRefs
-            || await this._getGitLabDiffRefs(encodedProject, mrNumber, headers).catch(e => {
+            || await this._getGitLabDiffRefs(encodedProject, mrNumber, headers, api).catch(e => {
                 console.warn('Could not fetch GitLab diff_refs; skipping inline notes:', e.message);
                 return null;
             });
@@ -1244,6 +1261,13 @@ export class PullRequestService {
         // Post inline comments as diff notes
         for (const comment of (diffRefs ? inlineComments : [])) {
             try {
+                // GitLab's rule for a text position:
+                //   added line     -> new_line only  (old_line MUST be absent)
+                //   unchanged line -> both old_line and new_line
+                // Sending new_line alone for an unchanged line is a 400, which is
+                // how every context-line comment used to be silently lost. The
+                // formatter resolves `oldLine` from the patch and leaves it unset
+                // for added lines, so presence is the whole decision here.
                 const diffNoteBody = {
                     body: comment.body,
                     position: {
@@ -1253,12 +1277,13 @@ export class PullRequestService {
                         position_type: 'text',
                         new_path: comment.path,
                         old_path: comment.oldPath || comment.path,
-                        new_line: comment.line
+                        new_line: comment.line,
+                        ...(comment.oldLine != null ? { old_line: comment.oldLine } : {})
                     }
                 };
 
                 const diffResponse = await fetch(
-                    `${this.gitlabBaseUrl}/projects/${encodedProject}/merge_requests/${mrNumber}/discussions`,
+                    `${api}/projects/${encodedProject}/merge_requests/${mrNumber}/discussions`,
                     {
                         method: 'POST',
                         headers,
@@ -1291,9 +1316,9 @@ export class PullRequestService {
     }
 
     /** MR diff refs (base/start/head SHA) — mandatory for positioning diff notes. */
-    async _getGitLabDiffRefs(encodedProject, mrNumber, headers) {
+    async _getGitLabDiffRefs(encodedProject, mrNumber, headers, apiBase = this.gitlabBaseUrl) {
         const resp = await fetch(
-            `${this.gitlabBaseUrl}/projects/${encodedProject}/merge_requests/${mrNumber}`,
+            `${apiBase}/projects/${encodedProject}/merge_requests/${mrNumber}`,
             { headers }
         );
         if (!resp.ok) throw new Error(`GitLab API error: ${resp.status}`);
@@ -1347,10 +1372,20 @@ export class PullRequestService {
             lines.push('');
         }
 
-        // Top findings (limit to avoid huge comments)
+        // Top findings (limit to avoid huge comments).
+        //
+        // Matched the display vocabulary (`critical|high|medium`) literally, so any
+        // finding carrying a CANONICAL severity was silently omitted from the table
+        // — including every cross-repo impact finding, which is emitted as
+        // `blocking`/`suggestion`. Normalize before comparing.
         const maxFindings = options.maxFindings || 25;
+        const SUMMARY_SEVERITIES = new Set([
+            'critical', 'high', 'medium',          // display
+            'blocking', 'blocker', 'error',        // canonical / prose → blocking
+            'suggestion', 'warning', 'should',     // canonical / prose → medium
+        ]);
         const topFindings = findings
-            .filter(f => f.severity === 'critical' || f.severity === 'high' || f.severity === 'medium')
+            .filter(f => SUMMARY_SEVERITIES.has(String(f?.severity ?? '').toLowerCase()))
             .slice(0, maxFindings);
 
         if (topFindings.length > 0) {
@@ -1389,10 +1424,27 @@ export class PullRequestService {
         const commentableLines = options.commentableLines
             || (options.prData?.files ? buildCommentableLineMap(options.prData.files) : null);
 
-        return formatInlineComments(findings, {
+        const comments = formatInlineComments(findings, {
             ...options,
             maxInlineComments: options.maxInlineComments || 30,
             commentableLines,
+        });
+
+        // Resolve the old-side line for every comment that targets an UNCHANGED
+        // line. GitLab rejects a diff note on a context line unless it carries
+        // old_line as well as new_line, and those rejections were invisible —
+        // one `console.warn` per lost comment. Added lines resolve to null,
+        // which is the correct signal to omit the field entirely.
+        const patches = new Map(
+            (options.prData?.files || [])
+                .map(f => [f.filename || f.new_path || f.path, f.patch ?? f.diff ?? ''])
+                .filter(([name, patch]) => name && patch)
+        );
+        if (patches.size === 0) return comments;
+
+        return comments.map((c) => {
+            const oldLine = oldLineForNewLine(patches.get(c.path) || '', c.line);
+            return oldLine == null ? c : { ...c, oldLine };
         });
     }
 
@@ -1405,23 +1457,34 @@ export class PullRequestService {
      * @returns {Array} Findings with suggestedFix property populated
      */
     async generateFixSuggestions(findings, llmService, settings) {
+        // Read the location and evidence through the same aliases every other
+        // consumer uses. This filtered on `f.filePath` and `f.codeSnippet` only —
+        // keys that ONLY static-analysis findings carry — so for verified LLM
+        // findings (which use `file`, and carry evidence as `evidence`) the filter
+        // matched nothing and this whole pass was dead code. Same bug class the
+        // inline formatter documents having already fixed.
+        const locationOf = f => f?.filePath || f?.file || f?.path || null;
+        const snippetOf = f => f?.codeSnippet || f?.evidence || null;
+        const isBlocking = f => ['critical', 'high', 'blocking', 'blocker', 'error']
+            .includes(String(f?.severity ?? '').toLowerCase());
+
         const fixableFindings = findings.filter(f =>
-            f.filePath && f.line && f.codeSnippet &&
-            (f.severity === 'critical' || f.severity === 'high')
+            locationOf(f) && f.line && snippetOf(f) && isBlocking(f)
         ).slice(0, 25); // Limit to control API costs
 
         for (const finding of fixableFindings) {
+            const snippet = snippetOf(finding);
             try {
                 const response = await llmService.streamChat(
                     [
                         { role: 'system', content: 'You are a code fixer. Given a code issue, output ONLY the fixed line(s) of code. No explanation, no markdown, no code fences. Just the corrected code that should replace the problematic line.' },
-                        { role: 'user', content: `File: ${finding.filePath}\nLine ${finding.line}: ${finding.codeSnippet}\n\nIssue: ${finding.message}\n\nOutput the fixed code:` }
+                        { role: 'user', content: `File: ${locationOf(finding)}\nLine ${finding.line}: ${snippet}\n\nIssue: ${finding.message || finding.title || finding.description || ''}\n\nOutput the fixed code:` }
                     ],
                     { provider: settings.provider, model: settings.model, apiKey: settings.apiKey, stream: false }
                 );
 
                 const fix = (response.content || response).trim();
-                if (fix && fix !== finding.codeSnippet?.trim()) {
+                if (fix && fix !== String(snippet).trim()) {
                     finding.suggestedFix = fix;
                 }
             } catch (e) {
