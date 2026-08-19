@@ -24,6 +24,8 @@
  *     prompt as reference material under our own heading; see `sanitize()`.
  */
 
+import { githubRawBase, hostOf, originOf } from '../utils/gitHosts.js';
+
 const STORAGE_KEY = 'repospectorRemoteStandards';
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;  // 24h
 const FETCH_TIMEOUT_MS = 8000;
@@ -56,9 +58,28 @@ export function sanitize(text) {
  * Build the fetch URL for one standards file from a source descriptor.
  *
  * Supported sources:
- *   { type: 'url',    baseUrl }                    → {baseUrl}/{lang}/{aspect}.md
- *   { type: 'github', owner, repo, path?, ref? }   → raw.githubusercontent.com
- *   { type: 'gitlab', projectPath, path?, ref? }   → GitLab raw files API
+ *   { type: 'url',    baseUrl }                          → {baseUrl}/{lang}/{aspect}.md
+ *   { type: 'github', owner, repo, path?, ref?, host? }  → raw.githubusercontent.com,
+ *                                                           or the GHE instance's own
+ *                                                           raw endpoint when `host` names one
+ *   { type: 'gitlab', projectPath, path?, ref? }         → GitLab raw files API
+ *
+ * `host` (github AND gitlab): the enterprise/self-hosted instance, in ONE
+ * documented format — a BARE hostname (e.g. `github.acme.com`) OR a full URL
+ * with scheme (e.g. `https://github.acme.com`); both are accepted and
+ * normalised defensively via `hostOf`/`originOf` (which tolerate either).
+ * Previously `github` expected a bare hostname while `gitlab` expected a full
+ * URL, in the SAME function — a caller passing a full URL for `github` (e.g.
+ * `host: 'https://github.acme.com'`) produced `githubRawBase('https://https://
+ * github.acme.com')`, a broken URL. Omit `host` for github.com/gitlab.com.
+ * github.com serves raw content from a dedicated host with NO `/raw/`
+ * segment; a GHE instance serves it from its own host WITH a `/raw/` segment
+ * — the two templates are not interchangeable, see `githubRawBase`'s
+ * docstring in `utils/gitHosts.js`. The github.com-vs-GHE choice is made by
+ * comparing the DETECTED HOST (`hostOf(source.host)`) against the literal
+ * `'github.com'`, not by string-comparing `githubRawBase`'s resolved base —
+ * that base is an implementation detail of `githubRawBase` and coupling the
+ * discriminator to it only by convention is what let the two drift apart.
  */
 export function buildStandardsUrl(source, lang, aspect) {
     if (!source) return null;
@@ -73,7 +94,13 @@ export function buildStandardsUrl(source, lang, aspect) {
             if (!source.owner || !source.repo) return null;
             const ref = source.ref || 'main';
             const base = (source.path || 'standards').replace(/^\/+|\/+$/g, '');
-            return `https://raw.githubusercontent.com/${source.owner}/${source.repo}/${ref}/${base}/${rel}`;
+            const rawBase = githubRawBase(source.host);
+            const isGithubCom = !source.host || hostOf(source.host) === 'github.com';
+            // github.com: dedicated raw host, no `/raw/` segment.
+            // GHE: the instance's own host, WITH a `/raw/` segment.
+            return isGithubCom
+                ? `${rawBase}/${source.owner}/${source.repo}/${ref}/${base}/${rel}`
+                : `${rawBase}/${source.owner}/${source.repo}/raw/${ref}/${base}/${rel}`;
         }
         case 'gitlab': {
             if (!source.projectPath) return null;
@@ -81,7 +108,7 @@ export function buildStandardsUrl(source, lang, aspect) {
             const base = (source.path || 'standards').replace(/^\/+|\/+$/g, '');
             const filePath = encodeURIComponent(`${base}/${rel}`);
             const project = encodeURIComponent(source.projectPath);
-            const host = source.host || 'https://gitlab.com';
+            const host = originOf(source.host);
             return `${host}/api/v4/projects/${project}/repository/files/${filePath}/raw?ref=${ref}`;
         }
         default:

@@ -284,3 +284,127 @@ describe('recallByTag', () => {
         expect(recallByTag([], [{ file: 'a.js', line: 1, body: 'please rename' }])).toEqual([]);
     });
 });
+
+const { scorePrecisionBySource } = require('../../eval/lib/scoring.js');
+
+describe('scorePrecisionBySource', () => {
+    const predictions = [
+        { file: 'src/a.js', line: 10 },
+        { file: 'src/b.js', line: 20 },
+        { file: 'src/c.js', line: 30 },
+    ];
+
+    it('treats a verdict with no source as human', () => {
+        const out = scorePrecisionBySource(predictions, [
+            { file: 'src/a.js', line: 10, verdict: 'true_positive' },
+        ]);
+        expect(out.human.adjudicated).toBe(1);
+        expect(out.human.truePositives).toBe(1);
+        expect(out.llm.adjudicated).toBe(0);
+        expect(out.llm.rate).toBeNull();
+    });
+
+    it('keeps human and llm verdicts in separate samples', () => {
+        const out = scorePrecisionBySource(predictions, [
+            { file: 'src/a.js', line: 10, verdict: 'true_positive', source: 'human' },
+            { file: 'src/b.js', line: 20, verdict: 'false_positive', source: 'llm' },
+            { file: 'src/c.js', line: 30, verdict: 'true_positive', source: 'llm' },
+        ]);
+        expect(out.human.adjudicated).toBe(1);
+        expect(out.human.rate).toBe(1);
+        expect(out.llm.adjudicated).toBe(2);
+        expect(out.llm.rate).toBe(0.5);
+    });
+
+    it('never pools the two samples', () => {
+        const out = scorePrecisionBySource(predictions, [
+            { file: 'src/a.js', line: 10, verdict: 'false_positive', source: 'human' },
+            { file: 'src/b.js', line: 20, verdict: 'true_positive', source: 'llm' },
+        ]);
+        // Pooled would be 1/2 = 50%. Neither sample may report that.
+        expect(out.human.rate).toBe(0);
+        expect(out.llm.rate).toBe(1);
+    });
+});
+
+describe('scoreRun precision sourcing', () => {
+    it('reports human-only in `precision` and llm separately', () => {
+        const result = scoreRun([{
+            id: 'case-1',
+            predictions: [{ file: 'src/a.js', line: 10 }, { file: 'src/b.js', line: 20 }],
+            adjudications: [
+                { file: 'src/a.js', line: 10, verdict: 'true_positive', source: 'human' },
+                { file: 'src/b.js', line: 20, verdict: 'false_positive', source: 'llm' },
+            ],
+            humanComments: [],
+        }]);
+        expect(result.precision.adjudicated).toBe(1);
+        expect(result.precision.rate).toBe(1);
+        expect(result.precisionLlm.adjudicated).toBe(1);
+        expect(result.precisionLlm.rate).toBe(0);
+    });
+
+    it('leaves `precision` unmeasured when only llm verdicts exist', () => {
+        const result = scoreRun([{
+            id: 'case-1',
+            predictions: [{ file: 'src/a.js', line: 10 }],
+            adjudications: [{ file: 'src/a.js', line: 10, verdict: 'true_positive', source: 'llm' }],
+            humanComments: [],
+        }]);
+        expect(result.precision.rate).toBeNull();
+        expect(result.precisionLlm.rate).toBe(1);
+    });
+});
+
+const { formatReport } = require('../../eval/lib/scoring.js');
+
+describe('formatReport LLM labeling', () => {
+    function runWith(adjudications) {
+        return scoreRun([{
+            id: 'c1',
+            predictions: [{ file: 'src/a.js', line: 10 }],
+            adjudications,
+            humanComments: [],
+        }]);
+    }
+
+    it('labels the llm rate and never presents it as Precision', () => {
+        const text = formatReport(runWith([
+            { file: 'src/a.js', line: 10, verdict: 'true_positive', source: 'llm' },
+        ]));
+        expect(text).toContain('LLM-adjudicated — not authoritative');
+        // The authoritative line must still read as unmeasured.
+        expect(text).toMatch(/Precision \(human\):\s+n\/a/);
+    });
+
+    it('omits the llm line entirely when no llm verdicts exist', () => {
+        const text = formatReport(runWith([
+            { file: 'src/a.js', line: 10, verdict: 'true_positive' },
+        ]));
+        expect(text).not.toContain('LLM-adjudicated');
+    });
+});
+
+describe('baseline protection', () => {
+    const { refuseLlmBaseline } = require('../../eval/score.js');
+
+    it('refuses when the human sample is empty but llm verdicts exist', () => {
+        const result = { precision: { adjudicated: 0 }, precisionLlm: { adjudicated: 12 } };
+        expect(refuseLlmBaseline(result, { allowLlmBaseline: false })).toBe(true);
+    });
+
+    it('permits when the human sample is non-empty', () => {
+        const result = { precision: { adjudicated: 30 }, precisionLlm: { adjudicated: 12 } };
+        expect(refuseLlmBaseline(result, { allowLlmBaseline: false })).toBe(false);
+    });
+
+    it('permits when explicitly allowed', () => {
+        const result = { precision: { adjudicated: 0 }, precisionLlm: { adjudicated: 12 } };
+        expect(refuseLlmBaseline(result, { allowLlmBaseline: true })).toBe(false);
+    });
+
+    it('permits an ordinary run with no adjudications at all', () => {
+        const result = { precision: { adjudicated: 0 }, precisionLlm: { adjudicated: 0 } };
+        expect(refuseLlmBaseline(result, { allowLlmBaseline: false })).toBe(false);
+    });
+});

@@ -16,7 +16,7 @@
  * @returns {Record<string, Function>} handler map keyed by message type
  */
 import { ModelCatalogService } from '../../services/ModelCatalogService.js';
-import { setGitLabHosts, hostOf } from '../../utils/gitHosts.js';
+import { setGitLabHosts, setGitHubHosts, hostOf } from '../../utils/gitHosts.js';
 
 /**
  * Split a user-entered host setting into a list.
@@ -31,24 +31,57 @@ export function parseHostList(value) {
 }
 
 /**
- * Ask Chrome for access to the user's own GitLab instance.
+ * Ask Chrome for access to the user's own GitLab and/or GitHub Enterprise
+ * instances.
  *
  * Self-hosted hostnames cannot be listed in the manifest at publish time, so
  * they are `optional_host_permissions` granted at runtime. Also registers the
- * content script for the host, which is what puts the review overlay on the MR
- * page — without it the extension works only from the popup.
+ * content script for the hosts, which is what puts the review overlay on the
+ * MR/PR page — without it the extension works only from the popup.
  *
  * Best-effort by design: a rejected prompt must not fail the settings save.
  * The API path still works through the service worker once permission is
  * granted, and if it is not, the user simply sees the existing error.
+ *
+ * @param {string|string[]|{gitlabHosts?:string|string[], githubHosts?:string|string[]}} input
+ *        A bare string or array is read as the GitLab list, which is how this
+ *        was called before GHE support.
  */
-export async function ensureHostAccess(value) {
-    const hosts = parseHostList(value)
-        .map(hostOf)
-        .filter(h => h && h !== 'gitlab.com');
-    if (hosts.length === 0) return { granted: false, hosts: [] };
+export async function ensureHostAccess(input) {
+    const spec = (typeof input === 'string' || Array.isArray(input))
+        ? { gitlabHosts: input }
+        : (input || {});
 
-    const origins = hosts.map(h => `https://${h}/*`);
+    // The public instances are in the manifest already; requesting them at
+    // runtime would prompt the user for access they have had all along.
+    const PUBLIC = new Set(['gitlab.com', 'github.com', 'www.github.com']);
+    const hosts = [
+        ...parseHostList(spec.gitlabHosts),
+        ...parseHostList(spec.githubHosts),
+    ].map(hostOf).filter(h => h && !PUBLIC.has(h));
+
+    const unique = [...new Set(hosts)];
+
+    // Empty list ONLY: the user explicitly cleared every host, so this is the
+    // one path where tearing down any previous registration is unconditional
+    // and safe — there is nothing left it could apply to. "Not found" is the
+    // normal case when nothing was registered yet, so it is swallowed.
+    //
+    // This must NOT run for a non-empty list before the permission check
+    // below: if the user is adding a host alongside one already granted and
+    // working, and rejects the combined prompt, unregistering here first
+    // would tear down the previously-working registration for no reason —
+    // the rejection changes nothing about hosts already granted.
+    if (unique.length === 0) {
+        try {
+            await chrome.scripting.unregisterContentScripts({ ids: ['repospector-selfhosted'] });
+        } catch (e) {
+            // no previous registration — expected on first save
+        }
+        return { granted: false, hosts: [] };
+    }
+
+    const origins = unique.map(h => `https://${h}/*`);
 
     let granted = false;
     try {
@@ -56,9 +89,9 @@ export async function ensureHostAccess(value) {
         if (!granted) granted = await chrome.permissions.request({ origins });
     } catch (e) {
         console.warn('Host permission request failed:', e?.message);
-        return { granted: false, hosts };
+        return { granted: false, hosts: unique };
     }
-    if (!granted) return { granted: false, hosts };
+    if (!granted) return { granted: false, hosts: unique };
 
     // Content script for the granted hosts. Re-registering an existing id
     // throws, so unregister first and ignore "not found".
@@ -71,12 +104,12 @@ export async function ensureHostAccess(value) {
             runAt: 'document_idle',
             allFrames: false,
         }]);
-        console.log(`🔧 Content script registered for ${hosts.join(', ')}`);
+        console.log(`🔧 Content script registered for ${unique.join(', ')}`);
     } catch (e) {
         console.warn('Could not register content script for self-hosted host:', e?.message);
     }
 
-    return { granted: true, hosts };
+    return { granted: true, hosts: unique };
 }
 
 export function createSettingsHandlers({ svc, FindingFollowupService }) {
@@ -153,14 +186,19 @@ export function createSettingsHandlers({ svc, FindingFollowupService }) {
                 console.warn('Failed to decrypt platform tokens:', error);
             }
 
-            // Self-hosted GitLab instances. Applied immediately so the very next
-            // review recognises a URL on the user's own host instead of falling
-            // through to the GitHub branch and 404ing against api.github.com.
+            // Self-hosted GitLab and GitHub Enterprise instances. Applied
+            // immediately so the very next review recognises a URL on the
+            // user's own host instead of falling through to the wrong forge's
+            // API (or, for GHE, being unrecognised entirely — see gitHosts.js).
             try {
                 setGitLabHosts(parseHostList(settings.gitlabHosts ?? settings.gitlabHost));
-                await ensureHostAccess(settings.gitlabHosts ?? settings.gitlabHost);
+                setGitHubHosts(parseHostList(settings.githubEnterpriseHosts));
+                await ensureHostAccess({
+                    gitlabHosts: settings.gitlabHosts ?? settings.gitlabHost,
+                    githubHosts: settings.githubEnterpriseHosts,
+                });
             } catch (error) {
-                console.warn('Could not apply GitLab host settings:', error?.message);
+                console.warn('Could not apply host settings:', error?.message);
             }
 
             // Apply embedding-provider changes immediately so the next index/retrieve

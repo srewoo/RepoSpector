@@ -1,4 +1,4 @@
-import { FINDER_LENSES, buildLensFinderPrompt } from '../utils/finderLensPrompts.js';
+import { FINDER_LENSES, buildLensFinderPrompt, activeLenses } from '../utils/finderLensPrompts.js';
 import { freshFindings } from '../utils/findingDedup.js';
 
 /**
@@ -12,6 +12,21 @@ import { freshFindings } from '../utils/findingDedup.js';
  *
  * BYOK: every finder call uses the user's own provider/model.
  */
+/**
+ * Per-lens request timeout.
+ *
+ * The LLMService default is 120s, which a reasoning model does not finish a long
+ * lens prompt in. Measured on a 30-file MR against `openai:gpt-5`, the two lenses
+ * with the LONGEST instructions — `systemic` and `intent-implementation` — aborted
+ * on 3 of 4 invocations while every short-prompt lens returned. So the default
+ * silently disabled precisely the two lenses that reason hardest, and the review
+ * looked complete.
+ *
+ * 5 minutes matches the local-model branch of LLMService, which already assumed
+ * slow inference needs more than two.
+ */
+const FINDER_TIMEOUT_MS = 300000;
+
 export class MultiFinderService {
     constructor({ llmService } = {}) {
         this.llmService = llmService;
@@ -33,12 +48,18 @@ export class MultiFinderService {
             prData = {},
             settings = {},
             graphContext = '',
+            // Retrieved prior-art candidates from ReviewReuseContextService.
+            // Absent, the reuse lens is dropped rather than left to speculate.
+            reuseContext = '',
             lenses = FINDER_LENSES,
             maxRounds = 2,
             onProgress = null,
             // 'default' (precision-biased) | 'recall' — see finderLensPrompts RULES.
             promptMode = 'default'
         } = opts;
+
+        /** Lenses that errored or timed out this run — reported, never swallowed. */
+        const failedLenses = [];
 
         if (!this.llmService) {
             return { findings: [], stats: { rounds: 0, added: 0, byLens: {} }, usage: { input: 0, output: 0 } };
@@ -55,9 +76,16 @@ export class MultiFinderService {
         const added = [];
         let rounds = 0;
 
-        // Test-quality lens only matters when test files are in the diff.
-        const hasTestFiles = (prData.files || []).some(f => /(\.test\.|\.spec\.|_test\.|test_|\/tests?\/)/i.test(f.filename || ''));
-        const activeLenses = lenses.filter(l => l.key !== 'test-quality' || hasTestFiles);
+        // Per-lens gating lives on the lenses themselves (`appliesTo`,
+        // `requiresReuseContext`) so adding a lens never means editing this
+        // runner. This used to hardcode the test-quality file test here.
+        const active = activeLenses(lenses, {
+            files: prData.files || [],
+            hasReuseContext: Boolean(reuseContext && String(reuseContext).trim()),
+        });
+        if (!active.length) {
+            return { findings: [], stats: { rounds: 0, added: 0, byLens: {} }, usage };
+        }
 
         for (let round = 0; round < maxRounds; round++) {
             rounds++;
@@ -65,18 +93,27 @@ export class MultiFinderService {
 
             const existingTitles = seen.map(f => f.title || f.message || '').filter(Boolean);
 
-            const roundResults = await Promise.all(activeLenses.map(async (lens) => {
+            const roundResults = await Promise.all(active.map(async (lens) => {
                 const { system, user } = buildLensFinderPrompt(lens, {
                     prTitle: prData.title,
                     diffText,
                     existingTitles,
                     graphContext,
+                    // Only the reuse lens reads this; passing it to every lens
+                    // would spend the cached prefix on context they ignore.
+                    reuseContext: lens.requiresReuseContext ? reuseContext : '',
                     mode: promptMode
                 });
                 try {
                     const resp = await this.llmService.streamChat(
                         [{ role: 'system', content: system }, { role: 'user', content: user }],
-                        { provider: settings.provider, model: settings.model, apiKey: settings.apiKey, stream: false }
+                        {
+                            provider: settings.provider,
+                            model: settings.model,
+                            apiKey: settings.apiKey,
+                            stream: false,
+                            timeout: FINDER_TIMEOUT_MS,
+                        }
                     );
                     usage.input += resp?.usage?.input || 0;
                     usage.output += resp?.usage?.output || 0;
@@ -84,7 +121,12 @@ export class MultiFinderService {
                         .map(f => ({ ...f, source: 'llm', lens: lens.key }));
                     return { lens: lens.key, findings };
                 } catch (e) {
+                    // A lens that dies contributes nothing, and an empty array is
+                    // indistinguishable from "this lens looked and found nothing
+                    // clean". Record it so the caller can say which lens was
+                    // missing rather than reporting a partial review as a full one.
                     console.warn(`Finder lens ${lens.key} failed:`, e?.message);
+                    failedLenses.push({ lens: lens.key, reason: e?.message || 'unknown' });
                     return { lens: lens.key, findings: [] };
                 }
             }));
@@ -106,7 +148,17 @@ export class MultiFinderService {
 
         onProgress?.({ phase: 'finding', message: `Diversity finders added ${added.length} new findings.`, added: added.length });
 
-        return { findings: added, stats: { rounds, added: added.length, byLens }, usage };
+        if (failedLenses.length) {
+            console.warn(
+                `⚠️ Multi-finder: ${failedLenses.length} lens(es) produced nothing because they FAILED, `
+                + `not because they found nothing: ${failedLenses.map(f => f.lens).join(', ')}`
+            );
+        }
+        return {
+            findings: added,
+            stats: { rounds, added: added.length, byLens, failedLenses },
+            usage,
+        };
     }
 
     /**

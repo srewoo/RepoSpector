@@ -35,6 +35,11 @@ const DEFAULT_GITLAB_HOSTS = ['gitlab.com'];
 /** Configured GitLab hosts, lower-cased. Seeded with the public instance. */
 let gitlabHosts = new Set(DEFAULT_GITLAB_HOSTS);
 
+const DEFAULT_GITHUB_HOSTS = ['github.com'];
+
+/** Configured GitHub hosts, lower-cased. Seeded with the public instance. */
+let githubHosts = new Set(DEFAULT_GITHUB_HOSTS);
+
 /** Parse a URL without throwing; returns null for anything unparseable. */
 function toUrl(value) {
     if (!value || typeof value !== 'string') return null;
@@ -120,6 +125,15 @@ export function detectPlatform(url) {
 
     if (isKnownGitLabHost(host)) return PLATFORM.GITLAB;
 
+    // GHE is configuration-only, and deliberately so. GitLab earns structural
+    // detection because `/-/` is a route marker unique to GitLab. GitHub's
+    // `/pull/<n>` is NOT unique — Codeberg, Gitea and other forges listed in
+    // the manifest use the same or a near-identical shape — so inferring GitHub
+    // from path structure would route those hosts to the GitHub API and 404.
+    // The cost is that an enterprise host must be registered in settings before
+    // its first review; the alternative is misrouting other forges silently.
+    if (isKnownGitHubHost(host)) return PLATFORM.GITHUB;
+
     return null;
 }
 
@@ -146,6 +160,91 @@ export function gitlabApiBase(url) {
     // Preserve a non-default port (self-hosted instances often run on one) and
     // the scheme, so an internal http-only instance still resolves.
     return `${parsed.protocol}//${parsed.host}/api/v4`;
+}
+
+/**
+ * Replace the configured GitHub Enterprise host list.
+ *
+ * Always keeps github.com, so enabling an enterprise instance never breaks
+ * review of a public PR.
+ *
+ * @param {string|string[]|null|undefined} hosts - hostnames or full URLs
+ */
+export function setGitHubHosts(hosts) {
+    const next = new Set(DEFAULT_GITHUB_HOSTS);
+    const list = Array.isArray(hosts) ? hosts : (hosts ? [hosts] : []);
+    for (const entry of list) {
+        const host = hostOf(entry);
+        if (host) next.add(host);
+    }
+    githubHosts = next;
+}
+
+/** Register a GitHub host discovered at runtime (e.g. from a parsed PR URL). */
+export function rememberGitHubHost(hostOrUrl) {
+    const host = hostOf(hostOrUrl);
+    if (host) githubHosts.add(host);
+}
+
+/** The currently configured GitHub hosts, for display and diagnostics. */
+export function getGitHubHosts() {
+    return [...githubHosts];
+}
+
+/** Reset to defaults. Test seam — production code has no reason to call this. */
+export function resetGitHubHosts() {
+    githubHosts = new Set(DEFAULT_GITHUB_HOSTS);
+}
+
+/** Is this host a configured GitHub instance (exact match or subdomain)? */
+export function isKnownGitHubHost(hostOrUrl) {
+    const host = hostOf(hostOrUrl);
+    if (!host) return false;
+    for (const known of githubHosts) {
+        if (host === known || host.endsWith(`.${known}`)) return true;
+    }
+    return false;
+}
+
+/**
+ * REST API base for the GitHub instance serving `url`.
+ *
+ * GHE Server roots its REST API at `/api/v3` on the instance itself, unlike
+ * github.com which uses a separate api. subdomain.
+ *
+ * @param {string} [url] - any URL on the instance; defaults to github.com
+ * @returns {string}
+ */
+export function githubApiBase(url) {
+    const parsed = toUrl(url);
+    if (!parsed) return 'https://api.github.com';
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'github.com' || host === 'www.github.com' || host === 'api.github.com') {
+        return 'https://api.github.com';
+    }
+    // Scheme and a non-default port are preserved: internal instances run on both.
+    return `${parsed.protocol}//${parsed.host}/api/v3`;
+}
+
+/**
+ * Base for raw file content on the instance serving `url`.
+ *
+ * The two branches use different URL templates — do not append the same
+ * suffix to both:
+ *
+ *   - github.com: base is a dedicated host with NO `/raw/` segment, e.g.
+ *     `https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>`.
+ *   - GHE: base is the instance's own web host, WITH a `/raw/` segment, e.g.
+ *     `https://github.acme.com/<owner>/<repo>/raw/<ref>/<path>`.
+ */
+export function githubRawBase(url) {
+    const parsed = toUrl(url);
+    if (!parsed) return 'https://raw.githubusercontent.com';
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'github.com' || host === 'www.github.com') {
+        return 'https://raw.githubusercontent.com';
+    }
+    return `${parsed.protocol}//${parsed.host}`;
 }
 
 /**
@@ -238,4 +337,11 @@ export default {
     rememberGitLabHost,
     getGitLabHosts,
     resetGitLabHosts,
+    isKnownGitHubHost,
+    setGitHubHosts,
+    rememberGitHubHost,
+    getGitHubHosts,
+    resetGitHubHosts,
+    githubApiBase,
+    githubRawBase,
 };

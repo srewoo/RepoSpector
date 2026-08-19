@@ -46,6 +46,16 @@ const RESOLUTION = /\b(fixed in [0-9a-f]{6,}|added in [0-9a-f]{6,}|resolving\b|r
 /** Content-free acknowledgements. */
 const CHATTER = /^\s*(lgtm|looks good|nice|thanks|ty|\+1|👍|ok|okay)\b/i;
 
+/**
+ * Mines in progress, keyed by repoId.
+ *
+ * Module-level rather than an instance field on purpose: `prReviewHandlers`
+ * constructs a fresh miner for every review, so an instance field could never
+ * see the prewarm the indexing handler started moments earlier — which is the
+ * entire point of warming.
+ */
+const inFlightMines = new Map();
+
 export function isBotAuthor(author) {
     const a = String(author || '');
     return BOT_AUTHOR.test(a) || BOT_GROUP.test(a);
@@ -167,6 +177,107 @@ export class ConventionMiner {
 
         console.log(`📐 Mined ${rules.length} convention(s) for ${repoId} from ${requests.length} reviewer comment(s)`);
         return result;
+    }
+
+    /**
+     * Ensure conventions for `repoId` are mined, or being mined.
+     *
+     * Idempotent and safe to call from several places: a prewarm triggered by
+     * indexing and a review starting a second later collapse to one LLM call.
+     *
+     * Never throws. A failed prewarm must not break the thing that triggered
+     * it — indexing and review both proceed fine without conventions.
+     *
+     * @param {string} repoId
+     * @param {() => Promise<Array<{author:string, body:string, file?:string}>>} notesFetcher
+     * @param {object} [opts] - forwarded to `mine`
+     * @returns {Promise<object|null>} the mined conventions, or null on failure
+     */
+    async prewarm(repoId, notesFetcher, opts = {}) {
+        if (!repoId) return null;
+
+        // Registration below is synchronous (no `await` precedes it) so that a
+        // second, concurrent call — even one made before this call's first
+        // microtask tick — sees the in-flight entry and dedupes against it.
+        const existing = inFlightMines.get(repoId);
+        if (existing) return existing;
+
+        const task = (async () => {
+            const cached = await this.getCached(repoId).catch(() => null);
+            if (cached) return cached;
+
+            const notes = await notesFetcher();
+            return this.mine(repoId, notes || [], opts);
+        })()
+            .catch((e) => {
+                console.warn(`ConventionMiner: prewarm for ${repoId} failed:`, e?.message);
+                return null;
+            })
+            .finally(() => {
+                // Cleared on both paths so a transient provider failure does not
+                // wedge the repo into "permanently mining".
+                inFlightMines.delete(repoId);
+            });
+
+        inFlightMines.set(repoId, task);
+        return task;
+    }
+
+    /** The in-flight mine for a repo, or null. */
+    static inFlight(repoId) {
+        return inFlightMines.get(repoId) ?? null;
+    }
+
+    /**
+     * True when `mined` is a genuine answer (cached success, including a
+     * legitimately cached zero-rule result) rather than one of `mine()`'s
+     * three non-persisting sentinel results ('insufficient history',
+     * 'no llm service', 'llm error').
+     *
+     * `mine()`'s persisted success path stamps `stats.rulesFound`; the
+     * non-persisting branches stamp `stats.reason` instead and never write to
+     * storage. Callers should use this instead of `!!mined` or
+     * `mined?.rules?.length` — the latter conflates "cached, genuinely no
+     * conventions" (a real, reusable answer) with "no usable mine ran yet"
+     * (which should trigger a fresh mine attempt).
+     *
+     * @param {{stats?:{reason?:string, rulesFound?:number}}|null|undefined} mined
+     * @returns {boolean}
+     */
+    static isUsableResult(mined) {
+        if (!mined) return false;
+        return typeof mined.stats?.rulesFound === 'number';
+    }
+
+    /** Clear the registry. Test seam. */
+    static resetInFlight() {
+        inFlightMines.clear();
+    }
+
+    /**
+     * Wait for an in-flight mine, but not past `deadlineMs`.
+     *
+     * A review must never be blocked indefinitely on convention mining. Losing
+     * the race costs nothing beyond the wait: the caller falls back to the
+     * generic standards, which is exactly the pre-warm-up behaviour.
+     *
+     * @param {string} repoId
+     * @param {number} deadlineMs
+     * @returns {Promise<object|null>}
+     */
+    static async awaitWarm(repoId, deadlineMs) {
+        const pending = inFlightMines.get(repoId);
+        if (!pending) return null;
+
+        let timer;
+        try {
+            return await Promise.race([
+                pending,
+                new Promise((resolve) => { timer = setTimeout(() => resolve(null), deadlineMs); }),
+            ]);
+        } finally {
+            clearTimeout(timer);
+        }
     }
 
     _parseRules(text) {

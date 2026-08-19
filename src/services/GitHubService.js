@@ -2,6 +2,7 @@
  * GitHubService - Fetch repository files from GitHub API
  */
 
+import { githubApiBase, hostOf, detectPlatform, PLATFORM } from '../utils/gitHosts.js';
 import {
     CODE_EXTENSIONS,
     EXCLUDE_EXTENSIONS,
@@ -13,7 +14,7 @@ import {
 export class GitHubService {
     constructor(token = null) {
         this.token = token;
-        this.baseUrl = 'https://api.github.com';
+        this.baseUrl = githubApiBase();
 
         // Shared with GitLabService via `codeFileFilter`. Kept as instance fields so
         // a caller can still narrow or widen them per repo.
@@ -33,15 +34,27 @@ export class GitHubService {
      * was unindexable.
      *
      * @param {string} url - GitHub URL
-     * @returns {{owner: string, repo: string, branch: string|null} | null}
+     * @returns {{owner: string, repo: string, branch: string|null, host: string|null, apiBase: string} | null}
      */
     parseGitHubUrl(url) {
         console.log('🔍 Parsing GitHub URL:', url);
 
+        // Host-agnostic patterns are correct and necessary for GHE — but GitHub
+        // detection is configuration-only (unlike GitLab's structural `/-/`),
+        // so this method must NOT be the thing that decides a host is GitHub.
+        // Gate on `detectPlatform` first: github.com always passes, an
+        // enterprise host passes only once registered in settings, and
+        // anything else (Codeberg, Gitea, a bare two-segment path on any
+        // random host) returns null here rather than being parsed as GitHub.
+        if (detectPlatform(url) !== PLATFORM.GITHUB) {
+            console.warn('❌ Failed to parse GitHub URL: not a configured GitHub host');
+            return null;
+        }
+
         const patterns = [
-            /github\.com\/([^/]+)\/([^/]+)\/blob\/([^/]+)/,
-            /github\.com\/([^/]+)\/([^/]+)\/tree\/([^/]+)/,
-            /github\.com\/([^/]+)\/([^/]+)/
+            /^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/blob\/([^/]+)/,
+            /^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/tree\/([^/]+)/,
+            /^https?:\/\/[^/]+\/([^/]+)\/([^/]+)/
         ];
 
         for (const pattern of patterns) {
@@ -58,10 +71,15 @@ export class GitHubService {
                     pattern: pattern.toString()
                 });
 
+                // NOTE: no rememberGitHubHost() call here. Registration is
+                // settings-only for GitHub — there is no structural proof
+                // (like GitLab's `/-/`) that would make self-registration safe.
                 return {
                     owner,
                     repo,
-                    branch
+                    branch,
+                    host: hostOf(url),
+                    apiBase: githubApiBase(url)
                 };
             }
         }
@@ -89,9 +107,9 @@ export class GitHubService {
      * @param {Object} headers
      * @returns {Promise<string|null>}
      */
-    async getDefaultBranch(owner, repo, headers) {
+    async getDefaultBranch(owner, repo, headers, apiBase = this.baseUrl) {
         try {
-            const response = await fetch(`${this.baseUrl}/repos/${owner}/${repo}`, { headers });
+            const response = await fetch(`${apiBase}/repos/${owner}/${repo}`, { headers });
             if (!response.ok) return null;
             const data = await response.json();
             return data.default_branch || null;
@@ -101,7 +119,7 @@ export class GitHubService {
         }
     }
 
-    async fetchRepoTree(owner, repo, branch = null) {
+    async fetchRepoTree(owner, repo, branch = null, apiBase = this.baseUrl) {
         const headers = {
             'Accept': 'application/vnd.github.v3+json'
         };
@@ -116,7 +134,7 @@ export class GitHubService {
             // looked at it when the metadata request had already failed, i.e.
             // exactly when the field is absent from the response.
             if (!branch) {
-                branch = await this.getDefaultBranch(owner, repo, headers);
+                branch = await this.getDefaultBranch(owner, repo, headers, apiBase);
             }
             // Still unknown means the metadata call failed. `main` is the better
             // guess for a repo we know nothing about, and the tree request's own
@@ -128,7 +146,7 @@ export class GitHubService {
 
             // Fetch tree recursively
             const response = await fetch(
-                `${this.baseUrl}/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`,
+                `${apiBase}/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`,
                 { headers }
             );
 
@@ -205,7 +223,7 @@ export class GitHubService {
      * @param {string} branch
      * @returns {Promise<string>}
      */
-    async fetchFileContent(owner, repo, path, branch = 'main') {
+    async fetchFileContent(owner, repo, path, branch = 'main', apiBase = this.baseUrl) {
         const headers = {
             'Accept': 'application/vnd.github.v3.raw'
         };
@@ -216,7 +234,7 @@ export class GitHubService {
 
         try {
             const response = await fetch(
-                `${this.baseUrl}/repos/${owner}/${repo}/contents/${path}?ref=${branch}`,
+                `${apiBase}/repos/${owner}/${repo}/contents/${path}?ref=${branch}`,
                 { headers }
             );
 
@@ -246,13 +264,16 @@ export class GitHubService {
         }
 
         const { owner, repo } = parsed;
+        // Resolved from THIS url, not the constructor-time default: one
+        // instance handles URLs from several hosts across a session.
+        const apiBase = parsed.apiBase || this.baseUrl;
 
         // Fetch tree
         if (onProgress) onProgress({ status: 'fetching_tree', message: 'Fetching repository structure...' });
         // `branch` is re-read from the result rather than the URL: when the URL
         // named none, the tree was fetched from the resolved default and the
         // file downloads below have to use that same ref.
-        const { tree, truncated, branch } = await this.fetchRepoTree(owner, repo, parsed.branch);
+        const { tree, truncated, branch } = await this.fetchRepoTree(owner, repo, parsed.branch, apiBase);
 
         if (truncated && onProgress) {
             onProgress({
@@ -286,7 +307,7 @@ export class GitHubService {
             // Download batch in parallel with retry
             const batchPromises = batch.map(async (file) => {
                 try {
-                    const content = await this.fetchFileContentWithRetry(owner, repo, file.path, branch);
+                    const content = await this.fetchFileContentWithRetry(owner, repo, file.path, branch, 3, apiBase);
                     // Belt-and-braces size guard: the tree filter already drops blobs
                     // whose reported `size` is over the limit, but the field is absent
                     // on some entries and an unbounded file must never reach the index.
@@ -339,12 +360,12 @@ export class GitHubService {
      * Fetch file content with retry logic
      * RELIABILITY: Retries up to 3 times with exponential backoff
      */
-    async fetchFileContentWithRetry(owner, repo, path, branch, maxRetries = 3) {
+    async fetchFileContentWithRetry(owner, repo, path, branch, maxRetries = 3, apiBase = this.baseUrl) {
         let lastError;
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                const content = await this.fetchFileContent(owner, repo, path, branch);
+                const content = await this.fetchFileContent(owner, repo, path, branch, apiBase);
                 return content;
             } catch (error) {
                 lastError = error;

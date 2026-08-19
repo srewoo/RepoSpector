@@ -1,5 +1,7 @@
 // Context analyzer for smart test generation
 
+import { githubApiBase, gitlabApiBase, parseRepoRef, PLATFORM } from './gitHosts.js';
+
 // RateLimiter class for API rate limiting
 class RateLimiter {
     constructor() {
@@ -182,26 +184,25 @@ export class ContextAnalyzer {
         }
 
         try {
-            // GitHub: github.com/owner/repo
-            if (platform === 'github' || url.includes('github.com')) {
-                const match = url.match(/github\.com\/([^/]+)\/([^/]+)/);
-                if (match) {
-                    const owner = match[1];
-                    const repo = match[2].split(/[?#]/)[0].replace(/\.git$/, '');
-                    return `${owner}/${repo}`;
+            // Host-agnostic extraction for GitHub/GitLab — replaces regexes that were
+            // anchored to the literal `github.com`/`gitlab.com` substrings and so never
+            // matched a GitHub Enterprise host or a self-hosted GitLab instance.
+            // `parseRepoRef` handles nested GitLab groups too.
+            const ref = parseRepoRef(url);
+            if (ref) {
+                if (platform && platform !== ref.platform) {
+                    // The DETECTED platform (ref.platform) wins for branch selection
+                    // below, not the caller's explicit one — disagreement here means
+                    // the URL's actual host/structure doesn't match what the caller
+                    // believes, so trust what was parsed from the URL and surface the
+                    // mismatch rather than silently going with the caller's guess.
+                    console.warn(
+                        `extractRepoIdFromUrl: explicit platform "${platform}" disagrees with ` +
+                        `detected "${ref.platform}" for ${url}; using the detected platform`
+                    );
                 }
-            }
-
-            // GitLab: gitlab.com/owner/repo or gitlab.com/group/subgroup/repo (nested groups supported)
-            if (platform === 'gitlab' || url.includes('gitlab.com')) {
-                // Match everything before /-/ (which separates repo path from file paths)
-                const match = url.match(/gitlab\.com\/(.+?)(?:\/-\/|\.git|$|\?|#)/);
-                if (match) {
-                    let path = match[1].replace(/\.git$/, '').trim();
-                    // Remove trailing slashes
-                    path = path.replace(/\/$/, '');
-                    return path;
-                }
+                if (ref.platform === PLATFORM.GITHUB) return `${ref.owner}/${ref.repo}`;
+                if (ref.platform === PLATFORM.GITLAB) return ref.projectPath;
             }
 
             // Bitbucket: bitbucket.org/owner/repo
@@ -334,10 +335,20 @@ export class ContextAnalyzer {
                 return;
             }
 
-            const urlParts = url.match(/github\.com\/([^/]+)\/([^/]+)(?:\/blob\/([^/]+)\/(.+))?/);
-            if (!urlParts) return;
+            // Host-agnostic: parseRepoRef handles github.com and any registered GHE
+            // host; the old regex was anchored to the literal `github.com` substring
+            // and silently never matched a GHE URL at all.
+            const ref = parseRepoRef(url);
+            if (!ref || ref.platform !== PLATFORM.GITHUB) return;
 
-            const [, owner, repo, branch = 'main', filePath] = urlParts;
+            const owner = ref.owner;
+            const repo = ref.repo;
+            // parseRepoRef only resolves project identity, not the branch/file-path
+            // portion of a /blob/ URL — that part is host-agnostic on its own (it
+            // doesn't depend on the hostname), so a plain path match is enough.
+            const blobMatch = url.match(/\/blob\/([^/]+)\/([^?#]+)/);
+            const branch = blobMatch ? blobMatch[1] : 'main';
+            const filePath = blobMatch ? blobMatch[2] : undefined;
             const cacheKey = `${owner}/${repo}`;
 
             // Set the current file path in context
@@ -378,19 +389,20 @@ export class ContextAnalyzer {
                         repo,
                         branch,
                         filesToFetch.filter(Boolean),
-                        context
+                        context,
+                        url
                     );
                 }
 
                 // Try to detect testing framework from package.json
-                await this.detectTestingFrameworkFromGitHub(context, owner, repo, branch);
+                await this.detectTestingFrameworkFromGitHub(context, owner, repo, branch, url);
             }
 
             // For 'full' level, get broader repository context
             if (level === 'full') {
                 try {
                     // Fetch repository structure (lightweight API call)
-                    const treeUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`;
+                    const treeUrl = `${githubApiBase(url)}/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`;
                     const treeResponse = await fetch(treeUrl, {
                         headers: this.getGitHubHeaders()
                     });
@@ -414,7 +426,8 @@ export class ContextAnalyzer {
                                 repo,
                                 branch,
                                 analysis.testDirs[0],
-                                context.language
+                                context.language,
+                                url
                             );
                             if (testExamples) {
                                 context.testExamples = testExamples;
@@ -751,14 +764,22 @@ export class ContextAnalyzer {
                 return await this.enhanceWithGitLabContextAPI(context, url, level, gitlabToken);
             }
 
-            // Updated regex to handle more GitLab URL patterns including blob, merge requests, tree, etc.
-            const urlParts = url.match(/gitlab\.com\/([\w.-]+(?:\/[\w.-]+)*?)(?:\/-\/(?:blob|tree|merge_requests|issues|commits)\/([^/]+)\/?(.*?))?(?:\?.*)?$/);
-            if (!urlParts) {
+            // Host-agnostic: parseRepoRef resolves project identity (including
+            // nested groups) for gitlab.com AND any self-hosted GitLab instance —
+            // the old regex was anchored to the literal `gitlab.com` substring, so
+            // self-hosted GitLab context gathering never worked at all.
+            const ref = parseRepoRef(url);
+            if (!ref || ref.platform !== PLATFORM.GITLAB) {
                 console.warn('GitLab URL pattern not recognized:', url);
                 return;
             }
-
-            const [, projectPath, branch, filePath] = urlParts;
+            const projectPath = ref.projectPath;
+            // parseRepoRef only resolves project identity, not the branch/file-path
+            // segment of a `/-/blob|tree|merge_requests|issues|commits/` route — that
+            // part doesn't depend on the hostname, so a plain path match still works.
+            const routeMatch = url.match(/\/-\/(?:blob|tree|merge_requests|issues|commits)\/([^/?#]+)\/?([^?#]*)/);
+            const branch = routeMatch ? routeMatch[1] : undefined;
+            const filePath = routeMatch ? routeMatch[2] : undefined;
             const cacheKey = projectPath;
 
             // Set the current file path in context
@@ -817,7 +838,7 @@ export class ContextAnalyzer {
                     const projectId = encodeURIComponent(projectPath);
 
                     // Get basic project information
-                    const projectResponse = await fetch(`https://gitlab.com/api/v4/projects/${projectId}`, {
+                    const projectResponse = await fetch(`${gitlabApiBase(url)}/projects/${projectId}`, {
                         headers: {
                             'Authorization': `Bearer ${gitlabToken}`,
                             'Content-Type': 'application/json'
@@ -1096,7 +1117,7 @@ export class ContextAnalyzer {
     /**
      * Fetch files from GitHub
      */
-    async fetchGitHubFiles(owner, repo, branch, filePaths, context) {
+    async fetchGitHubFiles(owner, repo, branch, filePaths, context, sourceUrl) {
         const fetchedFiles = [];
 
         for (const filePath of filePaths.slice(0, 15)) { // Limit to 15 files
@@ -1105,7 +1126,7 @@ export class ContextAnalyzer {
             if (rateLimiter && !await rateLimiter.canMakeRequest()) break;
 
             try {
-                const fileUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${filePath}?ref=${branch}`;
+                const fileUrl = `${githubApiBase(sourceUrl)}/repos/${owner}/${repo}/contents/${filePath}?ref=${branch}`;
                 const response = await fetch(fileUrl, {
                     headers: this.getGitHubHeaders()
                 });
@@ -1137,9 +1158,9 @@ export class ContextAnalyzer {
     /**
      * Detect testing framework from package.json
      */
-    async detectTestingFrameworkFromGitHub(context, owner, repo, branch) {
+    async detectTestingFrameworkFromGitHub(context, owner, repo, branch, sourceUrl) {
         try {
-            const packageUrl = `https://api.github.com/repos/${owner}/${repo}/contents/package.json?ref=${branch}`;
+            const packageUrl = `${githubApiBase(sourceUrl)}/repos/${owner}/${repo}/contents/package.json?ref=${branch}`;
             const response = await fetch(packageUrl, {
                 headers: this.getGitHubHeaders()
             });
@@ -1184,9 +1205,9 @@ export class ContextAnalyzer {
     /**
      * Fetch test examples from the repository
      */
-    async fetchTestExamples(owner, repo, branch, testDir, language) {
+    async fetchTestExamples(owner, repo, branch, testDir, language, sourceUrl) {
         try {
-            const testDirUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${testDir}?ref=${branch}`;
+            const testDirUrl = `${githubApiBase(sourceUrl)}/repos/${owner}/${repo}/contents/${testDir}?ref=${branch}`;
             const response = await fetch(testDirUrl, {
                 headers: this.getGitHubHeaders()
             });
@@ -1212,7 +1233,7 @@ export class ContextAnalyzer {
             if (testFiles.length === 0) return null;
 
             // Fetch one test file as an example
-            const exampleUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${testFiles[0].path}?ref=${branch}`;
+            const exampleUrl = `${githubApiBase(sourceUrl)}/repos/${owner}/${repo}/contents/${testFiles[0].path}?ref=${branch}`;
             const exampleResponse = await fetch(exampleUrl, {
                 headers: this.getGitHubHeaders()
             });
@@ -1354,13 +1375,17 @@ export class ContextAnalyzer {
                 return;
             }
 
-            const urlParts = url.match(/gitlab\.com\/([\w.-]+(?:\/[\w.-]+)*?)(?:\/-\/(?:blob|tree|merge_requests|issues|commits)\/([^/]+)\/?(.*?))?(?:\?.*)?$/);
-            if (!urlParts) {
+            // Host-agnostic: see enhanceWithGitLabContext for why this replaced the
+            // gitlab.com-anchored regex — self-hosted GitLab never matched it.
+            const ref = parseRepoRef(url);
+            if (!ref || ref.platform !== PLATFORM.GITLAB) {
                 console.warn('GitLab URL pattern not recognized:', url);
                 return;
             }
-
-            const [, projectPath, branch, filePath] = urlParts;
+            const projectPath = ref.projectPath;
+            const routeMatch = url.match(/\/-\/(?:blob|tree|merge_requests|issues|commits)\/([^/?#]+)\/?([^?#]*)/);
+            const branch = routeMatch ? routeMatch[1] : undefined;
+            const filePath = routeMatch ? routeMatch[2] : undefined;
             const projectId = encodeURIComponent(projectPath);
 
             if (!token) {
@@ -1371,7 +1396,7 @@ export class ContextAnalyzer {
 
             try {
                 // Test token validity first
-                const testResponse = await fetch(`https://gitlab.com/api/v4/user`, {
+                const testResponse = await fetch(`${gitlabApiBase(url)}/user`, {
                     headers: {
                         'Authorization': `Bearer ${token}`,
                         'Content-Type': 'application/json'
@@ -1385,7 +1410,7 @@ export class ContextAnalyzer {
                 }
 
                 // Get project information
-                const projectResponse = await fetch(`https://gitlab.com/api/v4/projects/${projectId}`, {
+                const projectResponse = await fetch(`${gitlabApiBase(url)}/projects/${projectId}`, {
                     headers: {
                         'Authorization': `Bearer ${token}`,
                         'Content-Type': 'application/json'
@@ -1404,7 +1429,7 @@ export class ContextAnalyzer {
                 }
 
                 // Get repository tree
-                const treeResponse = await fetch(`https://gitlab.com/api/v4/projects/${projectId}/repository/tree?recursive=true&per_page=100`, {
+                const treeResponse = await fetch(`${gitlabApiBase(url)}/projects/${projectId}/repository/tree?recursive=true&per_page=100`, {
                     headers: {
                         'Authorization': `Bearer ${token}`,
                         'Content-Type': 'application/json'
@@ -1433,7 +1458,7 @@ export class ContextAnalyzer {
                         importantFiles.slice(0, 25).map(async (file) => {
                             try {
                                 const fileResponse = await fetch(
-                                    `https://gitlab.com/api/v4/projects/${projectId}/repository/files/${encodeURIComponent(file.path)}/raw?ref=${branch || 'main'}`,
+                                    `${gitlabApiBase(url)}/projects/${projectId}/repository/files/${encodeURIComponent(file.path)}/raw?ref=${branch || 'main'}`,
                                     {
                                         headers: {
                                             'Authorization': `Bearer ${token}`,

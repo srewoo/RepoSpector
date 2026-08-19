@@ -33,7 +33,10 @@ import { FindingVerificationService } from '../../services/FindingVerificationSe
 import { FixRecommendationService } from '../../services/FixRecommendationService.js';
 import { SuggestionScorer } from '../../services/SuggestionScorer.js';
 import { ReviewGraphContextService } from '../../services/ReviewGraphContextService.js';
+import { scanAddedTodos, renderTodoSection } from '../../utils/todoScanner.js';
+import { suggestSplit, renderSplitSuggestion } from '../../utils/prSplitSuggester.js';
 import { MultiFinderService } from '../../services/MultiFinderService.js';
+import { ReviewReuseContextService } from '../../services/ReviewReuseContextService.js';
 import { RepoExplorerService } from '../../services/RepoExplorerService.js';
 import { freshFindings } from '../../utils/findingDedup.js';
 import { assessGraphCoverage, graphCoverageWarning } from '../../utils/graphCoverage.js';
@@ -48,9 +51,11 @@ import { buildCanonicalFindings, countBlocking } from '../../utils/findingsFlatt
 import { REVIEW_MODE, IncrementalReviewService } from '../../services/IncrementalReviewService.js';
 import { resolveModel } from '../../utils/modelResolver.js';
 import { ConventionMiner } from '../../services/ConventionMiner.js';
+import { CONVENTION_WARM_DEADLINE_MS } from '../../utils/constants.js';
 import {
     partitionForPosting,
     renderDeferredSections,
+    renderEscalationSection,
     renderPolicyNote
 } from '../../utils/reviewPostingPolicy.js';
 import { collectPriorBotComments, suppressAlreadyPosted } from '../../utils/commentDedupe.js';
@@ -65,7 +70,7 @@ import {
     CACHE_STATUS,
     renderPrimingContext
 } from '../../services/ReviewCacheService.js';
-import { detectPlatformOrGitHub, gitlabApiBase, parseRepoRef } from '../../utils/gitHosts.js';
+import { detectPlatformOrGitHub, gitlabApiBase, githubApiBase, parseRepoRef } from '../../utils/gitHosts.js';
 
 /**
  * Load `.repospector.yaml` for the repo a PR/MR belongs to.
@@ -85,13 +90,53 @@ async function loadRepoConfig(svc, prUrl, settings) {
             return null;
         }
         const token = ref.platform === 'gitlab' ? settings.gitlabToken : settings.githubToken;
+        const apiBase = ref.platform === 'github' ? githubApiBase(prUrl) : gitlabApiBase(prUrl);
         return await svc.customRulesService.fetchConfig(
             ref.platform, ref.owner, ref.repo, token,
-            { projectPath: ref.projectPath, apiBase: gitlabApiBase(prUrl) },
+            { projectPath: ref.projectPath, apiBase },
         );
     } catch (e) {
         console.warn('Failed to fetch custom config:', e.message);
         return null;
+    }
+}
+
+/**
+ * Load the repo's own `AGENTS.md` / `CLAUDE.md` as review context.
+ *
+ * Most repos already state their conventions in one of these for their own
+ * coding agents. Reviewing against generic standards while that file sits one
+ * fetch away was leaving the best available signal on the table.
+ *
+ * Reuses `parseRepoRef` for the same reason `loadRepoConfig` does: inline URL
+ * regexes here never matched self-hosted GitLab and mis-parsed subgroups.
+ *
+ * @returns {Promise<string>} prompt-ready text, or '' when the repo has none
+ */
+async function loadRepoInstructions(svc, prUrl, settings) {
+    try {
+        if (!svc.repoInstructionsService) return '';
+        const ref = parseRepoRef(prUrl);
+        if (!ref) return '';
+        const token = ref.platform === 'gitlab' ? settings.gitlabToken : settings.githubToken;
+        const apiBase = ref.platform === 'github' ? githubApiBase(prUrl) : gitlabApiBase(prUrl);
+        const { context, files } = await svc.repoInstructionsService.getInstructions({
+            platform: ref.platform,
+            owner: ref.owner,
+            repo: ref.repo,
+            projectPath: ref.projectPath,
+            apiBase,
+            token,
+        });
+        if (files.length) {
+            console.log(`📜 Repo instruction files applied: ${files.join(', ')}`);
+        }
+        return context || '';
+    } catch (e) {
+        // Non-fatal by design: a review without the repo's conventions is far
+        // better than no review.
+        console.warn('Repo instructions (non-fatal):', e?.message);
+        return '';
     }
 }
 
@@ -122,16 +167,17 @@ async function resolveLinkedIssue(svc, prUrl, prData) {
         // Jira credentials are optional and read fresh: a team that configures
         // them mid-session should not have to reload the extension.
         const stored = await svc.getStoredSettings();
+        // No githubBaseUrl/gitlabBaseUrl override here: passing the constructor-time
+        // default would pin every lookup to the public host regardless of which
+        // instance this PR is actually on. `fetchForPR` resolves per-URL instead.
         const service = new LinkedIssueService({
             githubToken: prs.githubToken,
             gitlabToken: prs.gitlabToken,
-            githubBaseUrl: prs.githubBaseUrl,
-            gitlabBaseUrl: prs.gitlabBaseUrl,
             jiraBaseUrl: stored.jiraBaseUrl,
             jiraEmail: stored.jiraEmail,
             jiraToken: stored.jiraToken,
         });
-        return await service.fetchForPR(prData, prInfo);
+        return await service.fetchForPR(prData, prInfo, prUrl);
     } catch (e) {
         console.warn('Linked-issue lookup failed (non-fatal):', e?.message);
         return null;
@@ -323,7 +369,8 @@ export function createPrReviewHandlers(svc) {
         const { prUrl } = message.data || {};
         if (!prUrl) { sendResponse({ success: false, error: 'PR URL is required' }); return; }
         try {
-            const rs = (await svc.getStoredSettings())?.reviewSettings || {};
+            const settings = await svc.getStoredSettings();
+            const rs = settings?.reviewSettings || {};
             if (rs.autoIndexOnOpen === false) { sendResponse({ success: true, skipped: true }); return; }
 
             const repoId = canonicalRepoId(prUrl);
@@ -345,6 +392,29 @@ export function createPrReviewHandlers(svc) {
             // simply go missing with no explanation.
             const coverageWarning = graphCoverageWarning(assessGraphCoverage(files));
             if (coverageWarning) console.warn(`⚠️ ${coverageWarning}`);
+
+            // Prewarm team conventions now. Unlike the index-time trigger in
+            // indexingHandlers.js, `prUrl` here is a genuine PR/MR URL (this
+            // handler is the PR-page-detection trigger the design spec named),
+            // so `fetchReviewComments` can actually walk history and return
+            // notes instead of the documented [] no-op for a bare repo URL.
+            // Fire-and-forget and wrapped so a throw here cannot fail the
+            // index-on-open response; the in-flight registry dedupes against
+            // any other trigger for the same repo. Reuses `settings` already
+            // fetched above — no second `getStoredSettings()` round-trip
+            // (waitForEncryption + storage read + decrypting up to ten keys)
+            // ahead of `sendResponse`.
+            try {
+                const miner = new ConventionMiner({ llmService: svc.llmService });
+                miner.prewarm(
+                    repoId,
+                    () => svc.pullRequestService?.fetchReviewComments?.(prUrl) ?? Promise.resolve([]),
+                    { settings },
+                ).catch(() => { });
+            } catch (e) {
+                console.warn('Convention prewarm at page-detection time:', e?.message);
+            }
+
             sendResponse({ success: true, indexed: true, repoId });
         } catch (e) {
             console.warn('Index-on-open failed:', e?.message);
@@ -1249,6 +1319,27 @@ export function createPrReviewHandlers(svc) {
                             console.warn(`⚠️ ${warning}`);
                             onProgress({ step: 'indexing', phase: 'indexing', message: warning });
                         }
+
+                        // Prewarm team conventions here too — `prUrl` is a real
+                        // PR/MR URL (this is the review's own auto-index, another
+                        // PR-page-detection path per the design spec), so
+                        // fetchReviewComments can walk history and return notes.
+                        // Fire-and-forget and never allowed to fail the index;
+                        // the in-flight registry dedupes across triggers. Reuses
+                        // the enclosing `settings` (fetched once at the top of
+                        // this handler) instead of a second getStoredSettings()
+                        // round-trip.
+                        try {
+                            const convMiner = new ConventionMiner({ llmService: svc.llmService });
+                            convMiner.prewarm(
+                                repoId,
+                                () => svc.pullRequestService?.fetchReviewComments?.(prUrl) ?? Promise.resolve([]),
+                                { settings },
+                            ).catch(() => { });
+                        } catch (e) {
+                            console.warn('Convention prewarm at review-path index time:', e?.message);
+                        }
+
                         return files.length;
                     };
 
@@ -1315,7 +1406,7 @@ export function createPrReviewHandlers(svc) {
                 // Enables caller-source inlining; absent, the service emits summaries only.
                 vectorStore: svc.ragService?.vectorStore,
             });
-            const [ragContext, repoDocumentation, staticResult, graphContextObj] = await Promise.all([
+            const [ragContext, repoDocumentation, staticResult, graphContextObj, repoInstructions] = await Promise.all([
                 svc._fetchRAGContextForMultiPass(repoId, prData, options),
                 svc._fetchRepoDocForMultiPass(repoId, options),
                 svc.staticAnalysisService.analyzePullRequest(prData, {
@@ -1332,7 +1423,8 @@ export function createPrReviewHandlers(svc) {
                         console.warn('Graph context (non-fatal):', e?.message);
                         return { available: false, byFile: {}, combined: '' };
                     })
-                    : Promise.resolve({ available: false, byFile: {}, combined: '' })
+                    : Promise.resolve({ available: false, byFile: {}, combined: '' }),
+                loadRepoInstructions(svc, prUrl, settings)
             ]);
 
             if (graphContextObj?.available) {
@@ -1399,19 +1491,40 @@ export function createPrReviewHandlers(svc) {
             if (conventionsEnabled) {
                 try {
                     const miner = new ConventionMiner({ llmService: svc.llmService });
-                    const cached = await miner.getCached(repoId);
-                    if (cached) {
-                        conventionBlock = ConventionMiner.renderBlock(cached);
-                    } else {
-                        // Mine in the background: this review uses the generic
-                        // standards, the next one gets the repo's own conventions.
-                        // Blocking here would add a full LLM round-trip to a
-                        // first review for a benefit that arrives later anyway.
-                        svc.pullRequestService.fetchReviewComments?.(prUrl)
-                            ?.then(notes => miner.mine(repoId, notes || [], {
-                                settings: { provider: settings.provider, model: multiPassModel, apiKey: settings.apiKey }
-                            }))
-                            ?.catch(e => console.warn('Convention mining (background):', e?.message));
+                    const mineOpts = {
+                        settings: { provider: settings.provider, model: multiPassModel, apiKey: settings.apiKey },
+                    };
+
+                    let mined = await miner.getCached(repoId);
+
+                    // A mine started at index time or on page detection is
+                    // probably already done or nearly so. Waiting briefly for it
+                    // is what makes conventions available on a FIRST review —
+                    // previously they arrived only in time for the second one,
+                    // which is why the component was never measurable.
+                    if (!mined && ConventionMiner.inFlight(repoId)) {
+                        mined = await ConventionMiner.awaitWarm(repoId, CONVENTION_WARM_DEADLINE_MS);
+                    }
+
+                    // A sentinel result (insufficient history / no llm service /
+                    // llm error) is NOT a usable answer — it was never persisted,
+                    // so treat it the same as "nothing warm and nothing running"
+                    // and start a mine for next time. A genuinely cached
+                    // zero-rule result IS usable and must not trigger a re-mine
+                    // (see ConventionMiner.isUsableResult).
+                    if (!ConventionMiner.isUsableResult(mined)) {
+                        // Nothing warm and nothing running: start it for next time,
+                        // exactly as before. Not awaited — a cold first review
+                        // should not pay a full round-trip plus a comment fetch.
+                        miner.prewarm(
+                            repoId,
+                            () => svc.pullRequestService.fetchReviewComments?.(prUrl) ?? Promise.resolve([]),
+                            mineOpts,
+                        );
+                    }
+
+                    if (mined?.rules?.length) {
+                        conventionBlock = ConventionMiner.renderBlock(mined);
                     }
                 } catch (e) {
                     console.warn('Convention mining (non-fatal):', e?.message);
@@ -1568,6 +1681,7 @@ export function createPrReviewHandlers(svc) {
                 isTestAutomationPR: svc.isTestAutomationPR(prData),
                 conventionBlock,
                 standardsText,
+                repoInstructions,
                 fileContext,
                 intentBlock,
                 contextBudget,
@@ -1646,11 +1760,27 @@ export function createPrReviewHandlers(svc) {
             //     3) then culls any false positives these extra finders introduce.
             if (multiFinderEnabled) {
                 try {
+                    // Retrieve prior-art candidates first: the reuse lens only runs
+                    // when it has real evidence to cite, and is dropped otherwise
+                    // rather than left to guess at duplication.
+                    let reuseContext = '';
+                    try {
+                        const reuse = await new ReviewReuseContextService({ ragService: svc.ragService })
+                            .buildForReview(prData, repoId);
+                        reuseContext = reuse.context;
+                        if (reuse.available) {
+                            console.log(`♻️ Reuse candidates found for ${reuse.stats.symbolsWithHits}/${reuse.stats.symbolsProbed} new declarations`);
+                        }
+                    } catch (e) {
+                        console.warn('Reuse context (non-fatal):', e?.message);
+                    }
+
                     const finder = new MultiFinderService({ llmService: svc.llmService });
                     const fres = await finder.findAdditional(verifiedFindings, {
                         prData,
                         settings: reviewSettings_,
                         graphContext: graphContextObj?.combined || '',
+                        reuseContext,
                         maxRounds: finderRounds,
                         promptMode: finderMode,
                         onProgress
@@ -1729,6 +1859,41 @@ export function createPrReviewHandlers(svc) {
                 } catch (e) {
                     console.warn('Verification pass failed (keeping all findings):', e?.message);
                 }
+            }
+
+            // 3a-pre) Missing-test finder — deterministic, and covering a class
+            //     RepoSpector structurally could not report before: the only test
+            //     lens is gated on test files being IN the diff, so a PR that adds
+            //     an exported function and no test had nothing looking. Emitted as
+            //     `source: 'static'` because it is a fact about the diff text, not
+            //     a model judgement. Added BEFORE verification so the evidence
+            //     gates still see it like any other finding.
+            try {
+                const { findMissingTests } = await import('../../utils/missingTestFinder.js');
+                const missing = findMissingTests(prData);
+                if (missing.length) {
+                    verifiedFindings = [...verifiedFindings, ...missing];
+                    console.log(`🧪 Missing-test finder: ${missing.length} newly exported symbol(s) with no test in this PR`);
+                }
+            } catch (e) {
+                console.warn('Missing-test finder skipped:', e?.message);
+            }
+
+            // 3a-bis) Sibling sweep — the instances of a flagged pattern that were
+            //     never reviewed. Runs AFTER verification on purpose: sweeping from
+            //     unverified findings would propagate a false positive into five
+            //     more. Output is advisory and kept out of `verifiedFindings`, so
+            //     it can never be posted as an inline comment or counted as a
+            //     finding — measured precision does not permit multiplying claims.
+            let siblingHits = [];
+            try {
+                const { sweepSiblings, diffsByFile } = await import('../../utils/siblingSweep.js');
+                siblingHits = sweepSiblings(verifiedFindings, diffsByFile(prData));
+                if (siblingHits.length) {
+                    console.log(`🧹 Sibling sweep: ${siblingHits.length} unflagged candidate(s) of already-flagged patterns`);
+                }
+            } catch (e) {
+                console.warn('Sibling sweep skipped:', e?.message);
             }
 
             // 3b) Self-reflection scoring — how much is each finding WORTH SAYING?
@@ -1846,6 +2011,21 @@ export function createPrReviewHandlers(svc) {
                 }
             } catch (e) {
                 console.warn('Cross-repo impact (non-fatal):', e?.message);
+            }
+
+            // Sibling sweep output — rendered as ONE advisory block, never as
+            // inline comments. These are candidates the reviewer did not verify;
+            // posting them at each site would present unverified guesses with the
+            // same weight as adjudicated findings, which is the failure mode this
+            // whole pipeline is built to avoid.
+            if (siblingHits.length && typeof result.analysis === 'string') {
+                try {
+                    const { renderSweep } = await import('../../utils/siblingSweep.js');
+                    const sweepSection = renderSweep(siblingHits);
+                    if (sweepSection) result.analysis += `\n\n---\n\n${sweepSection}\n`;
+                } catch (e) {
+                    console.warn('Sibling sweep render skipped:', e?.message);
+                }
             }
 
             // A review that ran WITHOUT repo context is a weaker review, and the reader
@@ -2211,6 +2391,28 @@ export function createPrReviewHandlers(svc) {
             const deferred = renderDeferredSections(policy.suggestions, policy.nitpicks);
             if (deferred) summaryBody += `\n${deferred}\n`;
 
+            // Open questions, above the policy note and separate from the
+            // defect lists — a question buried under "Nitpicks" gets skimmed.
+            const escalationSection = renderEscalationSection(policy.escalations || []);
+            if (escalationSection) summaryBody += `\n${escalationSection}\n`;
+
+            // Two deterministic, token-free sections. Both are informational
+            // rather than findings: neither claims anything is wrong, so neither
+            // belongs in the findings pipeline or under the inline cap.
+            // `prDataForLines` may be null when the PR fetch above failed; both
+            // scans need the patches, so skip rather than emit empty sections.
+            if (prDataForLines) {
+                try {
+                    const todoSection = renderTodoSection(scanAddedTodos(prDataForLines));
+                    if (todoSection) summaryBody += `\n${todoSection}\n`;
+
+                    const splitSection = renderSplitSuggestion(suggestSplit(prDataForLines));
+                    if (splitSection) summaryBody += `\n${splitSection}\n`;
+                } catch (e) {
+                    console.warn('Informational sections (non-fatal):', e?.message);
+                }
+            }
+
             const policyNote = renderPolicyNote(policy.stats);
             if (policyNote) summaryBody += `\n${policyNote}\n`;
 
@@ -2390,7 +2592,7 @@ export function createPrReviewHandlers(svc) {
 
             if (platform === 'github') {
                 const token = settings.githubToken;
-                const url = `https://api.github.com/repos/${repoId}/contents/${encodeURIComponent(filePath)}${ref ? `?ref=${ref}` : ''}`;
+                const url = `${githubApiBase(host)}/repos/${repoId}/contents/${encodeURIComponent(filePath)}${ref ? `?ref=${ref}` : ''}`;
                 const headers = {
                     'Accept': 'application/vnd.github.v3.raw',
                     ...(token ? { 'Authorization': `Bearer ${token}` } : {})

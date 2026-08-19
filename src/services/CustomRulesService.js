@@ -5,6 +5,8 @@
  * Supports custom rules, ignore patterns, and severity overrides.
  */
 
+import { githubApiBase, gitlabApiBase } from '../utils/gitHosts.js';
+
 // Severity ordering used by the threshold filter. Lower index = lower
 // severity. Anything below the configured threshold is dropped.
 const SEVERITY_ORDER = ['info', 'low', 'medium', 'high', 'critical'];
@@ -27,10 +29,12 @@ export class CustomRulesService {
      * @param {string} [options.projectPath] - Full GitLab project path including any
      *        subgroups (`group/subgroup/project`). Required for nested groups:
      *        `${owner}/${repo}` collapses them and 404s. Defaults to `owner/repo`.
-     * @param {string} [options.apiBase] - GitLab REST base for the instance serving
-     *        this repo (from `gitHosts.gitlabApiBase`). The old hardcoded
-     *        `https://gitlab.com/api/v4` meant self-hosted instances could never
-     *        load a config at all.
+     * @param {string} [options.apiBase] - REST base for the instance serving this
+     *        repo (from `gitHosts.githubApiBase`/`gitHosts.gitlabApiBase`). The old
+     *        hardcoded `https://api.github.com` / `https://gitlab.com/api/v4` meant
+     *        self-hosted instances (GHE, self-hosted GitLab) could never load a
+     *        config at all — the fetch 404'd, so custom rules, the model pin and
+     *        the severity floor silently did not exist for those repos.
      * @param {string[]} [options.refs] - Branches to try, in order. Only `main` was
      *        tried before, so a repo on `master`/`develop`/`trunk` silently had no
      *        config even on gitlab.com.
@@ -38,7 +42,11 @@ export class CustomRulesService {
      */
     async fetchConfig(platform, owner, repo, token, options = {}) {
         const projectPath = options.projectPath || `${owner}/${repo}`;
-        const apiBase = options.apiBase || 'https://gitlab.com/api/v4';
+        // No options.apiBase means no source URL was threaded through — resolve to
+        // each platform's public default (githubApiBase/gitlabApiBase do this when
+        // called with undefined), same as the historical hardcoded behavior.
+        const defaultApiBase = platform === 'github' ? githubApiBase() : gitlabApiBase();
+        const apiBase = options.apiBase || defaultApiBase;
         const refs = options.refs?.length ? options.refs : ['HEAD', 'main', 'master', 'develop'];
 
         const cacheKey = `${platform}:${apiBase}:${projectPath}`;
@@ -57,7 +65,7 @@ export class CustomRulesService {
                     let url, headers;
 
                     if (platform === 'github') {
-                        url = `https://api.github.com/repos/${owner}/${repo}/contents/${filename}`;
+                        url = `${apiBase}/repos/${owner}/${repo}/contents/${filename}`;
                         headers = {
                             'Accept': 'application/vnd.github.v3.raw',
                             ...(token ? { 'Authorization': `Bearer ${token}` } : {})

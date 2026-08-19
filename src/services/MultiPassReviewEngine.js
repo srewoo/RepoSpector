@@ -1,5 +1,7 @@
 import { BatchProcessor } from '../utils/batchProcessor.js';
 import { FileGroupingStrategy } from './FileGroupingStrategy.js';
+import { scoreFileByRisk } from '../utils/prompts.js';
+import { HUNK_WINDOWING } from '../utils/constants.js';
 import {
     PER_FILE_REVIEW_SYSTEM_PROMPT,
     AGGREGATION_SYSTEM_PROMPT,
@@ -64,12 +66,48 @@ export class MultiPassReviewEngine {
             // ── Phase 2: Group files ──
             onProgress?.({ phase: 'grouping', message: 'Grouping files for review...' });
 
-            const groupingStrategy = new FileGroupingStrategy();
+            const groupingStrategy = new FileGroupingStrategy({
+                hunkWindowing: settings?.hunkWindowing ?? HUNK_WINDOWING,
+            });
             const maxFiles = options.maxFilesToReview || 50;
-            const filesToReview = prData.files.slice(0, maxFiles);
+
+            // Order by RISK before truncating, not by whatever order the provider
+            // returned the files in.
+            //
+            // `slice()` on the raw array was a silent correctness bug on any PR
+            // above the cap. Provider order is effectively alphabetical by path,
+            // so `tests/` sorts last and every test file is dropped FIRST —
+            // measured on a 30-file MR with the cap at 20: all nine test files
+            // and `pyproject.toml` were cut, and the review then missed a
+            // test-quality defect a competing reviewer found, because the file
+            // holding it was never sent to the model.
+            //
+            // `scoreFileByRisk` is the same ranking `buildReviewPrompt` has always
+            // applied for the single-pass path (prompts.js), so this makes the two
+            // paths agree rather than inventing a policy.
+            const ranked = prData.files
+                .map(f => ({ file: f, risk: scoreFileByRisk(f) }))
+                .sort((a, b) => b.risk - a.risk)
+                .map(x => x.file);
+            const filesToReview = ranked.slice(0, maxFiles);
+            const skipped = ranked.slice(maxFiles);
             const reviewUnits = groupingStrategy.group(filesToReview, { findingsByFile });
 
             console.log(`📋 Multi-pass: ${reviewUnits.length} review units from ${filesToReview.length} files`);
+
+            // Say what was dropped. A silent truncation reads exactly like a
+            // clean review of the whole PR, which is how "it found nothing in
+            // that file" and "it never looked at that file" became
+            // indistinguishable.
+            if (skipped.length > 0) {
+                console.warn(
+                    `⚠️ Multi-pass: ${skipped.length} of ${prData.files.length} files were NOT reviewed `
+                    + `(cap ${maxFiles}, lowest risk first): `
+                    + skipped.slice(0, 10).map(f => f.filename).join(', ')
+                    + (skipped.length > 10 ? `, +${skipped.length - 10} more` : '')
+                );
+            }
+            this.lastSkippedFiles = skipped.map(f => f.filename);
 
             onProgress?.({
                 phase: 'reviewing',
@@ -110,6 +148,10 @@ export class MultiPassReviewEngine {
                         // contains "use the bgcolor token" or "follow tenant_id naming".
                         conventionBlock: context.conventionBlock || '',
                         standardsText: context.standardsText || '',
+                        // The conventions this repo already wrote down for its own
+                        // coding agents — read from the default branch, so this is
+                        // guidance that has itself passed review.
+                        repoInstructions: context.repoInstructions || '',
                         graphContext: this._getGraphContextForUnit(context.graphContext, unit),
                         // Phase 2: the file itself and its test, plus what the
                         // change was supposed to do. Both are optional — a review

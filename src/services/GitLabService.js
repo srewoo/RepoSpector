@@ -14,7 +14,7 @@ import {
 export class GitLabService {
     constructor(token = null) {
         this.token = token;
-        this.baseUrl = 'https://gitlab.com/api/v4';
+        this.baseUrl = gitlabApiBase();
 
         // Shared with GitHubService via `codeFileFilter` — see that module for why
         // two hand-maintained copies of these lists were a problem.

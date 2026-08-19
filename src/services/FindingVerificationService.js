@@ -1,5 +1,10 @@
 import { VERIFICATION_SYSTEM_PROMPT, buildVerificationPrompt } from '../utils/verificationPrompts.js';
 import { assessFinding, assessIntent, dedupeFindings, EVIDENCE } from '../utils/findingEvidence.js';
+import { assessSpeculation } from '../utils/findingSpeculation.js';
+import { checkStaticPremise } from '../utils/staticRulePremise.js';
+import { diffsByFile as buildDiffsByFile } from '../utils/siblingSweep.js';
+import { assessImportClaim } from '../utils/importClaimGate.js';
+import { markLowValue } from '../utils/lowValueGate.js';
 
 /**
  * FindingVerificationService — adversarial second pass to cut false positives.
@@ -88,11 +93,61 @@ export class FindingVerificationService {
                 continue;
             }
 
+            // Static-rule line mapping. A static finding's title is its rule id,
+            // which names no code, so the construct gates above extract nothing
+            // and never fire — and static findings bypass the LLM refuter by
+            // design. Before this check a mis-mapped static hit had nothing at
+            // all standing between it and the PR. Adjudication called this class
+            // "the most mechanically fixable of the six".
+            const premise = checkStaticPremise(f, patch);
+            if (!premise.ok) {
+                evidenceDropped.push({ ...f, _drop: { reason: premise.reason, by: 'static-premise-gate' } });
+                continue;
+            }
+
+            // "X is not imported" when the import is visible in the very diff the
+            // model was shown. Fires in one direction only — an import that is
+            // not visible proves nothing, because a patch is a window.
+            const importClaim = assessImportClaim(f, patch);
+            if (importClaim.refuted) {
+                evidenceDropped.push({ ...f, _drop: { reason: importClaim.reason, by: 'import-claim-gate' } });
+                continue;
+            }
+
+            // Ungrounded speculation — the LARGEST measured false-positive class.
+            // Passed the assessment so a GROUNDED finding is exempt: proof beats
+            // grammar, and hedging is how careful reviewers write.
+            const speculation = assessSpeculation(f, assessment);
+            if (speculation.verdict === EVIDENCE.REFUTED) {
+                evidenceDropped.push({ ...f, _drop: { reason: speculation.reason, by: 'speculation-gate' } });
+                continue;
+            }
+
             survivorsOfEvidence.push({ ...f, _evidence: assessment });
         }
 
+        // Per-gate counts, not just a total. A gate that silently stops firing —
+        // a rule id that changed shape, a regex that no longer matches — looks
+        // exactly like a clean run when only the sum is reported.
+        const byGate = evidenceDropped.reduce((acc, f) => {
+            const g = f._drop?.by || 'unknown';
+            acc[g] = (acc[g] || 0) + 1;
+            return acc;
+        }, {});
+
         if (duplicates.length || evidenceDropped.length) {
-            console.log(`🔬 Evidence gate: ${duplicates.length} duplicate(s), ${evidenceDropped.length} refuted before the LLM`);
+            const detail = Object.entries(byGate).map(([g, n]) => `${g}=${n}`).join(' ');
+            console.log(`🔬 Evidence gate: ${duplicates.length} duplicate(s), ${evidenceDropped.length} refuted before the LLM${detail ? ` (${detail})` : ''}`);
+        }
+
+        // Demote (never drop) micro-performance and style restatements, so they
+        // cannot consume the limited inline-comment budget. Runs after the
+        // refutation gates: there is no point ranking a finding that is wrong.
+        const { findings: markedSurvivors, demoted: lowValueCount } = markLowValue(survivorsOfEvidence);
+        survivorsOfEvidence.length = 0;
+        survivorsOfEvidence.push(...markedSurvivors);
+        if (lowValueCount) {
+            console.log(`🔉 Demoted ${lowValueCount} low-value restatement(s) out of the inline budget`);
         }
 
         // Partition: deterministic findings bypass verification unless asked.
@@ -101,7 +156,16 @@ export class FindingVerificationService {
         survivorsOfEvidence.forEach((f, i) => {
             const vid = `V${i}`;
             const tagged = { ...f, vid };
-            if (!verifyStatic && f.source === 'static') passthrough.push(tagged);
+            // Escalations bypass the refuter, and must.
+            //
+            // An escalation's entire claim is "this cannot be settled from the
+            // diff". The refuter's job is to ask whether a finding is
+            // substantiated by the diff, so it will refute every escalation,
+            // confidently and correctly — and deleting them all would silently
+            // remove the one output that exists to say "ask a human". The
+            // question survives to be asked; it is not asserted as a defect.
+            if (f.needsHumanReview) passthrough.push(tagged);
+            else if (!verifyStatic && f.source === 'static') passthrough.push(tagged);
             else toVerify.push(tagged);
         });
 
@@ -112,6 +176,8 @@ export class FindingVerificationService {
             const stats = this._emptyStats(findings.length, passthrough.length);
             stats.duplicates = duplicates.length;
             stats.evidenceRefuted = evidenceDropped.length;
+            stats.refutedByGate = byGate;
+            stats.lowValueDemoted = lowValueCount;
             stats.kept = passthrough.length + toVerify.length;
             stats.dropped = duplicates.length + evidenceDropped.length;
             stats.llmRefutation = false;
@@ -247,14 +313,10 @@ export class FindingVerificationService {
      * fails open, and the deterministic gates (the ONLY false-positive filter
      * enabled by default) become a silent no-op. Be liberal about the keys.
      */
+    // Delegates so the verifier and the sibling sweep can never disagree about
+    // which patch belongs to which file — they gate and sweep the same bytes.
     _buildDiffsByFile(prData) {
-        const map = {};
-        for (const f of (prData?.files || [])) {
-            const name = f?.filename || f?.new_path || f?.path || f?.file;
-            const patch = f?.patch ?? f?.diff ?? '';
-            if (name && patch) map[name] = patch;
-        }
-        return map;
+        return buildDiffsByFile(prData);
     }
 
     _parseVerdicts(text) {

@@ -186,6 +186,14 @@ export class ReviewOrchestrator {
         }
 
         // ── 2. Chunk + build shared brief ────────────────────────────────
+        // Windowing is deliberately NOT threaded through here. `chunkMR`'s
+        // packing pass groups files by loc via `locOf()`, which reads a
+        // file's whole additions/deletions regardless of window boundaries
+        // — so two windows of the same file can land in the same chunk with
+        // the same filename, and the downstream `assigned.has(filename)`
+        // dedup in FileGroupingStrategy silently drops one of them. Windowing
+        // happens exactly once, later, inside MultiPassReviewEngine per
+        // already-formed chunk — do not re-add it here.
         const { chunks, brief, summary: chunkSummary } = chunkMR(
             effectivePrData,
             options.chunking,

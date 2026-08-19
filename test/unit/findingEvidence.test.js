@@ -247,3 +247,70 @@ describe('assessIntent — documented deliberate behaviour', () => {
         expect(r.verdict).toBe(EVIDENCE.UNPROVEN);
     });
 });
+
+/**
+ * GATE 2 — findings anchored to unchanged context lines.
+ *
+ * Measured false-positive class 3: "flagging unchanged context lines —
+ * pre-existing code the reviewer is explicitly instructed to ignore." A context
+ * line is carried in a patch only to orient the reader; being visible in a diff
+ * is not the same as being changed by it.
+ *
+ * The window is what keeps this honest, so the false-refutation cases below are
+ * the ones that matter: a reviewer may legitimately point at a context line to
+ * say "the call you just added breaks the invariant above".
+ */
+describe('GATE 2 — unchanged context lines', () => {
+    // Hunk starts at new line 1: lines 1-3 context, 4 added, 5-12 context.
+    const withDistantChange = [
+        '@@ -1,11 +1,12 @@',
+        ' const a = 1;',        // 1  context
+        ' const b = 2;',        // 2  context
+        ' const c = 3;',        // 3  context
+        '+const added = 4;',    // 4  ADDED
+        ' const d = 5;',        // 5  context
+        ' const e = 6;',        // 6  context
+        ' const f = 7;',        // 7  context
+        ' const g = 8;',        // 8  context
+        ' const h = 9;',        // 9  context
+        ' const i = 10;',       // 10 context
+        ' const j = 11;',       // 11 context
+    ].join('\n');
+
+    it('refutes a finding on a context line far from any change', () => {
+        const out = assessFinding({ title: 'Magic number', line: 10 }, withDistantChange);
+        expect(out.verdict).toBe(EVIDENCE.REFUTED);
+        expect(out.reason).toMatch(/unchanged context line/);
+    });
+
+    it('does NOT refute the added line itself', () => {
+        expect(assessFinding({ title: 'Magic number', line: 4 }, withDistantChange).verdict)
+            .not.toBe(EVIDENCE.REFUTED);
+    });
+
+    it('does NOT refute a context line adjacent to a change', () => {
+        // "the call you just added breaks the invariant on the line above" is a
+        // legitimate, common review comment.
+        for (const line of [2, 3, 5, 6]) {
+            expect(assessFinding({ title: 'Invariant broken', line }, withDistantChange).verdict)
+                .not.toBe(EVIDENCE.REFUTED);
+        }
+    });
+
+    it('does NOT refute a context line near a DELETION, which has no line number of its own', () => {
+        const withDeletion = [
+            '@@ -1,4 +1,3 @@',
+            ' keep();',      // 1 context
+            '-removed();',   //   deleted — anchored at 1
+            ' after();',     // 2 context
+            ' tail();',      // 3 context
+        ].join('\n');
+        expect(assessFinding({ title: 'Behaviour change', line: 2 }, withDeletion).verdict)
+            .not.toBe(EVIDENCE.REFUTED);
+    });
+
+    it('does not refute when the patch cannot be parsed', () => {
+        expect(assessFinding({ title: 'Magic number', line: 10 }, 'not a patch').verdict)
+            .not.toBe(EVIDENCE.REFUTED);
+    });
+});

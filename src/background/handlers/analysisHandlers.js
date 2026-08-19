@@ -13,6 +13,7 @@
 
 import { PRComplianceChecker } from '../../services/PRComplianceChecker.js';
 import { ReviewMetricsService } from '../../services/ReviewMetricsService.js';
+import { detectPlatformOrGitHub, githubApiBase, gitlabApiBase } from '../../utils/gitHosts.js';
 
 /**
  * @param {object} svc - the BackgroundService instance
@@ -236,9 +237,15 @@ export function createAnalysisHandlers(svc) {
             let customRules = null;
             if (repoId) {
                 const parts = repoId.split('/');
-                const platform = prUrl.includes('gitlab') ? 'gitlab' : 'github';
+                // detectPlatformOrGitHub (not a bare `.includes('gitlab')` check) so a
+                // self-hosted GitLab or GHE prUrl resolves correctly instead of
+                // defaulting to github.
+                const platform = detectPlatformOrGitHub(prUrl);
                 const token = platform === 'github' ? settings.githubToken : settings.gitlabToken;
-                customRules = await svc.customRulesService.fetchConfig(platform, parts[0], parts[1], token);
+                // Thread prUrl through so the config fetch targets the instance the PR
+                // actually lives on instead of always the public host.
+                const apiBase = platform === 'github' ? githubApiBase(prUrl) : gitlabApiBase(prUrl);
+                customRules = await svc.customRulesService.fetchConfig(platform, parts[0], parts[1], token, { apiBase });
             }
 
             const report = svc.prComplianceChecker.check(prData, customRules);

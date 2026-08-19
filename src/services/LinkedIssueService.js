@@ -27,6 +27,7 @@
 // tuned regex and a denylist (CVE-2021-1 is not a ticket). Reusing it keeps one
 // definition of "looks like a Jira key" rather than two that drift.
 import { extractIssueKeys as extractJiraKeys } from '../utils/reviewIntentContext.js';
+import { githubApiBase, gitlabApiBase } from '../utils/gitHosts.js';
 
 /**
  * GitHub's documented closing keywords, and the reference forms it accepts.
@@ -203,14 +204,35 @@ export class LinkedIssueService {
     constructor(opts = {}) {
         this.githubToken = opts.githubToken || null;
         this.gitlabToken = opts.gitlabToken || null;
-        this.githubBaseUrl = opts.githubBaseUrl || 'https://api.github.com';
-        this.gitlabBaseUrl = opts.gitlabBaseUrl || 'https://gitlab.com/api/v4';
+        this.githubBaseUrl = opts.githubBaseUrl || githubApiBase();
+        this.gitlabBaseUrl = opts.gitlabBaseUrl || gitlabApiBase();
+        // An explicit override at construction always wins over per-URL
+        // resolution — see `resolveGitHubBase`/`resolveGitLabBase` below.
+        this._githubOverridden = Boolean(opts.githubBaseUrl);
+        this._gitlabOverridden = Boolean(opts.gitlabBaseUrl);
         // Jira is optional and independent of the host: a GitHub PR whose title
         // carries a Jira key is the common case in teams that use both.
         this.jiraBaseUrl = (opts.jiraBaseUrl || '').replace(/\/+$/, '');
         this.jiraEmail = opts.jiraEmail || null;
         this.jiraToken = opts.jiraToken || null;
         this.fetchImpl = opts.fetchImpl || ((...args) => fetch(...args));
+    }
+
+    /**
+     * API base for the GitHub instance serving `url`.
+     *
+     * An explicit constructor override always wins — a caller that set
+     * `githubBaseUrl` deliberately (e.g. tests) means it. Absent that, resolve
+     * per URL rather than trusting a constructor-time constant: one instance
+     * can be asked about issues on several hosts in a session.
+     */
+    resolveGitHubBase(url) {
+        return this._githubOverridden ? this.githubBaseUrl : githubApiBase(url);
+    }
+
+    /** Same as `resolveGitHubBase`, for GitLab. */
+    resolveGitLabBase(url) {
+        return this._gitlabOverridden ? this.gitlabBaseUrl : gitlabApiBase(url);
     }
 
     /** Are Jira credentials configured? */
@@ -274,9 +296,11 @@ export class LinkedIssueService {
      *
      * @param {Object} prData - normalized PR data from PullRequestService
      * @param {Object} prInfo - parsed URL info { platform, owner, repo, projectPath, mrNumber }
+     * @param {string} [prUrl] - the original PR/MR URL, so the API base resolves
+     *        to the instance this PR actually lives on rather than the public default
      * @returns {Promise<Object|null>}
      */
-    async fetchForPR(prData, prInfo) {
+    async fetchForPR(prData, prInfo, prUrl = null) {
         try {
             // Jira first when configured. A team that runs Jira puts the
             // requirement there, not in a GitHub issue — so when both exist,
@@ -289,10 +313,10 @@ export class LinkedIssueService {
             }
 
             if (prInfo?.platform === 'gitlab') {
-                return await this._fetchGitLab(prInfo);
+                return await this._fetchGitLab(prInfo, prUrl);
             }
             if (prInfo?.platform === 'github') {
-                return await this._fetchGitHub(prData, prInfo);
+                return await this._fetchGitHub(prData, prInfo, prUrl);
             }
             return null;
         } catch (e) {
@@ -302,12 +326,13 @@ export class LinkedIssueService {
         }
     }
 
-    async _fetchGitHub(prData, prInfo) {
+    async _fetchGitHub(prData, prInfo, prUrl = null) {
         const refs = extractClosingRefs(prData);
         if (refs.length === 0) return null;
 
         const headers = { 'Accept': 'application/vnd.github.v3+json' };
         if (this.githubToken) headers['Authorization'] = `token ${this.githubToken}`;
+        const apiBase = this.resolveGitHubBase(prUrl);
 
         for (const ref of refs) {
             const owner = ref.owner || prInfo.owner;
@@ -315,7 +340,7 @@ export class LinkedIssueService {
             if (!owner || !repo) continue;
 
             const res = await this.fetchImpl(
-                `${this.githubBaseUrl}/repos/${owner}/${repo}/issues/${ref.number}`,
+                `${apiBase}/repos/${owner}/${repo}/issues/${ref.number}`,
                 { headers },
             );
             if (!res.ok) continue;
@@ -332,11 +357,14 @@ export class LinkedIssueService {
         return null;
     }
 
-    async _fetchGitLab(prInfo) {
+    async _fetchGitLab(prInfo, prUrl = null) {
         const projectId = encodeURIComponent(
             prInfo.projectPath || `${prInfo.owner}/${prInfo.repo}`,
         );
-        const api = prInfo.apiBase || this.gitlabBaseUrl;
+        // `prInfo.apiBase` (set at parse time from the MR URL itself) is the
+        // more specific signal when present; `prUrl` is the fallback for a
+        // hand-built prInfo that omitted it.
+        const api = prInfo.apiBase || this.resolveGitLabBase(prUrl);
         const headers = { 'Content-Type': 'application/json' };
         if (this.gitlabToken) headers['PRIVATE-TOKEN'] = this.gitlabToken;
 

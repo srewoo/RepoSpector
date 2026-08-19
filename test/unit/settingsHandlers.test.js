@@ -114,3 +114,108 @@ describe('settingsHandlers', () => {
         });
     });
 });
+
+const { ensureHostAccess, parseHostList } = require('../../src/background/handlers/settingsHandlers.js');
+
+describe('ensureHostAccess with both forges', () => {
+    const ORIGINAL_CHROME = global.chrome;
+
+    beforeEach(() => {
+        global.chrome = {
+            permissions: {
+                contains: jest.fn().mockResolvedValue(false),
+                request: jest.fn().mockResolvedValue(true),
+            },
+            scripting: {
+                unregisterContentScripts: jest.fn().mockResolvedValue(undefined),
+                registerContentScripts: jest.fn().mockResolvedValue(undefined),
+            },
+        };
+    });
+
+    afterEach(() => {
+        // Restore so a test appended later in the file (or run in the same
+        // worker) doesn't silently inherit this block's chrome stub.
+        if (ORIGINAL_CHROME === undefined) {
+            delete global.chrome;
+        } else {
+            global.chrome = ORIGINAL_CHROME;
+        }
+    });
+
+    it('requests exactly the two non-public origins, each once', async () => {
+        const out = await ensureHostAccess({
+            gitlabHosts: 'gitlab.acme.com',
+            githubHosts: 'github.acme.com',
+        });
+        expect(out.granted).toBe(true);
+        expect(chrome.permissions.request).toHaveBeenCalledWith({
+            origins: ['https://gitlab.acme.com/*', 'https://github.acme.com/*'],
+        });
+    });
+
+    it('dedupes a host that appears in both lists to a single origin', async () => {
+        const out = await ensureHostAccess({
+            gitlabHosts: 'code.acme.com',
+            githubHosts: 'code.acme.com',
+        });
+        expect(out.hosts).toEqual(['code.acme.com']);
+        expect(chrome.permissions.request).toHaveBeenCalledWith({
+            origins: ['https://code.acme.com/*'],
+        });
+    });
+
+    it('filters the public hosts of both forges', async () => {
+        const out = await ensureHostAccess({
+            gitlabHosts: 'gitlab.com',
+            githubHosts: 'github.com',
+        });
+        expect(out.hosts).toEqual([]);
+        expect(chrome.permissions.request).not.toHaveBeenCalled();
+    });
+
+    it('still accepts a bare GitLab list, as before', async () => {
+        const out = await ensureHostAccess('gitlab.acme.com');
+        expect(out.granted).toBe(true);
+        expect(out.hosts).toEqual(['gitlab.acme.com']);
+    });
+
+    it('does not fail the save when the user rejects the prompt', async () => {
+        chrome.permissions.request.mockResolvedValue(false);
+        const out = await ensureHostAccess({ githubHosts: 'github.acme.com' });
+        expect(out.granted).toBe(false);
+        expect(chrome.scripting.registerContentScripts).not.toHaveBeenCalled();
+    });
+
+    it('does not tear down an existing registration when a NEW non-empty list is rejected', async () => {
+        // github.acme.com is already granted and working.
+        await ensureHostAccess({ githubHosts: 'github.acme.com' });
+        chrome.scripting.unregisterContentScripts.mockClear();
+        chrome.scripting.registerContentScripts.mockClear();
+
+        // Adding a GitLab host in the same save; the combined prompt is denied.
+        chrome.permissions.contains.mockResolvedValue(false);
+        chrome.permissions.request.mockResolvedValue(false);
+        const out = await ensureHostAccess({
+            gitlabHosts: 'gitlab.acme.com',
+            githubHosts: 'github.acme.com',
+        });
+
+        expect(out.granted).toBe(false);
+        expect(chrome.scripting.unregisterContentScripts).not.toHaveBeenCalled();
+        expect(chrome.scripting.registerContentScripts).not.toHaveBeenCalled();
+    });
+
+    it('unregisters the content script when the host list becomes empty', async () => {
+        await ensureHostAccess({ githubHosts: 'github.acme.com' });
+        chrome.scripting.unregisterContentScripts.mockClear();
+        chrome.scripting.registerContentScripts.mockClear();
+
+        const out = await ensureHostAccess({ githubHosts: '' });
+
+        expect(out).toEqual({ granted: false, hosts: [] });
+        expect(chrome.scripting.unregisterContentScripts)
+            .toHaveBeenCalledWith({ ids: ['repospector-selfhosted'] });
+        expect(chrome.scripting.registerContentScripts).not.toHaveBeenCalled();
+    });
+});

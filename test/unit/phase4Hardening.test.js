@@ -193,6 +193,61 @@ describe('buildStandardsUrl', () => {
         expect(buildStandardsUrl({ type: 'github' }, 'go', 'coding')).toBeNull();
         expect(buildStandardsUrl({ type: 'nope' }, 'go', 'coding')).toBeNull();
     });
+
+    // FIX 7 regression coverage: `source.host` must work whether it is a bare
+    // hostname or a full URL with scheme, for BOTH `github` and `gitlab` — no
+    // production caller passes `host` today, so this path had no live exposure
+    // and no test until now.
+    describe('source.host accepts bare hostname or full URL (github)', () => {
+        it('bare hostname routes to the GHE raw endpoint with a /raw/ segment', () => {
+            const url = buildStandardsUrl(
+                { type: 'github', owner: 'a', repo: 'b', host: 'github.acme.com' }, 'python', 'testing',
+            );
+            expect(url).toBe('https://github.acme.com/a/b/raw/main/standards/python/testing.md');
+        });
+
+        it('a full URL with scheme produces the SAME result as the bare hostname (no doubled scheme)', () => {
+            const url = buildStandardsUrl(
+                { type: 'github', owner: 'a', repo: 'b', host: 'https://github.acme.com' }, 'python', 'testing',
+            );
+            expect(url).toBe('https://github.acme.com/a/b/raw/main/standards/python/testing.md');
+            expect(url).not.toContain('https://https');
+        });
+
+        it('host "github.com" still resolves to the dedicated raw host, no /raw/ segment', () => {
+            const url = buildStandardsUrl(
+                { type: 'github', owner: 'a', repo: 'b', host: 'github.com' }, 'python', 'testing',
+            );
+            expect(url).toBe('https://raw.githubusercontent.com/a/b/main/standards/python/testing.md');
+        });
+    });
+
+    describe('source.host accepts bare hostname or full URL (gitlab)', () => {
+        it('bare hostname builds a self-hosted API URL', () => {
+            const url = buildStandardsUrl(
+                { type: 'gitlab', projectPath: 'g/p', host: 'gitlab.acme.com' }, 'go', 'coding',
+            );
+            expect(url).toBe(
+                'https://gitlab.acme.com/api/v4/projects/g%2Fp/repository/files/'
+                + encodeURIComponent('standards/go/coding.md') + '/raw?ref=main',
+            );
+        });
+
+        it('a full URL with scheme produces the SAME result as the bare hostname', () => {
+            const url = buildStandardsUrl(
+                { type: 'gitlab', projectPath: 'g/p', host: 'https://gitlab.acme.com' }, 'go', 'coding',
+            );
+            expect(url).toBe(
+                'https://gitlab.acme.com/api/v4/projects/g%2Fp/repository/files/'
+                + encodeURIComponent('standards/go/coding.md') + '/raw?ref=main',
+            );
+        });
+
+        it('omitting host still defaults to gitlab.com', () => {
+            const url = buildStandardsUrl({ type: 'gitlab', projectPath: 'g/p' }, 'go', 'coding');
+            expect(url.startsWith('https://gitlab.com/')).toBe(true);
+        });
+    });
 });
 
 describe('sanitize', () => {

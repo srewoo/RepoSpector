@@ -7,15 +7,31 @@
 import { detectLanguageFromPath } from '../utils/languageMap.js';
 import { formatInlineComments } from '../utils/inlineCommentFormatter.js';
 import { buildCommentableLineMap, oldLineForNewLine } from '../utils/patchLines.js';
-import { gitlabApiBase, rememberGitLabHost } from '../utils/gitHosts.js';
+import { githubApiBase, gitlabApiBase, rememberGitLabHost, detectPlatform, PLATFORM } from '../utils/gitHosts.js';
 
 export class PullRequestService {
     constructor(options = {}) {
         this.githubToken = options.githubToken || null;
         this.gitlabToken = options.gitlabToken || null;
 
-        this.githubBaseUrl = 'https://api.github.com';
-        this.gitlabBaseUrl = 'https://gitlab.com/api/v4';
+        this.githubBaseUrl = githubApiBase();
+        this.gitlabBaseUrl = gitlabApiBase();
+    }
+
+    /**
+     * API base for the instance this URL lives on.
+     *
+     * Resolved per call rather than fixed in the constructor: one service
+     * instance handles URLs from several hosts in a session, and a
+     * constructor-time base is necessarily the wrong one for all but the first.
+     *
+     * @param {string} url - a PR or MR URL
+     * @returns {string}
+     */
+    resolveApiBase(url) {
+        return detectPlatform(url) === PLATFORM.GITLAB
+            ? gitlabApiBase(url)
+            : githubApiBase(url);
     }
 
     /**
@@ -93,14 +109,23 @@ export class PullRequestService {
      * Detect platform and PR info from URL
      */
     parsePullRequestUrl(url) {
-        // GitHub PR: https://github.com/owner/repo/pull/123
-        const githubMatch = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
-        if (githubMatch) {
+        // GitHub PR on ANY host: https://<host>/owner/repo/pull/123
+        //
+        // `/pull/<n>` is not a structural proof the way `/-/` is for GitLab —
+        // Codeberg, Gitea and others use the same or a near-identical shape —
+        // so this match is gated on `detectPlatform`, which only returns
+        // PLATFORM.GITHUB for github.com or a host already configured as GHE.
+        // An unregistered host (enterprise or otherwise) still returns null:
+        // registration stays configuration-only, never inferred from a URL.
+        const githubMatch = url.match(/^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+        if (githubMatch && detectPlatform(url) === PLATFORM.GITHUB) {
             return {
                 platform: 'github',
-                owner: githubMatch[1],
-                repo: githubMatch[2],
-                prNumber: parseInt(githubMatch[3])
+                host: githubMatch[1],
+                owner: githubMatch[2],
+                repo: githubMatch[3],
+                prNumber: parseInt(githubMatch[4]),
+                apiBase: githubApiBase(url)
             };
         }
 
@@ -146,6 +171,17 @@ export class PullRequestService {
     }
 
     /**
+     * API base for a parsed GitHub PR.
+     *
+     * Mirrors `gitlabApiFor`: `apiBase` is resolved once at parse time from the
+     * PR URL itself, so a hand-built prInfo (tests, older paths) still falls
+     * back to the instance-wide default rather than throwing.
+     */
+    githubApiFor(prInfo) {
+        return prInfo?.apiBase || this.githubBaseUrl;
+    }
+
+    /**
      * Fetch complete PR/MR data for analysis
      */
     async fetchPullRequest(url) {
@@ -177,7 +213,7 @@ export class PullRequestService {
         }
 
         try {
-            const base = `${this.githubBaseUrl}/repos/${owner}/${repo}/pulls/${prNumber}`;
+            const base = `${this.githubApiFor(prInfo)}/repos/${owner}/${repo}/pulls/${prNumber}`;
 
             // Fetch PR details (single object, no pagination needed)
             const prResponse = await fetch(base, { headers });
@@ -750,7 +786,7 @@ export class PullRequestService {
         if (!this.githubToken) throw new Error('GitHub token required to update PR description');
 
         const response = await fetch(
-            `${this.githubBaseUrl}/repos/${owner}/${repo}/pulls/${prNumber}`,
+            `${this.githubApiFor(prInfo)}/repos/${owner}/${repo}/pulls/${prNumber}`,
             {
                 method: 'PATCH',
                 headers: {
@@ -817,7 +853,7 @@ export class PullRequestService {
                 'Accept': 'application/vnd.github.v3.raw',
                 ...(this.githubToken ? { 'Authorization': `token ${this.githubToken}` } : {})
             };
-            const url = `${this.githubBaseUrl}/repos/${owner}/${repo}/contents/${encodeURIComponent(filePath)}${ref ? `?ref=${ref}` : ''}`;
+            const url = `${this.githubApiFor(prInfo)}/repos/${owner}/${repo}/contents/${encodeURIComponent(filePath)}${ref ? `?ref=${ref}` : ''}`;
             const response = await fetch(url, { headers });
             if (!response.ok) throw new Error(`Failed to fetch file: ${response.status}`);
             const content = await response.text();
@@ -826,7 +862,7 @@ export class PullRequestService {
             const projectPath = encodeURIComponent(`${prInfo.owner}/${prInfo.repo}`);
             const encodedPath = encodeURIComponent(filePath);
             const headers = this.gitlabToken ? { 'PRIVATE-TOKEN': this.gitlabToken } : {};
-            const url = `https://gitlab.com/api/v4/projects/${projectPath}/repository/files/${encodedPath}/raw${ref ? `?ref=${ref}` : '?ref=main'}`;
+            const url = `${gitlabApiBase(prUrl)}/projects/${projectPath}/repository/files/${encodedPath}/raw${ref ? `?ref=${ref}` : '?ref=main'}`;
             const response = await fetch(url, { headers });
             if (!response.ok) throw new Error(`Failed to fetch file: ${response.status}`);
             const content = await response.text();
@@ -925,7 +961,8 @@ export class PullRequestService {
             ...(c.startLine ? { start_line: c.startLine, start_side: 'RIGHT' } : {})
         });
 
-        const reviewsUrl = `${this.githubBaseUrl}/repos/${owner}/${repo}/pulls/${prNumber}/reviews`;
+        const apiBase = this.githubApiFor(prInfo);
+        const reviewsUrl = `${apiBase}/repos/${owner}/${repo}/pulls/${prNumber}/reviews`;
 
         const submit = async (comments) => {
             const response = await fetch(reviewsUrl, {
@@ -967,8 +1004,8 @@ export class PullRequestService {
         let commentsPosted = rejectedComments.length ? 0 : inlineComments.length;
 
         if (rejectedComments.length) {
-            const commentsUrl = `${this.githubBaseUrl}/repos/${owner}/${repo}/pulls/${prNumber}/comments`;
-            const commitId = await this._getGitHubHeadSha(owner, repo, prNumber, headers).catch(() => null);
+            const commentsUrl = `${apiBase}/repos/${owner}/${repo}/pulls/${prNumber}/comments`;
+            const commitId = await this._getGitHubHeadSha(owner, repo, prNumber, headers, apiBase).catch(() => null);
             for (const c of rejectedComments) {
                 try {
                     const resp = await fetch(commentsUrl, {
@@ -1084,7 +1121,7 @@ export class PullRequestService {
         // GitHub has no thread object on the REST review-comments API: replies are
         // flat comments carrying `in_reply_to_id`. Stitch them back together.
         const comments = await this.fetchAllPagesGitHub(
-            `${this.githubBaseUrl}/repos/${owner}/${repo}/pulls/${prNumber}/comments`,
+            `${this.githubApiFor(prInfo)}/repos/${owner}/${repo}/pulls/${prNumber}/comments`,
             headers
         );
 
@@ -1184,7 +1221,7 @@ export class PullRequestService {
             };
             // One call gets recent review comments across the whole repo.
             const res = await fetch(
-                `${this.githubBaseUrl}/repos/${owner}/${repo}/pulls/comments?per_page=100&sort=updated&direction=desc`,
+                `${this.githubApiFor(prInfo)}/repos/${owner}/${repo}/pulls/comments?per_page=100&sort=updated&direction=desc`,
                 { headers }
             );
             if (!res.ok) return [];
@@ -1201,8 +1238,8 @@ export class PullRequestService {
     }
 
     /** Head SHA of a PR — required as `commit_id` when posting standalone comments. */
-    async _getGitHubHeadSha(owner, repo, prNumber, headers) {
-        const resp = await fetch(`${this.githubBaseUrl}/repos/${owner}/${repo}/pulls/${prNumber}`, { headers });
+    async _getGitHubHeadSha(owner, repo, prNumber, headers, apiBase = this.githubBaseUrl) {
+        const resp = await fetch(`${apiBase}/repos/${owner}/${repo}/pulls/${prNumber}`, { headers });
         if (!resp.ok) throw new Error(`GitHub API error: ${resp.status}`);
         return (await resp.json())?.head?.sha || null;
     }

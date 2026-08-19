@@ -1,4 +1,5 @@
 import { scoreFileByRisk } from '../utils/prompts.js';
+import { windowFile } from './HunkWindower.js';
 
 /**
  * Groups PR files into ReviewUnits for batched LLM calls.
@@ -10,6 +11,9 @@ export class FileGroupingStrategy {
         this.soloChangeThreshold = options.soloChangeThreshold || 200;
         this.maxFilesPerGroup = options.maxFilesPerGroup || 5;
         this.maxLinesPerGroup = options.maxLinesPerGroup || 300;
+        // Pure function of its arguments: no import of the flag constant here.
+        // The two construction sites read HUNK_WINDOWING and pass it in.
+        this.hunkWindowing = options.hunkWindowing ?? false;
     }
 
     /**
@@ -44,13 +48,35 @@ export class FileGroupingStrategy {
         for (const file of scored) {
             if (assigned.has(file.filename)) continue;
             if (file._riskScore >= this.soloRiskThreshold || file._changeSize > this.soloChangeThreshold) {
-                units.push({
-                    type: 'solo',
-                    primaryFile: file.filename,
-                    files: [file],
-                    totalChanges: file._changeSize,
-                    riskScore: file._riskScore
-                });
+                // A large file used to become one unit with its whole diff in a
+                // single prompt. Windowing splits it on hunk boundaries so the
+                // model reads a few hundred lines at a time rather than a
+                // thousand — the attention-dilution fix the eval harness
+                // pointed at. Off by default: it multiplies LLM calls on
+                // exactly the biggest files.
+                const windows = this.hunkWindowing ? windowFile(file) : [];
+                if (windows.length > 1) {
+                    for (const w of windows) {
+                        units.push({
+                            type: 'solo-window',
+                            primaryFile: file.filename,
+                            files: [{ ...file, patch: w.patch }],
+                            totalChanges: file._changeSize,
+                            riskScore: file._riskScore,
+                            windowIndex: w.windowIndex,
+                            windowTotal: w.windowTotal,
+                            siblingNote: w.siblingNote,
+                        });
+                    }
+                } else {
+                    units.push({
+                        type: 'solo',
+                        primaryFile: file.filename,
+                        files: [file],
+                        totalChanges: file._changeSize,
+                        riskScore: file._riskScore
+                    });
+                }
                 assigned.add(file.filename);
             }
         }

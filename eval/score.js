@@ -19,7 +19,7 @@ import { scoreRun, formatReport, pct } from './lib/scoring.js';
 const BASELINE_PATH = resolve('eval/baseline.json');
 
 function parseArgs(argv) {
-    const args = { corpus: null, gate: false, writeBaseline: false, json: false, tolerance: undefined };
+    const args = { corpus: null, gate: false, writeBaseline: false, json: false, tolerance: undefined, allowLlmBaseline: false };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
         if (a === '--corpus') args.corpus = argv[++i];
@@ -29,6 +29,7 @@ function parseArgs(argv) {
         else if (a === '--misses') args.misses = true;
         else if (a === '--include-unreviewed') args.includeUnreviewed = true;
         else if (a === '--tolerance') args.tolerance = Number(argv[++i]);
+        else if (a === '--allow-llm-baseline') args.allowLlmBaseline = true;
         else if (a === '--help' || a === '-h') args.help = true;
         else throw new Error(`Unknown argument: ${a}`);
     }
@@ -45,6 +46,7 @@ Usage: node eval/score.js --corpus <file> [--gate] [--write-baseline] [--json]
   --tolerance <n>     Line-match tolerance (default 5)
   --misses            List the human comments the run did not raise
   --include-unreviewed  Score un-run cases as total misses (default: exclude)
+  --allow-llm-baseline  Permit --write-baseline when the human sample is empty
 `.trim();
 
 function readJson(path) {
@@ -87,6 +89,22 @@ export function gate(result, baseline) {
     check('recall', result.recall.low, baseline?.thresholds?.recallLow, result.recall.reference);
 
     return { passed, lines };
+}
+
+/**
+ * Should `--write-baseline` refuse?
+ *
+ * `precision` is human-only, so an LLM verdict cannot move the threshold
+ * directly. The hazard is subtler: recording a baseline from an EMPTY human
+ * sample stamps `precisionLow: 0` into the file while the report on screen
+ * shows a healthy LLM figure, and the next reader concludes precision was
+ * measured and the bar is zero.
+ */
+export function refuseLlmBaseline(result, args = {}) {
+    if (args.allowLlmBaseline) return false;
+    const humanJudged = result?.precision?.adjudicated ?? 0;
+    const llmJudged = result?.precisionLlm?.adjudicated ?? 0;
+    return humanJudged === 0 && llmJudged > 0;
 }
 
 function main() {
@@ -143,6 +161,15 @@ function main() {
     }
 
     if (args.writeBaseline) {
+        if (refuseLlmBaseline(result, args)) {
+            console.error(
+                `\nRefusing to write a baseline: ${result.precisionLlm.adjudicated} finding(s) are ` +
+                `LLM-adjudicated and none are human-adjudicated.\n` +
+                `The gate must be anchored to human judgment. Adjudicate a human sample, or pass ` +
+                `--allow-llm-baseline if you accept a baseline whose precision floor is unmeasured.`
+            );
+            process.exit(1);
+        }
         const baseline = {
             // Recorded so a future reader knows what these numbers describe.
             corpus: args.corpus,

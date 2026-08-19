@@ -30,6 +30,32 @@ import { OSVService } from '../services/OSVService.js';
 import { EOLService } from '../services/EOLService.js';
 import { AdaptiveLearningService } from '../services/AdaptiveLearningService.js';
 import { CustomRulesService } from '../services/CustomRulesService.js';
+import { RepoInstructionsService } from '../services/RepoInstructionsService.js';
+
+/** Embedding providers the RAG service knows how to build. */
+const EMBEDDING_PROVIDERS = new Set(['local', 'openai', 'gemini']);
+
+/**
+ * Which stored key does this embedding provider need?
+ *
+ * Settings keeps ONE `apiKey` whose meaning follows the selected chat provider,
+ * plus per-provider fields (`googleApiKey`, …). Embeddings are chosen
+ * independently of the chat model, so the two can disagree: a user on Gemini
+ * embeddings with Anthropic as their chat provider has a Google key that is not
+ * in `apiKey`. Prefer the dedicated field, then fall back to `apiKey` only when
+ * the chat provider matches — never hand one vendor's key to another.
+ */
+function resolveEmbeddingKey(provider, settings) {
+    if (provider === 'gemini') {
+        return settings.googleApiKey
+            || (settings.provider === 'google' ? settings.apiKey : null)
+            || null;
+    }
+    if (provider === 'openai') {
+        return settings.apiKey || null;
+    }
+    return null; // local needs none
+}
 import { PRThreadManager } from '../services/PRThreadManager.js';
 import { PRSessionManager } from '../services/PRSessionManager.js';
 // Prompt builders and review-engine imports for these domains now live in the
@@ -55,7 +81,7 @@ import { createChatHandlers } from './handlers/chatHandlers.js';
 import { createGeneratorHandlers } from './handlers/generatorHandlers.js';
 import { createPrReviewHandlers } from './handlers/prReviewHandlers.js';
 import { parseHostList } from './handlers/settingsHandlers.js';
-import { setGitLabHosts, getGitLabHosts } from '../utils/gitHosts.js';
+import { setGitLabHosts, getGitLabHosts, setGitHubHosts, getGitHubHosts } from '../utils/gitHosts.js';
 
 class BackgroundService {
     constructor() {
@@ -91,6 +117,10 @@ class BackgroundService {
             this.findingCache = new FindingCache();
             this.telemetry = new TelemetryService();
             this.customRulesService = new CustomRulesService();
+            // The repo's own AGENTS.md / CLAUDE.md, read from the default branch.
+            // Conventions the team already maintains, which no generic rule set
+            // contains and nobody has to re-author for RepoSpector.
+            this.repoInstructionsService = new RepoInstructionsService();
             this.pullRequestService = new PullRequestService();
             // Per-PR revision state so a re-review after a push only re-reads the
             // files whose diff actually changed.
@@ -255,15 +285,23 @@ class BackgroundService {
                 console.log('✅ RAG API key loaded on startup');
             }
 
-            // Self-hosted GitLab instances must be registered before the first
-            // URL is parsed — platform detection reads this list, and a worker
-            // restart mid-session would otherwise forget the user's host.
+            // Self-hosted GitLab and GitHub Enterprise instances must be
+            // registered before the first URL is parsed — platform detection
+            // reads these lists, and a worker restart mid-session would
+            // otherwise forget the user's host.
             try {
                 setGitLabHosts(parseHostList(settings?.gitlabHosts ?? settings?.gitlabHost));
                 const hosts = getGitLabHosts();
                 if (hosts.length > 1) console.log(`✅ GitLab hosts: ${hosts.join(', ')}`);
             } catch (e) {
                 console.warn('Could not load GitLab host settings:', e?.message);
+            }
+            try {
+                setGitHubHosts(parseHostList(settings?.githubEnterpriseHosts));
+                const hosts = getGitHubHosts();
+                if (hosts.length > 1) console.log(`✅ GitHub hosts: ${hosts.join(', ')}`);
+            } catch (e) {
+                console.warn('Could not load GitHub host settings:', e?.message);
             }
 
             // Load EOL cache from storage
@@ -1790,8 +1828,10 @@ Format your response in a developer-friendly way with code examples where approp
     async ensureRagEmbeddingProvider() {
         try {
             const settings = await this.getStoredSettings();
-            const desired = settings.embeddingProvider === 'openai' ? 'openai' : 'local';
-            const apiKey = settings.apiKey || null;
+            const desired = EMBEDDING_PROVIDERS.has(settings.embeddingProvider)
+                ? settings.embeddingProvider
+                : 'local';
+            const apiKey = resolveEmbeddingKey(desired, settings);
 
             if (!this.ragService || this.ragService.provider !== desired) {
                 console.log(`🔄 Rebuilding RAG service for embedding provider: ${desired}`);
@@ -1799,9 +1839,14 @@ Format your response in a developer-friendly way with code examples where approp
                 if (this.contextAnalyzer) {
                     this.contextAnalyzer.setRagService(this.ragService);
                 }
-            } else if (desired === 'openai') {
-                // Same provider, but keep the OpenAI key fresh for embedding calls.
+            } else if (desired !== 'local') {
+                // Same provider, but keep the hosted provider's key fresh for
+                // embedding calls. Was `desired === 'openai'`, which meant a
+                // rotated Gemini key never reached an already-built service.
                 this.ragService.apiKey = apiKey;
+                if (this.ragService.embeddingService) {
+                    this.ragService.embeddingService.apiKey = apiKey;
+                }
             }
         } catch (error) {
             console.warn('ensureRagEmbeddingProvider failed (keeping existing service):', error?.message);

@@ -16,6 +16,7 @@
  */
 
 import { detectPlatform } from '../../utils/gitHosts.js';
+import { ConventionMiner } from '../../services/ConventionMiner.js';
 
 export function createIndexingHandlers(svc) {
     async function handleIndexRepository(message, sender, sendResponse) {
@@ -155,6 +156,30 @@ export function createIndexingHandlers(svc) {
                 filesProcessed: files.length,
                 graphStats
             });
+
+            // Warm team conventions now. Indexing already took a while and the
+            // user is not waiting on this, so the mine is free here — and being
+            // warm is what lets the FIRST review use the repo's own conventions.
+            //
+            // Note: `url` here is the repository URL the user indexed from, not
+            // necessarily a PR/MR URL. `fetchReviewComments` parses a PR/MR URL
+            // to find the repo and walk its recent history; given a bare repo
+            // URL it returns `[]` (see its `parsePullRequestUrl` call), so this
+            // trigger is a harmless no-op in that case. It still works whenever
+            // indexing was kicked off from a PR/MR page. Fixing the repo-URL
+            // case would mean inventing a repo-URL crawl, which is out of scope
+            // here — `mine()` only persists on its success path, so a prewarm
+            // that fetches zero notes cannot poison the 14-day cache.
+            try {
+                const miner = new ConventionMiner({ llmService: svc.llmService });
+                miner.prewarm(
+                    repoId,
+                    () => svc.pullRequestService?.fetchReviewComments?.(url) ?? Promise.resolve([]),
+                    { settings: await svc.getStoredSettings().catch(() => ({})) },
+                );
+            } catch (e) {
+                console.warn('Convention prewarm at index time:', e?.message);
+            }
 
             // Broadcast completion to popup
             chrome.runtime.sendMessage({

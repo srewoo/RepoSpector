@@ -58,6 +58,11 @@ const API_ENDPOINTS = {
         chat: 'http://localhost:11434/api/chat',
         models: 'http://localhost:11434/api/tags'
     },
+    // Public-instance defaults ONLY. Host-aware code must resolve its base via
+    // `githubApiBase()` / `gitlabApiBase()` in `src/utils/gitHosts.js`, which
+    // route to the correct instance for the URL in hand (GHE / self-hosted
+    // GitLab included). These constants stay as the public fallback that those
+    // functions themselves return when given no URL.
     GITHUB_API: 'https://api.github.com',
     GITLAB_API: 'https://gitlab.com/api/v4',
     BITBUCKET_API: 'https://api.bitbucket.org/2.0',
@@ -500,6 +505,8 @@ const PLATFORM_PATTERNS = {
         fileUrl: /github\.com\/[^/]+\/[^/]+\/blob\/[^/]+\/.+/,
         diffUrl: /github\.com\/[^/]+\/[^/]+\/(?:pull\/\d+|commit\/[a-f0-9]+|compare\/)/,
         repoUrl: /github\.com\/[^/]+\/[^/]+(?:\/tree\/[^/]+)?$/,
+        // Public-instance default only — see the note above `GITHUB_API`.
+        // Host-aware code calls `githubApiBase(url)` instead of reading this.
         apiBase: 'https://api.github.com',
         selectors: {
             code: '.blob-code-inner, .blob-code-content, td.blob-code',
@@ -512,6 +519,8 @@ const PLATFORM_PATTERNS = {
         fileUrl: /gitlab\.com\/[^/]+\/[^/]+\/-\/blob\/[^/]+\/.+/,
         diffUrl: /gitlab\.com\/[^/]+\/[^/]+\/-\/(?:merge_requests\/\d+|commit\/[a-f0-9]+)/,
         repoUrl: /gitlab\.com\/[^/]+\/[^/]+(?:\/-\/tree\/[^/]+)?$/,
+        // Public-instance default only — see the note above `GITLAB_API`.
+        // Host-aware code calls `gitlabApiBase(url)` instead of reading this.
         apiBase: 'https://gitlab.com/api/v4',
         selectors: {
             // Modern GitLab MR diff selectors (2024+)
@@ -583,6 +592,48 @@ const PLATFORM_PATTERNS = {
         }
     }
 };
+
+/**
+ * How long a review will wait for convention mining already in progress.
+ *
+ * Only ever paid on a cold repo whose mine is still running. Losing the race
+ * falls back to the generic standards — the behaviour before warm-up existed —
+ * so the worst case is this much added latency, once.
+ */
+const CONVENTION_WARM_DEADLINE_MS = 15000;
+
+/**
+ * Split a large file's diff into hunk windows for review.
+ *
+ * OFF until the targeted eval justifies it. Windowing multiplies LLM calls on
+ * exactly the largest files, so a wrong default is expensive in the case that
+ * matters most.
+ *
+ * It ALSO multiplies prompt SIZE, not just call count — this is the part a
+ * naive read of "windowing" gets wrong. `_getStaticFindingsForUnit` and
+ * `fileContext` in MultiPassReviewEngine.js are keyed on FILENAME, not on
+ * window, so every window's prompt still carries ALL of that file's static
+ * findings (including ones on lines that window cannot see) and, when full
+ * file content is attached, the ENTIRE file gets re-sent per window. Windowing
+ * therefore shrinks the diff shown to the model but NOT the surrounding
+ * context — which undercuts the attention-dilution hypothesis this mechanism
+ * exists to test, since the context that supposedly dilutes attention is still
+ * present in full on every window.
+ *
+ * PRECONDITION for ever flipping this flag on: per-window keying of static
+ * findings and file context. Without that, enabling this multiplies the
+ * largest prompts in the system N-fold for no proven benefit. Not implemented
+ * here — it is new design work, out of scope while the flag stays off (zero
+ * production exposure).
+ *
+ * Override per-run with REPOSPECTOR_HUNK_WINDOWING=1 in the eval harness,
+ * mirroring REPOSPECTOR_CONTEXT_PROFILE — which is wired the same way in
+ * `eval/run.js` but, per `reviewContextBudget.js`'s header, is currently an
+ * inert comparison there: the harness supplies no ragContext/graphContext/
+ * fileContext for that budget to gate. Wired does not mean meaningful; see
+ * that file before reading anything into a legacy-vs-default run.
+ */
+const HUNK_WINDOWING = false;
 
 // Enhanced SCM platform capabilities
 const PLATFORM_CAPABILITIES = {
@@ -662,5 +713,7 @@ export {
     SUCCESS_MESSAGES,
     TEST_CASE_PROMPTS,
     PLATFORM_PATTERNS,
-    PLATFORM_CAPABILITIES
+    PLATFORM_CAPABILITIES,
+    CONVENTION_WARM_DEADLINE_MS,
+    HUNK_WINDOWING
 }; 

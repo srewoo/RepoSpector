@@ -31,7 +31,11 @@ describe('ModelCatalogService', () => {
     it('Anthropic: uses display_name and normalizes', async () => {
         mockFetch({ data: [{ id: 'claude-x', display_name: 'Claude X' }] });
         const models = await ModelCatalogService.fetchModels('anthropic', 'sk-ant');
-        expect(models[0]).toEqual({ id: 'anthropic:claude-x', name: 'Claude X' });
+        // `recommended` is added by rankModels to the top entry of every provider's
+        // list, so the dropdown can star the newest model. Asserted with
+        // toMatchObject rather than toEqual: this test is about normalisation
+        // (display_name -> name), not about the ranking flag.
+        expect(models[0]).toMatchObject({ id: 'anthropic:claude-x', name: 'Claude X' });
     });
 
     it('Google: keeps only generateContent models', async () => {

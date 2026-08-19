@@ -384,6 +384,9 @@ export function buildPerFileReviewPrompt(unit, context = {}) {
         languageRules,
         conventionBlock = '',
         standardsText = '',
+        // The repo's own AGENTS.md / CLAUDE.md, pre-rendered and sanitised by
+        // RepoInstructionsService. Absent for repos that carry neither.
+        repoInstructions = '',
         graphContext,
         // Phase 2 additions — see ReviewFileContextService / reviewIntentContext.
         fileContext = null,   // Map<filename, {fullContent, testPath, testContent, testFileMissing}>
@@ -479,6 +482,15 @@ ${String(conventionBlock).trim()}
 `;
     }
 
+    // ── Section 2c: The repo's own instruction files ──
+    // AGENTS.md / CLAUDE.md, read from the DEFAULT BRANCH only — see
+    // RepoInstructionsService for why that pin is the whole security model.
+    // Already sanitised and fenced there, so it is appended as-is; wrapping it
+    // again here would nest fences and break the block.
+    if (repoInstructions && String(repoInstructions).trim()) {
+        preamble += `\n${String(repoInstructions).trim()}\n`;
+    }
+
     // ── Sections 3+ are per-unit: static findings, retrieved chunks, the
     // code-graph slice for these files, and the diff itself. They start a
     // new part so the shared preamble above can carry the cache breakpoint.
@@ -513,6 +525,18 @@ Use this to catch issues that depend on code OUTSIDE this diff — callers that 
 
 ${String(graphContext).slice(0, budget.graphContextChars)}
 `;
+    }
+
+    // ── Section 4c: Windowing sibling note ──
+    // Present only for a `solo-window` unit, and differs per window of the
+    // SAME file — so it goes in `rest`, never in `preamble`. `preamble` is
+    // the cacheable prefix shared byte-for-byte across every review unit;
+    // putting a per-window string there would defeat prompt caching for the
+    // whole per-file pass (see the note on Section 1 above). It sits
+    // immediately before the diff section so it's the last thing read before
+    // the code.
+    if (unit.siblingNote) {
+        rest += `\n---\n\n> ${unit.siblingNote}\n`;
     }
 
     // ── Section 5: The diff (LAST — so LLM applies rules while reading it) ──
@@ -603,7 +627,15 @@ Respond with ONLY a JSON object. No markdown fences. No text before or after.
       "description": "What is wrong and why — reference the specific code on this line",
       "impact": "What could go wrong in production",
       "suggestion": "Replace X with Y (be specific, not vague)",
-      "confidence": 0.85
+      "confidence": 0.85,
+      // Escalation — set ONLY when the diff cannot settle the question.
+      // This is not "I am unsure": an unsupported guess should simply not be
+      // reported. Use it when answering needs something code review does not
+      // have — a product decision, a migration plan, a threat model, whether a
+      // downstream team was told. A real question a human must answer.
+      "needsHumanReview": false,
+      "expertise": "security | architecture | product | domain | operations | accessibility",
+      "escalationReason": "What specifically cannot be determined from the diff, and what a human needs to check"
     }
   ],
   "positives": ["Good patterns observed"],
@@ -622,7 +654,10 @@ IMPORTANT REMINDERS:
 - "missing tests" go in testCoverage, NEVER in findings.
 - Every finding needs a specific line number and a concrete fix.
 - The line number MUST be one printed in the \`__new hunk__\` gutter for that file.
-  Do not compute it, do not offset it, do not cite a line from \`__old hunk__\`.`;
+  Do not compute it, do not offset it, do not cite a line from \`__old hunk__\`.
+- Escalate sparingly. \`needsHumanReview\` is for a question the diff genuinely
+  cannot answer, not for hedging a weak finding. If you would not want a senior
+  engineer paged for it, do not set it.`;
 
     // Two parts, not one string, so the transport can put a cache breakpoint at
     // the end of the shared preamble. The per-file pass makes one call per

@@ -37,6 +37,13 @@ export const EVIDENCE = {
     UNPROVEN: 'unproven',
 };
 
+/**
+ * How close a changed line must be for a context-line finding to survive GATE 2.
+ * Small on purpose: a reviewer pointing at pre-existing code three lines from any
+ * edit is reviewing the file, not the pull request.
+ */
+const CONTEXT_RADIUS = 3;
+
 /** Line-comment prefixes across the languages RepoSpector reviews. */
 const COMMENT_ONLY = /^\s*(\/\/|#|\*|\/\*|--|<!--)/;
 
@@ -102,25 +109,52 @@ export function mentionedConstructs(finding) {
     );
 }
 
-/** Added / removed / context line text for one file's patch. */
+/**
+ * Added / removed / context line text for one file's patch.
+ *
+ * `addedNewLines` and `deletionAnchors` exist for GATE 2: a line present in the
+ * diff is not necessarily a line this PR *changed*. Context lines are carried in
+ * a patch purely to orient the reader, and a finding anchored to one is talking
+ * about pre-existing code.
+ *
+ * A deletion has no new-line number of its own, so it is anchored to the new-line
+ * number it sits before — that is where a reader sees the removal.
+ */
 function partitionPatch(patch) {
     const added = [];
     const removed = [];
     const byNewLine = new Map();
+    const addedNewLines = new Set();
+    const deletionAnchors = new Set();
 
     for (const hunk of parsePatchHunks(patch)) {
+        let lastNew = hunk.newStart ?? 0;
         for (const l of hunk.lines) {
             if (l.type === 'added') {
                 added.push(l.content);
-                if (l.number.new != null) byNewLine.set(l.number.new, l.content);
+                if (l.number.new != null) {
+                    byNewLine.set(l.number.new, l.content);
+                    addedNewLines.add(l.number.new);
+                    lastNew = l.number.new;
+                }
             } else if (l.type === 'deleted') {
                 removed.push(l.content);
+                deletionAnchors.add(lastNew);
             } else if (l.type === 'context' && l.number.new != null) {
                 byNewLine.set(l.number.new, l.content);
+                lastNew = l.number.new;
             }
         }
     }
-    return { added, removed, byNewLine };
+    return { added, removed, byNewLine, addedNewLines, deletionAnchors };
+}
+
+/** Did this diff change anything within `radius` lines of `line`? */
+function changedNear(line, addedNewLines, deletionAnchors, radius) {
+    for (let l = line - radius; l <= line + radius; l++) {
+        if (addedNewLines.has(l) || deletionAnchors.has(l)) return true;
+    }
+    return false;
 }
 
 /** Does `token` occur in any of these lines? Matched on word-ish boundaries. */
@@ -151,7 +185,7 @@ export function assessFinding(finding, patch) {
 
     if (!patch) return base;
 
-    const { added, removed, byNewLine } = partitionPatch(patch);
+    const { added, removed, byNewLine, addedNewLines, deletionAnchors } = partitionPatch(patch);
     const line = Number(finding?.line);
     const citedLine = Number.isFinite(line) ? (byNewLine.get(line) ?? null) : null;
     base.citedLine = citedLine;
@@ -161,6 +195,30 @@ export function assessFinding(finding, patch) {
     // condemn the finding.
     if (Number.isFinite(line) && byNewLine.size > 0 && !byNewLine.has(line)) {
         return { ...base, verdict: EVIDENCE.REFUTED, reason: `cited line ${line} is not present in the diff for this file` };
+    }
+
+    // GATE 2 — the cited line is UNCHANGED, and this diff touched nothing near it.
+    //
+    // Measured FP class 3: "flagging unchanged context lines — pre-existing code
+    // the reviewer is explicitly instructed to ignore". A context line is present
+    // in the patch only to orient the reader; being visible is not being changed.
+    //
+    // The +/-3 window is what keeps this honest. A finding may legitimately anchor
+    // to a context line to say "the line you just added breaks the invariant
+    // above", so a context line ADJACENT to real change is left alone; only one
+    // with no added or removed line anywhere near it is provably about code this
+    // PR did not write.
+    if (
+        Number.isFinite(line)
+        && byNewLine.has(line)
+        && !addedNewLines.has(line)
+        && !changedNear(line, addedNewLines, deletionAnchors, CONTEXT_RADIUS)
+    ) {
+        return {
+            ...base,
+            verdict: EVIDENCE.REFUTED,
+            reason: `line ${line} is an unchanged context line and this diff modifies nothing within ${CONTEXT_RADIUS} lines of it — the finding describes pre-existing code`,
+        };
     }
 
     if (constructs.length === 0) return base;

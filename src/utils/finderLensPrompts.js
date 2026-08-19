@@ -29,7 +29,55 @@ Attach a CWE where you can.`
 - Race conditions, TOCTOU, unsynchronised shared state, await/ordering bugs.
 - Resource/connection lifecycle: a response/client/file/lock not closed on EVERY path including retry/fallback (continue/reassign); client rebuilt per retry attempt.
 - Error handling: swallowed errors, wrong log level, non-200 (404) recorded as a health/circuit-breaker failure, missing fail-fast.
-- Off-by-one, null/undefined, wrong comparison operators, edge cases (empty/zero/boundary).`
+- Off-by-one, null/undefined, wrong comparison operators, edge cases (empty/zero/boundary).
+
+For every finding, name the CONCRETE input or interleaving that breaks it — the value,
+the ordering, the sequence of calls. "Callers may pass nil" is not a finding;
+"line 42 dereferences cfg, which line 38 sets to nil when the flag is off" is.
+If you cannot state the trigger from what this diff shows, do not report it.`
+    },
+    {
+        key: 'intent-implementation',
+        title: 'Intent-versus-implementation specialist',
+        /**
+         * The gap no other lens covers.
+         *
+         * Every lens here hunts a CATEGORY of defect — injection, a race, an N+1.
+         * None asks the question a human reviewer asks first: does this code do
+         * what it says it does? Measured against 135 real reviewer threads this
+         * reviewer matched 23%, and the misses are dominated by exactly that — a
+         * function whose name promises one thing and whose body does another, a
+         * guard that does not guard what its comment claims.
+         *
+         * The evidence is unusually good here, which is why this lens can demand
+         * it: the diff carries BOTH the claim (name, docstring, comment, test
+         * title, PR description) and the implementation. A mismatch between them
+         * is checkable from the hunk rather than guessed at — which is what
+         * separates this from the speculation that dominates the false positives.
+         */
+        instruction: `Hunt ONLY places where the code does not do what it CLAIMS to do.
+The claim and the implementation are both in this diff, so every finding must quote both.
+
+- A function/method whose NAME promises behaviour its body does not deliver
+  (validateX that validates nothing on some path, getOrCreate that never creates,
+  isEmpty that returns true for a one-element input).
+- A comment or docstring that contradicts the code beneath it — including a comment
+  the diff LEFT UNCHANGED while changing the code it describes.
+- A guard, early return or validation that does not cover the case its condition or
+  comment says it covers (checks the wrong variable, wrong bound, wrong branch).
+- A test whose title states one guarantee while its assertions verify a weaker or
+  different one; a test that would still pass with the feature deleted.
+- The PR description or linked issue states an intent this diff does not implement,
+  or implements on only one of several paths that need it.
+- A new parameter, option or config key that is accepted and then never read.
+- An error path that reports success, or a status/return value inconsistent with what
+  actually happened.
+
+Hard rules for this lens:
+- Quote the CLAIM (the name, comment, docstring, test title or description line) AND
+  the contradicting code line. A finding without both is not reportable.
+- "Could be clearer" is not a mismatch. Report only where the stated purpose and the
+  actual behaviour genuinely differ.`
     },
     {
         key: 'api-contract',
@@ -39,7 +87,10 @@ Attach a CWE where you can.`
 - Behavior scope changes: a filter widened/narrowed, a constant/list swapped for a different-scope value, a default changed, an AND that became an OR.
 - Falsy-default traps: \`x or default\`/\`x || default\` where only absence should default (replaces "", 0, false).
 - Over-broad gates: an \`if x:\` guard that also drops an unrelated sibling assignment.
-- Config constants changed by a large factor (TTL/timeout/retry/concurrency) without justification.`
+- Config constants changed by a large factor (TTL/timeout/retry/concurrency) without justification.
+
+Name the caller, the field or the input that breaks. A contract finding that cannot
+point at what consumes the contract is speculation.`
     },
     {
         key: 'performance-resource',
@@ -83,9 +134,107 @@ describe the sequence, do not report it.`
 - A test that CANNOT fail: identical mocks/inputs so an \`a or b\`/fallback branch is never distinguished; an assertion that passes on an early-return/error path without reaching the target line.
 - An autouse fixture or global patch (e.g. patching sleep) that no-ops the behaviour under test.
 - Missing assertion on a key side effect; a hardcoded literal duplicating a production constant instead of importing it.
-Only emit findings when test files are present in the diff.`
-    }
+Only emit findings when test files are present in the diff.`,
+        // Gate moved here from MultiFinderService, which hardcoded this one
+        // lens's file test in the runner. With `appliesTo` there is one gating
+        // mechanism for every lens instead of a special case per lens.
+        appliesTo: (files) => files.some(f => /(\.test\.|\.spec\.|_test\.|test_|\/tests?\/)/i.test(f.filename || '')),
+    },
+    {
+        key: 'reuse-duplication',
+        title: 'Codebase-reuse specialist',
+        /**
+         * The only lens that requires retrieved context to run at all — see
+         * `requiresReuseContext` below and ReviewReuseContextService.
+         *
+         * Every other reviewer in the market answers this question by guessing,
+         * because a diff does not contain the codebase. A wrong duplication
+         * claim is uniquely expensive: the author knows their own repo, so being
+         * told they reimplemented something they did not costs the reviewer its
+         * credibility for every other finding. Hence the hard rule below that
+         * the lens may only cite what it was given.
+         */
+        instruction: `Hunt ONLY reinvention: code this diff ADDS that duplicates behaviour the repository already has.
+
+You have been given retrieved candidates — existing code the repository index found
+similar to declarations this PR adds. Work ONLY from those candidates:
+- A new function/class/helper that reimplements an existing one. Say what the existing
+  one is by PATH and NAME, and what the new code does that it already does.
+- A new utility that duplicates a shared helper (formatting, validation, parsing,
+  retry/backoff, date handling, error wrapping) already present elsewhere.
+- A locally redefined constant, enum, regex, or config value that already exists as a
+  shared definition — divergence here is a real bug, not a style point.
+- A hand-rolled implementation of something the repo already depends on a library for.
+
+Hard rules for this lens:
+- NEVER claim duplication you cannot point at. Cite the exact path from the retrieved
+  candidates. No candidate for a claim means no finding.
+- Similar SHAPE is not duplication. Two functions taking (id, options) are not
+  duplicates. The BEHAVIOUR must overlap enough that one could call the other.
+- A deliberate fork can be correct: a copy that diverges for a stated reason, a
+  version pinned for compatibility, generated code. If the diff explains itself,
+  do not flag it.
+- Do not flag a modified existing function as a duplicate of itself.
+Severity: usually medium. Use high only when the duplicate will DRIFT — two copies of
+a validation rule or a constant that must agree, where updating one and not the other
+is a future bug. Set \`type\` to "style" unless divergence causes a defect, then "bug".`,
+        requiresReuseContext: true,
+    },
+    {
+        key: 'accessibility',
+        title: 'Accessibility & internationalisation specialist',
+        /**
+         * Gated to files that render UI (`appliesTo`). Running it on a backend
+         * PR spends a model call to be told there is no markup, and worse,
+         * invites the model to manufacture an a11y finding from a Go handler
+         * because it was asked for one.
+         */
+        instruction: `Hunt ONLY accessibility and internationalisation defects introduced by this diff:
+- Interactive behaviour on a non-interactive element: onClick on a div/span with no
+  role, tabindex, or key handler — unreachable by keyboard.
+- A control with no accessible name: icon-only button, unlabelled input, image with
+  no alt, form field with no associated label.
+- Focus management: a modal/dialog/menu that does not trap or restore focus, focus
+  outlines removed with no replacement, a focus order the DOM order contradicts.
+- State conveyed to sighted users only: colour as the sole signal, an error shown
+  visually with no aria-invalid / aria-describedby / live region.
+- Hardcoded user-facing strings in a codebase that uses a translation function, and
+  concatenated sentence fragments that cannot be translated correctly.
+- Layout assumptions that break on text scaling or RTL: fixed pixel heights on text
+  containers, hardcoded left/right where logical properties are used elsewhere.
+Only report what the diff introduces. Follow the file's existing conventions: if this
+codebase has no i18n layer, a literal string is not a finding.`,
+        appliesTo: (files) => files.some(f => /\.(jsx?|tsx?|vue|svelte|html?|hbs|erb|astro)$/i.test(f.filename || '')),
+    },
 ];
+
+/**
+ * Lenses active for this PR.
+ *
+ * Gating is per-lens rather than hardcoded here so adding a lens does not mean
+ * editing the runner. Two independent gates:
+ *
+ *   `appliesTo(files)`      — does the diff contain the kind of file this lens
+ *                             reads? A backend PR should not pay for an a11y
+ *                             pass, and asking for one invites an invented
+ *                             finding rather than an honest empty result.
+ *   `requiresReuseContext`  — the reuse lens is meaningless without retrieved
+ *                             candidates; without them it can only speculate,
+ *                             which is exactly what it exists not to do.
+ *
+ * @param {Array} lenses
+ * @param {Object} ctx
+ * @param {Array} ctx.files - prData.files
+ * @param {boolean} [ctx.hasReuseContext=false]
+ * @returns {Array} the lenses that should run
+ */
+export function activeLenses(lenses, { files = [], hasReuseContext = false } = {}) {
+    return (lenses || []).filter((lens) => {
+        if (lens.requiresReuseContext && !hasReuseContext) return false;
+        if (typeof lens.appliesTo === 'function' && !lens.appliesTo(files)) return false;
+        return true;
+    });
+}
 
 /**
  * Build a finder prompt for one lens.
@@ -146,6 +295,7 @@ export function buildLensFinderPrompt(lens, ctx = {}) {
         diffText = '',
         existingTitles = [],
         graphContext = '',
+        reuseContext = '',
         mode = 'default',
     } = ctx;
 
@@ -168,6 +318,13 @@ ${RULES[mode] || RULES.default}`;
     if (graphContext && String(graphContext).trim()) {
         stable += `## Cross-file context (code graph)\n${String(graphContext).slice(0, 1500)}\n\n`;
     }
+    // Retrieved prior-art candidates for the reuse lens. Placed in the cached
+    // prefix with the other stable context: it is identical across rounds, and
+    // it is large enough that re-reading it every round would be the dominant
+    // cost of running the lens at all.
+    if (reuseContext && String(reuseContext).trim()) {
+        stable += `${String(reuseContext).trim()}\n\n`;
+    }
     stable += `## Diff under review\n\`\`\`diff\n${String(diffText).slice(0, 12000)}\n\`\`\`\n\n`;
 
     let user = `## Already-reported issues (do NOT repeat these)\n`;
@@ -186,7 +343,10 @@ ${RULES[mode] || RULES.default}`;
       "description": "what is wrong on this line and why",
       "impact": "what breaks in production",
       "suggestion": "specific fix (replace X with Y)",
-      "confidence": 0.0-1.0
+      "confidence": 0.0-1.0,
+      "needsHumanReview": false,
+      "expertise": "security | architecture | product | domain | operations | accessibility",
+      "escalationReason": "set with needsHumanReview when the diff cannot settle the question and a human must decide"
     }
   ]
 }`;
@@ -204,4 +364,4 @@ ${RULES[mode] || RULES.default}`;
     };
 }
 
-export default { FINDER_LENSES, buildLensFinderPrompt };
+export default { FINDER_LENSES, buildLensFinderPrompt, activeLenses };

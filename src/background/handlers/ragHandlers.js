@@ -31,8 +31,17 @@ export function createRagHandlers({ svc, ragState, RAGService, GitHubService, Gi
             ragState.service = svc.ragService;
             const ragService = ragState.service;
 
-            if (ragService.provider === 'openai' && !ragService.apiKey) {
-                sendResponse({ success: false, error: 'OpenAI API key required for the OpenAI embedding provider. Set it in Settings, or switch Embedding Provider to Local.' });
+            // Any hosted embedding provider needs its own key. Naming the specific
+            // vendor matters: the previous message always said "OpenAI", so a user
+            // on Gemini embeddings with a missing Google key was sent to fix the
+            // wrong field.
+            if (ragService.provider !== 'local' && !ragService.apiKey) {
+                const label = ragService.provider === 'gemini' ? 'Google' : 'OpenAI';
+                sendResponse({
+                    success: false,
+                    error: `${label} API key required for the ${label === 'Google' ? 'Gemini' : 'OpenAI'} embedding provider. `
+                        + 'Set it in Settings → AI Configuration, or switch Embedding Provider to Local.',
+                });
                 return;
             }
 

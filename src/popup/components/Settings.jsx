@@ -14,9 +14,19 @@ const LLM_PROVIDERS = {
     LOCAL: 'local'  // Ollama
 };
 
+/**
+ * Fallback list, used ONLY when the live catalogue cannot be fetched.
+ *
+ * Deliberately not labelled "Latest" any more. This list is hand-maintained and
+ * therefore always drifting — it claimed GPT-4.1 was the latest flagship while
+ * the same key could list gpt-5.6 — and a stale label that asserts recency is
+ * worse than no label, because it reads as current. The live list from
+ * `ModelCatalogService` is the source of truth; this is the offline stand-in.
+ */
 const AVAILABLE_MODELS = {
     [LLM_PROVIDERS.OPENAI]: [
-        { id: 'openai:gpt-4.1', name: 'GPT-4.1 (Latest Flagship)', recommended: true },
+        { id: 'openai:gpt-5', name: 'GPT-5', recommended: true },
+        { id: 'openai:gpt-4.1', name: 'GPT-4.1' },
         { id: 'openai:gpt-4.1-mini', name: 'GPT-4.1 Mini (Fast & Cheap)' },
         { id: 'openai:o1-mini', name: 'o1-mini (Reasoning)' }
     ],
@@ -59,6 +69,11 @@ export function Settings({ onClose }) {
     // Embedding provider for repository indexing / RAG (independent of the chat LLM).
     // 'local' = bundled Transformers.js model (free, private, offline); 'openai' = OpenAI API.
     const [embeddingProvider, setEmbeddingProvider] = useState('local');
+    // Separate from `apiKey`, which follows the CHAT provider. Gemini embeddings
+    // can be selected while the chat provider is something else entirely, so the
+    // Google key needs its own home.
+    const [googleApiKey, setGoogleApiKey] = useState('');
+    const [showGoogleKey, setShowGoogleKey] = useState(false);
     const [settingsLoaded, setSettingsLoaded] = useState(false);
     const [showKey, setShowKey] = useState(false);
     const [isLoading, setIsLoading] = useState(false);
@@ -76,6 +91,7 @@ export function Settings({ onClose }) {
     const [jiraToken, setJiraToken] = useState('');
     const [showJiraToken, setShowJiraToken] = useState(false);
     const [gitlabHosts, setGitlabHosts] = useState('');
+    const [githubEnterpriseHosts, setGithubEnterpriseHosts] = useState('');
     const [showGithubToken, setShowGithubToken] = useState(false);
     const [showGitlabToken, setShowGitlabToken] = useState(false);
 
@@ -129,7 +145,17 @@ export function Settings({ onClose }) {
                             ? settings.gitlabHosts.join(', ')
                             : (settings.gitlabHosts || settings.gitlabHost || '')
                     );
-                    setEmbeddingProvider(settings.embeddingProvider === 'openai' ? 'openai' : 'local');
+                    setGithubEnterpriseHosts(
+                        Array.isArray(settings.githubEnterpriseHosts)
+                            ? settings.githubEnterpriseHosts.join(', ')
+                            : (settings.githubEnterpriseHosts || '')
+                    );
+                    setEmbeddingProvider(
+                        ['openai', 'gemini'].includes(settings.embeddingProvider)
+                            ? settings.embeddingProvider
+                            : 'local'
+                    );
+                    setGoogleApiKey(settings.googleApiKey || '');
 
                     // Load review quality settings
                     if (settings.reviewSettings) {
@@ -294,12 +320,14 @@ export function Settings({ onClose }) {
                         model: model,
                         provider: provider,
                         embeddingProvider: embeddingProvider,
+                        googleApiKey: googleApiKey,
                         githubToken: githubToken,
                         gitlabToken: gitlabToken,
                         jiraBaseUrl: jiraBaseUrl.trim().replace(/\/+$/, ''),
                         jiraEmail: jiraEmail.trim(),
                         jiraToken: jiraToken,
                         gitlabHosts: gitlabHosts,
+                        githubEnterpriseHosts: githubEnterpriseHosts,
                         reviewSettings: {
                             severityThreshold: severityThreshold,
                             groupRelatedFindings: groupFindings,
@@ -478,8 +506,8 @@ export function Settings({ onClose }) {
                             {dynamicModels && dynamicModels.length
                                 ? `${dynamicModels.length} models loaded live from ${getProviderLabel(provider)}`
                                 : modelsError
-                                    ? `Live list unavailable (${modelsError}) — showing built-in defaults`
-                                    : 'Enter your key, then Refresh to load the live model list'}
+                                    ? `⚠️ Live list unavailable (${modelsError}) — these ${(AVAILABLE_MODELS[provider] || []).length} built-in defaults may be out of date. Your key may support newer models.`
+                                    : 'Enter your key, then ↻ Refresh to list the models your key can actually use'}
                         </p>
                     </div>
 
@@ -567,17 +595,61 @@ export function Settings({ onClose }) {
                         >
                             <option value="local">Local — Transformers.js (Free &amp; Private) ⭐</option>
                             <option value="openai">OpenAI (text-embedding-3-small)</option>
+                            <option value="gemini">Google Gemini (gemini-embedding-001)</option>
                         </select>
-                        {embeddingProvider === 'local' ? (
+                        {embeddingProvider === 'local' && (
                             <p className="text-xs text-textMuted">
                                 Runs the all-MiniLM-L6-v2 model bundled inside the extension — 100% local,
                                 works offline and behind firewalls. No API key or network required.
                             </p>
-                        ) : (
+                        )}
+                        {embeddingProvider === 'openai' && (
                             <p className="text-xs text-textMuted">
                                 Uses the OpenAI Embeddings API. Requires an <span className="text-text">OpenAI</span> API
                                 key in the field above. Sends your code to OpenAI for embedding.
                             </p>
+                        )}
+                        {embeddingProvider === 'gemini' && (
+                            <>
+                                <p className="text-xs text-textMuted">
+                                    Uses the Gemini Embeddings API at 1536 dimensions, matching the OpenAI
+                                    option. Sends your code to Google for embedding.
+                                </p>
+                                {/* Shown only when the chat provider is NOT Google: in that case
+                                    the key above is already a Google key, so asking twice for the
+                                    same secret invites the two copies to drift. */}
+                                {provider !== LLM_PROVIDERS.GOOGLE ? (
+                                    <div className="space-y-2 pt-2">
+                                        <label className="text-sm font-medium text-text">Google API Key</label>
+                                        <div className="relative">
+                                            <input
+                                                type={showGoogleKey ? 'text' : 'password'}
+                                                value={googleApiKey}
+                                                onChange={(e) => setGoogleApiKey(e.target.value)}
+                                                placeholder="AIza..."
+                                                className="w-full h-10 px-3 pr-10 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
+                                            />
+                                            <button
+                                                type="button"
+                                                onClick={() => setShowGoogleKey(!showGoogleKey)}
+                                                className="absolute right-3 top-1/2 -translate-y-1/2 text-textMuted hover:text-text transition-colors"
+                                            >
+                                                {showGoogleKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                                            </button>
+                                        </div>
+                                        <p className="text-xs text-textMuted">
+                                            Get your key from:{' '}
+                                            <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                                                Google AI Studio
+                                            </a>
+                                        </p>
+                                    </div>
+                                ) : (
+                                    <p className="text-xs text-textMuted">
+                                        Using the <span className="text-text">Google</span> API key from the field above.
+                                    </p>
+                                )}
+                            </>
                         )}
                         <p className="text-xs text-yellow-500">
                             Changing this requires re-indexing your repositories (embedding dimensions differ).
@@ -730,6 +802,31 @@ export function Settings({ onClose }) {
                         <p className="text-xs text-textMuted">
                             Hostname only, or several separated by commas. gitlab.com always works.
                             Saving prompts for permission to read that host.
+                        </p>
+                    </div>
+
+                    {/* GitHub Enterprise. Unlike GitLab, a GHE host cannot be
+                        inferred from a URL's shape, since /pull/<n> is shared
+                        with Codeberg and Gitea — it must be registered here. */}
+                    <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                            <label className="text-sm font-medium text-text">GitHub Enterprise host</label>
+                            <span className="text-[10px] text-textMuted bg-surfaceHighlight px-1.5 py-0.5 rounded">
+                                Optional
+                            </span>
+                        </div>
+                        <input
+                            type="text"
+                            value={githubEnterpriseHosts}
+                            onChange={(e) => setGithubEnterpriseHosts(e.target.value)}
+                            placeholder="github.acme.com"
+                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
+                        />
+                        <p className="text-xs text-textMuted">
+                            GitHub Enterprise hostnames, comma-separated (e.g. github.acme.com).
+                            Required only if you use GitHub Enterprise: unlike GitLab, an enterprise
+                            GitHub host cannot be detected from the URL alone, so it must be
+                            registered here. Saving prompts for permission to read that host.
                         </p>
                     </div>
                 </div>

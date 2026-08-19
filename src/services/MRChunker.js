@@ -192,6 +192,17 @@ export function chunkMR(prData, opts = {}) {
         };
     }
 
+    // Windowing is deliberately OFF for this packing pass, unconditionally —
+    // do not thread `hunkWindowing` in here from `opts` or from a caller.
+    // `locOf()` below sums a file's whole `additions`/`deletions`, blind to
+    // window boundaries, so two windows of one oversize file can be packed
+    // into the same chunk under the same `filename`. Downstream,
+    // `FileGroupingStrategy.group()`'s `assigned.has(file.filename)` dedup is
+    // keyed on filename alone, so it silently drops the second window's diff
+    // — content loss with a `type: 'solo'` unit that gives no sign it happened.
+    // Windowing still occurs, exactly once, downstream in
+    // `MultiPassReviewEngine` per already-formed chunk, which reads the flag
+    // itself. Gaining nothing here and actively corrupting packing, it stays off.
     const strategy = new FileGroupingStrategy();
     const units = strategy.group(files, {});
 

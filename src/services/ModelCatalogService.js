@@ -12,7 +12,65 @@
  */
 
 // Substrings that mark a NON-chat model we should hide from the dropdown.
-const NON_CHAT = /(embed|embedding|whisper|tts|audio|realtime|dall[- ]?e|image|moderation|rerank|vision-only|guard|clip|search)/i;
+const NON_CHAT = /(embed|embedding|whisper|tts|audio|realtime|dall[- ]?e|image|moderation|rerank|vision-only|guard|clip|search|transcribe|-instruct)/i;
+
+/**
+ * A dated snapshot of a model that also ships a stable alias: `o4-mini-2025-04-16`
+ * beside `o4-mini`. Measured against a live OpenAI key, 29 of 80 returned ids were
+ * snapshots — more than a third of the dropdown spent on duplicates of entries
+ * already in it.
+ */
+const DATED_SNAPSHOT = /^(.*)-\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Version of a model id, for ordering "latest first".
+ *
+ * Handles both OpenAI families: `gpt-5.6-terra` → 5.6, `o4-mini` → 4,
+ * `claude-sonnet-4` → 4, `gemini-2.0-flash` → 2.0. An id with no recognisable
+ * version sorts last rather than being guessed at.
+ */
+function versionOf(bare) {
+    const m = String(bare).match(/(?:^|[a-z-])(?:gpt|o|claude[a-z-]*|gemini|llama|mistral|grok)?-?(\d+)(?:\.(\d+))?/i);
+    if (!m) return { major: -1, minor: -1 };
+    return { major: Number(m[1]), minor: m[2] ? Number(m[2]) : 0 };
+}
+
+/**
+ * Order a provider's models so the NEWEST is first, and drop snapshot duplicates.
+ *
+ * The previous ordering was `b.localeCompare(a)` — reverse alphabetical. Measured
+ * against a live key that put `o4-mini-2025-04-16` at the top and the newest
+ * flagship (`gpt-5.6-*`) at position **15**, below fourteen older reasoning
+ * models. A dropdown whose whole purpose is "pick the latest model" made the
+ * latest model the hardest one to find.
+ *
+ * Ties break toward the SHORTER id, which is how a stable alias (`gpt-5.6`) wins
+ * over a variant (`gpt-5.6-terra`) at the same version.
+ */
+export function rankModels(models) {
+    const ids = new Set(models.map(m => m.id));
+
+    const deduped = models.filter(m => {
+        const snap = DATED_SNAPSHOT.exec(m.id);
+        // Keep a snapshot only when its stable alias is absent from this list.
+        return !snap || !ids.has(snap[1]);
+    });
+
+    const sorted = [...deduped].sort((a, b) => {
+        const bareA = a.id.split(':').pop();
+        const bareB = b.id.split(':').pop();
+        const va = versionOf(bareA);
+        const vb = versionOf(bareB);
+        if (vb.major !== va.major) return vb.major - va.major;
+        if (vb.minor !== va.minor) return vb.minor - va.minor;
+        if (bareA.length !== bareB.length) return bareA.length - bareB.length;
+        return bareA.localeCompare(bareB);
+    });
+
+    // Mark the top entry so the UI can star it. Only one: "recommended" means
+    // something only while it is scarce.
+    return sorted.map((m, i) => (i === 0 ? { ...m, recommended: true } : m));
+}
 
 function normalize(provider, id, name) {
     return { id: `${provider}:${id}`, name: name || id };
@@ -25,10 +83,7 @@ async function fetchOpenAICompatible(baseUrl, apiKey, provider) {
     if (!res.ok) throw new Error(`${provider} /models ${res.status}`);
     const json = await res.json();
     const ids = (json.data || []).map(m => m.id).filter(Boolean);
-    return ids
-        .filter(id => !NON_CHAT.test(id))
-        .sort((a, b) => b.localeCompare(a))
-        .map(id => normalize(provider, id));
+    return ids.filter(id => !NON_CHAT.test(id)).map(id => normalize(provider, id));
 }
 
 const FETCHERS = {
@@ -100,7 +155,10 @@ export class ModelCatalogService {
         }
         const models = await fetcher(apiKey);
         if (!Array.isArray(models) || models.length === 0) throw new Error('No models returned');
-        return models;
+        // Rank LAST, after every provider-specific filter has run. Ranking inside
+        // the fetcher marked a model `recommended` that a later family filter then
+        // removed, so the star silently vanished from the dropdown.
+        return rankModels(models);
     }
 }
 

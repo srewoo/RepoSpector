@@ -144,7 +144,28 @@ export function partitionForPosting(findings, options = {}) {
         demotedToSummary: 0,
         inline: 0,
         cappedFromInline: 0,
+        escalations: 0,
     };
+
+    // ── Gate 0: escalations leave the pipeline before any floor ───────────
+    //
+    // Every gate below filters on a claim about SEVERITY, CONFIDENCE, or VALUE.
+    // An escalation makes none of those claims — it says "the diff cannot settle
+    // this, a human must decide". Passing it through the severity floor would
+    // delete it for not being severe enough, which is the wrong question asked
+    // of the wrong output: a repo configured `severityThreshold: high` would
+    // silently discard every open question the reviewer raised.
+    //
+    // They also get their own section rather than joining suggestions, matching
+    // Three Man Team's deliberate split of Escalate-to-Architect from Must Fix
+    // and Should Fix. A question mixed into a list of defects reads as a defect.
+    const escalations = [];
+    const gateable = [];
+    for (const f of flat) {
+        if (f && typeof f === 'object' && f.needsHumanReview) escalations.push(f);
+        else gateable.push(f);
+    }
+    stats.escalations = escalations.length;
 
     // ── Gate 1: severity floor from .repospector.yaml ────────────────────
     const floorKey = String(severityThreshold ?? '').toLowerCase();
@@ -158,7 +179,7 @@ export function partitionForPosting(findings, options = {}) {
     const scoreFloor = Number.isFinite(rawScore) && rawScore > 0 ? rawScore : null;
 
     const kept = [];
-    for (const f of flat) {
+    for (const f of gateable) {
         if (!f || typeof f !== 'object') continue;
 
         if (floor >= 0 && displayRank(f) < floor) {
@@ -216,11 +237,24 @@ export function partitionForPosting(findings, options = {}) {
     // can't name a file, lift it to summary_markdown").
     const postable = [];
     for (const f of inline) {
-        if (findingPath(f) && findingLine(f) != null) postable.push(f);
-        else {
+        if (!findingPath(f) || findingLine(f) == null) {
             suggestions.push(f);
             stats.demotedToSummary++;
+            continue;
         }
+
+        // Low-value restatements never take an inline slot. Measured at 13
+        // false positives to 1 true positive across both adjudicated corpora —
+        // better than the ~8:1 base rate, so the class is worth acting on, but
+        // not worth deleting. They still reach the author in the summary; they
+        // just stop displacing findings that carry a consequence.
+        if (f._lowValue) {
+            suggestions.push(f);
+            stats.demotedLowValue = (stats.demotedLowValue || 0) + 1;
+            continue;
+        }
+
+        postable.push(f);
     }
 
     // Order by self-reflection score before the cap bites, so what a reviewer
@@ -239,77 +273,26 @@ export function partitionForPosting(findings, options = {}) {
 
     stats.inline = postable.length;
 
-    return { inline: postable, suggestions, nitpicks, stats };
+    return { inline: postable, suggestions, nitpicks, escalations, stats };
 }
 
-/** One summary bullet: `path:line — headline` plus an optional rationale. */
-function renderBullet(f) {
-    const path = findingPath(f);
-    const line = findingLine(f);
-    const loc = path ? (line != null ? `\`${path}:${line}\`` : `\`${path}\``) : '_(no location)_';
+// Re-exported so the many existing importers of this module keep working, and so
+// "the posting policy" remains one entry point conceptually even though the
+// rendering half now lives in its own file.
+export {
+    renderDeferredSections,
+    renderEscalationSection,
+    renderPolicyNote,
+} from './reviewSummarySections.js';
 
-    const headline = String(f.title || f.message || f.description || 'Issue')
-        .split('\n')[0]
-        .trim();
+import {
+    renderDeferredSections as _renderDeferredSections,
+    renderPolicyNote as _renderPolicyNote,
+} from './reviewSummarySections.js';
 
-    // Rationale only when it says something the headline didn't.
-    const detail = String(f.suggestion || f.description || f.message || '')
-        .split('\n')[0]
-        .trim();
-
-    const rule = f.rule || f.ruleId;
-    const ruleTag = rule ? ` \`${rule}\`` : '';
-
-    const tail = detail && detail !== headline ? ` — ${detail}` : '';
-    return `- ${loc}${ruleTag} — ${headline}${tail}`;
-}
-
-/**
- * Render the demoted findings as the `### Suggestions` / `### Nitpicks`
- * sections that get appended to the summary comment.
- *
- * Returns '' when there is nothing to render, so the caller can concatenate
- * unconditionally.
- *
- * @param {Array<Object>} suggestions
- * @param {Array<Object>} nitpicks
- * @param {Object} [options]
- * @param {number} [options.maxPerSection=40] - keeps the comment under GitHub's
- *        65 536-character body limit on pathological reviews.
- */
-export function renderDeferredSections(suggestions = [], nitpicks = [], options = {}) {
-    const { maxPerSection = 40 } = options;
-    const out = [];
-
-    const section = (title, items) => {
-        if (!items.length) return;
-        out.push('', `### ${title}`, '');
-        for (const f of items.slice(0, maxPerSection)) out.push(renderBullet(f));
-        if (items.length > maxPerSection) {
-            out.push(`- _…and ${items.length - maxPerSection} more (see the RepoSpector panel)._`);
-        }
-    };
-
-    section('Suggestions', suggestions);
-    section('Nitpicks', nitpicks);
-
-    return out.join('\n');
-}
-
-/**
- * Human-readable one-liner for the summary footer, so a reviewer can tell that
- * silence on a line is a policy decision rather than the tool missing things.
- */
-export function renderPolicyNote(stats) {
-    if (!stats) return '';
-    const bits = [];
-    if (stats.demotedToSummary) bits.push(`${stats.demotedToSummary} non-blocking finding(s) listed above rather than posted inline`);
-    if (stats.droppedBySeverityFloor) bits.push(`${stats.droppedBySeverityFloor} below the configured severity floor`);
-    if (stats.droppedByConfidence) bits.push(`${stats.droppedByConfidence} below the confidence floor`);
-    if (stats.droppedByScore) bits.push(`${stats.droppedByScore} below the value-score floor`);
-    if (stats.suppressedAsDuplicate) bits.push(`${stats.suppressedAsDuplicate} already commented on`);
-    if (!bits.length) return '';
-    return `<sub>Only blocking findings are posted inline — ${bits.join('; ')}.</sub>`;
-}
-
-export default { partitionForPosting, renderDeferredSections, renderPolicyNote, postingSeverity };
+export default {
+    partitionForPosting,
+    postingSeverity,
+    renderDeferredSections: _renderDeferredSections,
+    renderPolicyNote: _renderPolicyNote,
+};

@@ -22,32 +22,10 @@
 
 import { resolveBudget } from '../utils/reviewContextBudget.js';
 import { CallerSourceService } from './CallerSourceService.js';
-
-/** Identifiers that are never worth a graph lookup. */
-const NOISE = new Set([
-    'if', 'else', 'for', 'while', 'return', 'function', 'const', 'let', 'var',
-    'class', 'new', 'this', 'true', 'false', 'null', 'undefined', 'import',
-    'export', 'default', 'async', 'await', 'try', 'catch', 'throw', 'typeof',
-    'def', 'self', 'func', 'type', 'struct', 'interface', 'package', 'public',
-    'private', 'static', 'void', 'int', 'string', 'bool', 'err', 'nil',
-]);
-
-/**
- * Declaration patterns across the languages RepoSpector supports. Matching the
- * DECLARATION (not every mention) is what keeps the symbol set small and the
- * graph queries relevant — a diff mentions hundreds of identifiers but usually
- * defines a handful.
- */
-const DECL_PATTERNS = [
-    /(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/g,   // js/ts
-    /(?:export\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)/g,   // js/ts/py
-    /(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(/g, // js arrow fn
-    /(?:export\s+)?(?:interface|type|enum)\s+([A-Za-z_$][\w$]*)/g, // ts
-    /^\s*(?:async\s+)?def\s+([A-Za-z_][\w]*)/gm,                   // python
-    /func\s+(?:\([^)]*\)\s*)?([A-Za-z_][\w]*)/g,                   // go
-    /^\s*(?:public|private|protected)?\s*(?:static\s+)?[\w<>[\],\s]+\s+([A-Za-z_]\w*)\s*\([^)]*\)\s*\{/gm, // java-ish
-    /^\s*([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/gm,                   // bare method
-];
+// Shared with ReviewReuseContextService — the declaration patterns are the same
+// question ("what does this diff define?") asked for two different purposes, and
+// two copies drift the moment either grows a language.
+import { extractDeclaredSymbols, addedLines } from '../utils/declaredSymbols.js';
 
 export class ReviewGraphContextService {
     /**
@@ -299,29 +277,12 @@ export class ReviewGraphContextService {
 
     /** Symbols DECLARED (not merely mentioned) in a block of added code. */
     _extractDeclaredSymbols(code) {
-        if (!code || typeof code !== 'string') return [];
-        const found = new Set();
-        for (const pattern of DECL_PATTERNS) {
-            pattern.lastIndex = 0;
-            let m;
-            while ((m = pattern.exec(code)) !== null) {
-                const name = m[1];
-                if (!name || name.length < 3) continue;
-                if (NOISE.has(name) || NOISE.has(name.toLowerCase())) continue;
-                found.add(name);
-            }
-        }
-        return [...found];
+        return extractDeclaredSymbols(code);
     }
 
     /** Extract just the added ("+") lines from a unified diff patch. */
     _addedLines(patch) {
-        if (!patch || typeof patch !== 'string') return '';
-        return patch
-            .split('\n')
-            .filter(l => l.startsWith('+') && !l.startsWith('+++'))
-            .map(l => l.slice(1))
-            .join('\n');
+        return addedLines(patch);
     }
 }
 

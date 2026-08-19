@@ -28,6 +28,23 @@ export const VERDICT = Object.freeze({
     SKIP: 'SKIP',
 });
 
+/**
+ * Kinds of expertise a finding can be escalated to.
+ *
+ * From the checklist's "Experts' Opinion" section — "should a security or
+ * usability expert look over this before it is accepted?" — and Three Man Team's
+ * Escalate-to-Architect bucket. Both treat "a human must decide this" as a
+ * first-class review outcome rather than a weak finding.
+ */
+export const EXPERTISE = Object.freeze({
+    SECURITY: 'security',
+    ARCHITECTURE: 'architecture',
+    PRODUCT: 'product',
+    DOMAIN: 'domain',
+    OPERATIONS: 'operations',
+    ACCESSIBILITY: 'accessibility',
+});
+
 export const CATEGORY = Object.freeze({
     SECURITY: 'security',
     LOGIC: 'logic',
@@ -83,7 +100,28 @@ export function toCanonicalFinding(raw, defaults = {}) {
         suggestion: raw.suggestion ?? raw.message ?? raw.description ?? '',
         evidence: raw.evidence ?? raw.codeSnippet ?? null,
         source: raw.source ?? defaults.source ?? 'llm', // llm | eslint | semgrep | secrets | osv | compliance
+        // ── Escalation ──────────────────────────────────────────────────────
+        // "This cannot be settled from the diff; a human with specific
+        // expertise must decide." That is a DIFFERENT claim from low confidence,
+        // and the distinction is load-bearing: a low-confidence finding should be
+        // suppressed, whereas an escalation suppressed is a question nobody ever
+        // gets asked. Before this existed the pipeline had no way to say it, so
+        // the reviewer's only options were to assert something it could not
+        // support or to stay silent.
+        needsHumanReview: raw.needsHumanReview === true,
+        escalation: raw.needsHumanReview === true
+            ? {
+                expertise: normalizeExpertise(raw.expertise ?? raw.escalation?.expertise),
+                reason: raw.escalationReason ?? raw.escalation?.reason ?? raw.suggestion ?? '',
+            }
+            : null,
     };
+}
+
+/** Unknown or missing expertise falls back to DOMAIN rather than being dropped. */
+function normalizeExpertise(value) {
+    const key = String(value ?? '').toLowerCase();
+    return Object.values(EXPERTISE).includes(key) ? key : EXPERTISE.DOMAIN;
 }
 
 function normalizeLine(line) {
@@ -108,11 +146,16 @@ export function makeFindingId() {
 export function rollupVerdict(findings) {
     if (!Array.isArray(findings) || findings.length === 0) return VERDICT.APPROVE;
     let hasSuggestion = false;
+    let hasEscalation = false;
     for (const f of findings) {
         if (f.severity === SEVERITY.BLOCKING) return VERDICT.BLOCK;
         if (f.severity === SEVERITY.SUGGESTION) hasSuggestion = true;
+        if (f.needsHumanReview) hasEscalation = true;
     }
-    return hasSuggestion ? VERDICT.NEEDS_DISCUSSION : VERDICT.APPROVE;
+    // An open question is not an approval. It is also not a block: the reviewer
+    // is not claiming something is wrong, only that it cannot tell from the
+    // diff — which is precisely what NEEDS_DISCUSSION means.
+    return (hasSuggestion || hasEscalation) ? VERDICT.NEEDS_DISCUSSION : VERDICT.APPROVE;
 }
 
 /**
@@ -126,6 +169,9 @@ export function buildVerdictReport({ findings = [], summary = {}, meta = {}, ove
         schemaVersion: 1,
         verdict,
         findings: canonical,
+        // Derived, not stored separately: an escalation IS a finding, and keeping
+        // a second copy would let the two disagree after any later filtering.
+        escalations: canonical.filter((f) => f.needsHumanReview),
         summary: {
             deep: summary.deep ?? '',
             standards: summary.standards ?? '',
@@ -139,8 +185,11 @@ export function buildVerdictReport({ findings = [], summary = {}, meta = {}, ove
 }
 
 function countBySeverity(findings) {
-    const counts = { blocking: 0, suggestion: 0, nitpick: 0, total: findings.length };
-    for (const f of findings) counts[f.severity] = (counts[f.severity] ?? 0) + 1;
+    const counts = { blocking: 0, suggestion: 0, nitpick: 0, escalations: 0, total: findings.length };
+    for (const f of findings) {
+        counts[f.severity] = (counts[f.severity] ?? 0) + 1;
+        if (f.needsHumanReview) counts.escalations++;
+    }
     return counts;
 }
 

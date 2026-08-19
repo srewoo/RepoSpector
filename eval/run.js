@@ -27,6 +27,7 @@ import { LLMService } from '../src/services/LLMService.js';
 import { buildCanonicalFindings } from '../src/utils/findingsFlatten.js';
 import { enforceCitations } from '../src/utils/citationEnforcer.js';
 import { partitionForPosting } from '../src/utils/reviewPostingPolicy.js';
+import { resolveBudget } from '../src/utils/reviewContextBudget.js';
 
 function parseArgs(argv) {
     const args = {
@@ -91,9 +92,19 @@ async function reviewOne(kase, { llm, settings, opts }) {
     const engine = new MultiPassReviewEngine({ llmService: llm });
     const result = await engine.execute(
         prData,
-        { staticFindings: staticResult.findings },
+        { staticFindings: staticResult.findings, contextBudget: opts.contextBudget },
         settings,
-        { focusAreas: ['security', 'bugs', 'performance', 'style'], maxConcurrent: 3, maxFilesToReview: 20 },
+        {
+            focusAreas: ['security', 'bugs', 'performance', 'style'],
+            maxConcurrent: 3,
+            // Was 20 — a fifth of what the extension sends (prReviewHandlers uses
+            // `options.maxFiles || 100`). Every number this harness produced was
+            // therefore measuring a reviewer that sees far less of the PR than the
+            // shipped one does, which is the exact failure this file's own header
+            // warns about ("a number produced here describes the shipped reviewer
+            // and not a lookalike").
+            maxFilesToReview: 100,
+        },
         null,
     );
 
@@ -147,6 +158,12 @@ async function reviewOne(kase, { llm, settings, opts }) {
             demotedToSummary: policy.stats.demotedToSummary,
             staticFindings: staticResult.findings.length,
             tokens: result.tokenUsage,
+            hunkWindowing: !!settings.hunkWindowing,
+            contextProfile: opts.contextProfile,
+            // Proxy for LLM call count: one per-file/window pass + one aggregation
+            // call. If windowing engaged, this rises for the case containing the
+            // split file relative to the control run.
+            reviewUnits: result.reviewUnits,
         },
     };
 }
@@ -171,7 +188,21 @@ async function main() {
     const vars = env();
     const apiKey = requireKey(vars, 'OPENAI_API_KEY', 'Add OPENAI_API_KEY to .env.');
     const model = vars.OPENAI_MODEL || 'gpt-4.1-mini';
-    const settings = { provider: 'openai', model: `openai:${model}`, apiKey };
+    // An eval-only env override threaded straight into `settings`, which
+    // MultiPassReviewEngine already reads as
+    // `settings?.hunkWindowing ?? HUNK_WINDOWING` — the shipped default stays
+    // false in constants.js regardless of what this run used.
+    const hunkWindowing = process.env.REPOSPECTOR_HUNK_WINDOWING === '1';
+
+    // REPOSPECTOR_CONTEXT_PROFILE: 'legacy' selects the pre-raise budget from
+    // reviewContextBudget.js; anything else (including unset) is 'default'.
+    // NOTE: see reviewContextBudget.js's header — this comparison is currently
+    // INERT in this harness, because reviewOne() below supplies no ragContext,
+    // graphContext, or fileContext for the budget to gate. Wiring the env var
+    // makes the switch real; it does not make the A/B meaningful yet.
+    const contextProfile = process.env.REPOSPECTOR_CONTEXT_PROFILE === 'legacy' ? 'legacy' : 'default';
+    const contextBudget = resolveBudget({ profile: contextProfile });
+    const settings = { provider: 'openai', model: `openai:${model}`, apiKey, hunkWindowing };
 
     const path = resolve(args.corpus);
     const parsed = JSON.parse(readFileSync(path, 'utf8'));
@@ -183,7 +214,9 @@ async function main() {
     // one score — which would be a corpus nobody could interpret.
     const isDone = (c) => !!c.runStats
         && c.runStats.baseline !== undefined
-        && c.runStats.finderMode === (args.multiFinder ? args.finderMode : 'off');
+        && c.runStats.finderMode === (args.multiFinder ? args.finderMode : 'off')
+        && !!c.runStats.hunkWindowing === hunkWindowing
+        && c.runStats.contextProfile === contextProfile;
 
     const all = cases.filter(c => (args.only ? c.id === args.only : true));
     const skipped = args.resume ? all.filter(isDone) : [];
@@ -197,7 +230,11 @@ async function main() {
 
     console.log(
         `Model: openai:${model}   Cases: ${selected.length}   ` +
-        `Multi-finder: ${args.multiFinder ? `${args.finderMode} × ${args.finderRounds} round(s)` : 'off'}\n`
+        `Multi-finder: ${args.multiFinder ? `${args.finderMode} × ${args.finderRounds} round(s)` : 'off'}   ` +
+        `Hunk windowing: ${hunkWindowing ? 'ON (REPOSPECTOR_HUNK_WINDOWING=1)' : 'off'}   ` +
+        `Context profile: ${contextProfile}${contextProfile === 'legacy' ? ' (REPOSPECTOR_CONTEXT_PROFILE=legacy)' : ''} ` +
+        `[ragChunks=${contextBudget.ragChunks} graphContextChars=${contextBudget.graphContextChars}] ` +
+        `— inert until the harness supplies ragContext/graphContext/fileContext (see reviewContextBudget.js)\n`
     );
 
     const llm = new LLMService();
@@ -207,7 +244,7 @@ async function main() {
         const started = Date.now();
         process.stdout.write(`${kase.id} … `);
         try {
-            const { predictions, stats } = await reviewOne(kase, { llm, settings, opts: args });
+            const { predictions, stats } = await reviewOne(kase, { llm, settings, opts: { ...args, contextProfile, contextBudget } });
             kase.predictions = predictions;
             kase.runStats = stats;
 

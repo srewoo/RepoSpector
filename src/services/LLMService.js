@@ -84,7 +84,13 @@ export class LLMService {
      * @returns {Promise<Object>} Response with content property
      */
     async streamChat(messages, options = {}) {
-        const { provider, model, apiKey, stream = false, onChunk, tabId, context } = options;
+        // `timeout` MUST be destructured here to be honoured. It was not, so a
+        // caller passing one had it silently dropped and every request fell back
+        // to the 120s provider default — which is how the two longest-prompt
+        // finder lenses aborted on a reasoning model while the call site believed
+        // it had granted them five minutes. A knob that cannot turn is worse than
+        // no knob: it reads as configured.
+        const { provider, model, apiKey, stream = false, onChunk, tabId, context, timeout } = options;
 
         // No fallback. This previously read `model || 'openai:gpt-4.1-mini'`, so a
         // caller that forgot to pass a model silently billed the user's OpenAI key
@@ -113,7 +119,10 @@ export class LLMService {
         const response = await this.callLLM(requestData, apiKey, {
             streaming: stream,
             onChunk,
-            tabId
+            tabId,
+            // Undefined leaves each provider adapter on its own default, so this
+            // changes nothing for callers that do not ask.
+            ...(Number.isFinite(timeout) ? { timeout } : {}),
         });
 
         // Normalize response format

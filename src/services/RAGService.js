@@ -6,6 +6,12 @@ import { IndexManifest, ManifestStore, hashContent } from './IndexManifest.js';
 import { RelevanceScorer } from './RelevanceScorer.js';
 import { expandQuery } from '../utils/queryExpander.js';
 import { assignChunkStartLines } from '../utils/chunkLines.js';
+import {
+    GeminiEmbeddingService,
+    GEMINI_EMBEDDING_MODEL,
+    GEMINI_EMBEDDING_DIMENSION,
+    TASK_TYPE,
+} from './GeminiEmbeddingService.js';
 
 export class RAGService {
     constructor(options = {}) {
@@ -31,14 +37,17 @@ export class RAGService {
         this.enableIncrementalIndexing = options.enableIncrementalIndexing !== false;
 
         // Support for multiple embedding providers
-        this.provider = options.provider || 'local'; // 'openai' or 'local'
-        this.apiKey = options.apiKey; // Only needed for OpenAI
+        this.provider = options.provider || 'local'; // 'local' | 'openai' | 'gemini'
+        this.apiKey = options.apiKey; // Needed for OpenAI and Gemini
         this.baseUrl = 'https://api.openai.com/v1';
 
         // Initialize embedding service based on provider
         if (this.provider === 'local') {
             this.embeddingService = new OffscreenEmbeddingService();
             console.log('✅ Using local embeddings (free, 100% private)');
+        } else if (this.provider === 'gemini') {
+            this.embeddingService = new GeminiEmbeddingService({ apiKey: this.apiKey });
+            console.log('✅ Using Gemini embeddings (requires Google API key)');
         } else {
             console.log('✅ Using OpenAI embeddings (requires API key)');
         }
@@ -50,6 +59,17 @@ export class RAGService {
      */
     async init(onProgress) {
         await this.vectorStore.init();
+
+        // Gemini needs no warm-up (stateless HTTP), but init() is where a missing
+        // key should surface — before the indexing loop has read every file.
+        if (this.provider === 'gemini') {
+            if (!this.embeddingService) {
+                this.embeddingService = new GeminiEmbeddingService({ apiKey: this.apiKey });
+            }
+            this.embeddingService.apiKey = this.apiKey;
+            await this.embeddingService.init();
+            return;
+        }
 
         // Initialize local embedding model if using that provider
         if (this.provider === 'local') {
@@ -543,7 +563,7 @@ export class RAGService {
             // 2. Use hybrid search or vector-only search
             if (useHybridSearch) {
                 // Generate embedding for the query so HybridSearcher can pass it to VectorStore
-                const [queryEmbedding] = await this.generateEmbeddings([searchQuery]);
+                const [queryEmbedding] = await this.generateEmbeddings([searchQuery], { isQuery: true });
 
                 // Hybrid search combines BM25 keyword + semantic vector search
                 results = await this.hybridSearcher.search(searchQuery, repoId, {
@@ -565,7 +585,7 @@ export class RAGService {
                 console.log(`🔍 RAG Hybrid: Retrieved ${results.length} chunks`);
             } else {
                 // Traditional vector-only search
-                const [queryEmbedding] = await this.generateEmbeddings([searchQuery]);
+                const [queryEmbedding] = await this.generateEmbeddings([searchQuery], { isQuery: true });
                 results = await this.vectorStore.search(repoId, queryEmbedding, limit * 2, {
                     minScore,
                     deduplicate: true,
@@ -711,10 +731,20 @@ export class RAGService {
      *
      * @param {Array<string>} texts
      */
-    async generateEmbeddings(texts) {
-        // Check cache first for single text queries (common for search)
+    async generateEmbeddings(texts, options = {}) {
+        // Gemini's retrieval embeddings are ASYMMETRIC: a query and a document
+        // must be embedded with different task types or similarity degrades. Local
+        // and OpenAI embeddings ignore this, so it is an optional hint rather than
+        // a required argument — callers that do not pass it get the document
+        // treatment, which is correct for the indexing path (the majority).
+        const isQuery = options.isQuery === true;
+
+        // Check cache first for single text queries (common for search).
+        // Keyed by task type as well, since the same string embedded as a query
+        // and as a document is two different vectors under Gemini.
+        const cacheSalt = isQuery ? 'q' : 'd';
         if (texts.length === 1 && this.embeddingCache) {
-            const cached = this.getCachedEmbedding(texts[0]);
+            const cached = this.getCachedEmbedding(texts[0], cacheSalt);
             if (cached) {
                 console.log('📦 Embedding cache hit');
                 return [cached];
@@ -722,7 +752,16 @@ export class RAGService {
         }
 
         let embeddings;
-        if (this.provider === 'local') {
+        if (this.provider === 'gemini') {
+            if (!this.embeddingService) {
+                this.embeddingService = new GeminiEmbeddingService({ apiKey: this.apiKey });
+            }
+            this.embeddingService.apiKey = this.apiKey;
+            console.log(`🔢 Generating ${texts.length} embeddings via Gemini...`);
+            embeddings = await this.embeddingService.generateEmbeddings(texts, {
+                taskType: isQuery ? TASK_TYPE.QUERY : TASK_TYPE.DOCUMENT,
+            });
+        } else if (this.provider === 'local') {
             // Defense in depth: if the embedding service is missing (e.g. a prior
             // init failure), recreate and initialize it here rather than throwing
             // a cryptic "Cannot read properties of null" for every batch.
@@ -742,7 +781,7 @@ export class RAGService {
 
         // Cache single text queries
         if (texts.length === 1 && embeddings[0]) {
-            this.setCachedEmbedding(texts[0], embeddings[0]);
+            this.setCachedEmbedding(texts[0], embeddings[0], cacheSalt);
         }
 
         return embeddings;
@@ -817,14 +856,17 @@ export class RAGService {
      * Simple in-memory embedding cache
      * PERFORMANCE: Caches query embeddings to avoid repeated API calls
      */
-    getCachedEmbedding(text) {
+    getCachedEmbedding(text, salt = 'd') {
         if (!this.embeddingCache) {
             this.embeddingCache = new Map();
             this.embeddingCacheTimestamps = new Map();
         }
 
         const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-        const cacheKey = this.hashString(text);
+        // Salted by task type: under Gemini the same string embedded as a query
+        // and as a document is two different vectors, so one key for both would
+        // serve a document vector to a search and quietly degrade every result.
+        const cacheKey = `${salt}:${this.hashString(text)}`;
         const timestamp = this.embeddingCacheTimestamps.get(cacheKey);
 
         if (timestamp && Date.now() - timestamp < CACHE_TTL) {
@@ -840,13 +882,13 @@ export class RAGService {
         return null;
     }
 
-    setCachedEmbedding(text, embedding) {
+    setCachedEmbedding(text, embedding, salt = 'd') {
         if (!this.embeddingCache) {
             this.embeddingCache = new Map();
             this.embeddingCacheTimestamps = new Map();
         }
 
-        const cacheKey = this.hashString(text);
+        const cacheKey = `${salt}:${this.hashString(text)}`;
         this.embeddingCache.set(cacheKey, embedding);
         this.embeddingCacheTimestamps.set(cacheKey, Date.now());
 
@@ -887,6 +929,12 @@ export class RAGService {
             return {
                 provider: 'local',
                 ...this.embeddingService.getModelInfo()
+            };
+        } else if (this.provider === 'gemini') {
+            return {
+                provider: 'gemini',
+                model: GEMINI_EMBEDDING_MODEL,
+                dimension: GEMINI_EMBEDDING_DIMENSION
             };
         } else {
             return {

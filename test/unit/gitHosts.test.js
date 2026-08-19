@@ -240,3 +240,98 @@ describe('parseRepoRef', () => {
         expect(parseRepoRef('not a url at all ///')).toBeNull();
     });
 });
+
+const {
+    githubApiBase,
+    githubRawBase,
+    setGitHubHosts,
+    rememberGitHubHost,
+    getGitHubHosts,
+    resetGitHubHosts,
+    isKnownGitHubHost,
+} = require('../../src/utils/gitHosts.js');
+
+describe('githubApiBase', () => {
+    afterEach(() => resetGitHubHosts());
+
+    it('maps the public instance to api.github.com', () => {
+        expect(githubApiBase('https://github.com/o/r/pull/1')).toBe('https://api.github.com');
+        expect(githubApiBase()).toBe('https://api.github.com');
+    });
+
+    it('maps an enterprise host to its /api/v3 root', () => {
+        expect(githubApiBase('https://github.acme.com/o/r/pull/1')).toBe('https://github.acme.com/api/v3');
+    });
+
+    it('preserves a non-default port and an http scheme', () => {
+        expect(githubApiBase('http://ghe.internal:8080/o/r')).toBe('http://ghe.internal:8080/api/v3');
+    });
+});
+
+describe('githubRawBase', () => {
+    it('maps the public instance to raw.githubusercontent.com', () => {
+        expect(githubRawBase('https://github.com/o/r')).toBe('https://raw.githubusercontent.com');
+    });
+
+    it('serves raw content from the enterprise host itself', () => {
+        expect(githubRawBase('https://github.acme.com/o/r')).toBe('https://github.acme.com');
+    });
+});
+
+describe('GitHub host configuration', () => {
+    afterEach(() => resetGitHubHosts());
+
+    it('always retains github.com', () => {
+        setGitHubHosts(['github.acme.com']);
+        expect(getGitHubHosts()).toContain('github.com');
+        expect(getGitHubHosts()).toContain('github.acme.com');
+    });
+
+    it('accepts a full URL as well as a bare host', () => {
+        setGitHubHosts(['https://github.acme.com/o/r/pull/3']);
+        expect(isKnownGitHubHost('github.acme.com')).toBe(true);
+    });
+
+    it('matches subdomains of a configured suffix', () => {
+        setGitHubHosts(['acme.com']);
+        expect(isKnownGitHubHost('github.acme.com')).toBe(true);
+    });
+
+    it('does not match an unconfigured host', () => {
+        expect(isKnownGitHubHost('github.other.com')).toBe(false);
+    });
+
+    it('remembers a host discovered at runtime', () => {
+        rememberGitHubHost('https://ghe.acme.com/o/r/pull/9');
+        expect(isKnownGitHubHost('ghe.acme.com')).toBe(true);
+    });
+});
+
+describe('detectPlatform with GHE', () => {
+    afterEach(() => { resetGitHubHosts(); resetGitLabHosts(); });
+
+    it('detects a configured enterprise host as github', () => {
+        setGitHubHosts(['github.acme.com']);
+        expect(detectPlatform('https://github.acme.com/o/r/pull/4')).toBe('github');
+    });
+
+    it('returns null for an unconfigured enterprise host', () => {
+        // Configuration-only by design: /pull/<n> is also Gitea's and
+        // Codeberg's shape, so inferring GitHub from it would misroute them.
+        expect(detectPlatform('https://github.acme.com/o/r/pull/4')).toBeNull();
+    });
+
+    it('still returns null for other forges', () => {
+        expect(detectPlatform('https://codeberg.org/o/r/pulls/4')).toBeNull();
+    });
+
+    it('lets a GitLab route win on a host configured as both', () => {
+        setGitHubHosts(['devtools.acme.com']);
+        setGitLabHosts(['devtools.acme.com']);
+        expect(detectPlatform('https://devtools.acme.com/g/p/-/merge_requests/7')).toBe('gitlab');
+    });
+
+    it('leaves github.com behaviour unchanged', () => {
+        expect(detectPlatform('https://github.com/o/r/pull/1')).toBe('github');
+    });
+});

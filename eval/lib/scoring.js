@@ -117,6 +117,29 @@ export function scorePrecision(predictions = [], adjudications = [], tolerance =
     };
 }
 
+/** A verdict with no explicit source predates the field and was human-made. */
+function sourceOf(adjudication) {
+    return adjudication?.source === 'llm' ? 'llm' : 'human';
+}
+
+/**
+ * Precision, split by who judged.
+ *
+ * The two rates are returned separately and are never combined. An LLM
+ * adjudicator has no demonstrated relationship to correctness on this task —
+ * the pipeline's own verifier passed 42 of 42 findings human adjudication then
+ * rejected — so pooling them would launder an unfalsifiable number into the
+ * project's headline figure.
+ */
+export function scorePrecisionBySource(predictions = [], adjudications = [], tolerance = DEFAULT_LINE_TOLERANCE) {
+    const human = adjudications.filter(a => sourceOf(a) === 'human');
+    const llm = adjudications.filter(a => sourceOf(a) === 'llm');
+    return {
+        human: scorePrecision(predictions, human, tolerance),
+        llm: scorePrecision(predictions, llm, tolerance),
+    };
+}
+
 /**
  * Recall against the comments a human actually left.
  *
@@ -213,18 +236,21 @@ export function scoreRun(cases = [], options = {}) {
         allAdjudications.push(...adjudications.map(tag));
         allHumanComments.push(...humanComments.map(tag));
 
-        const precision = scorePrecision(predictions, adjudications, tolerance);
+        const precision = scorePrecisionBySource(predictions, adjudications, tolerance).human;
         const recall = scoreRecall(predictions, humanComments, tolerance);
         perCase.push({ id: c.id, precision, recall, f1: f1(precision.rate, recall.rate) });
     }
 
-    const precision = scorePrecision(allPredictions, allAdjudications, tolerance);
+    const split = scorePrecisionBySource(allPredictions, allAdjudications, tolerance);
+    const precision = split.human;
+    const precisionLlm = split.llm;
     const recall = scoreRecall(allPredictions, allHumanComments, tolerance);
 
     return {
         cases: cases.length,
         tolerance,
         precision,
+        precisionLlm,
         recall,
         f1: f1(precision.rate, recall.rate),
         byTag: recallByTag(allPredictions, allHumanComments, tolerance, 'tag'),
@@ -241,21 +267,30 @@ export function pct(rate) {
 /** Human-readable report for a `scoreRun` result. */
 export function formatReport(result) {
     const { precision: p, recall: r } = result;
+    const llm = result.precisionLlm;
     const tagLines = (result.byTag ?? []).length
         ? ['', 'Detection by defect class:',
             ...result.byTag.map(t =>
                 `  ${t.key.padEnd(24)} ${String(t.matched).padStart(2)}/${String(t.total).padEnd(2)}  ${pct(t.rate)}`)]
         : [];
+    // Only rendered when someone actually ran an LLM pass. The suffix is not
+    // optional and has no verbosity flag: this number's whole failure mode is
+    // being quoted without it.
+    const llmLines = llm && llm.adjudicated > 0
+        ? [`Precision (LLM):    ${pct(llm.rate)}  [${pct(llm.low)} – ${pct(llm.high)}]   ` +
+           `${llm.truePositives}/${llm.adjudicated}   LLM-adjudicated — not authoritative`]
+        : [];
     return [
         `MRs scored:        ${result.cases}   (line tolerance ±${result.tolerance})`,
         '',
-        `Precision:         ${pct(p.rate)}  [${pct(p.low)} – ${pct(p.high)}]   ` +
+        `Precision (human): ${pct(p.rate)}  [${pct(p.low)} – ${pct(p.high)}]   ` +
             `${p.truePositives}/${p.adjudicated} adjudicated findings correct`,
+        ...llmLines,
         `Recall:            ${pct(r.rate)}  [${pct(r.low)} – ${pct(r.high)}]   ` +
             `${r.matched}/${r.reference} human comments matched`,
         `F1:                ${pct(result.f1)}`,
         '',
-        `Findings produced: ${p.predicted}   (${p.unadjudicated} not yet adjudicated)`,
+        `Findings produced: ${p.predicted}   (${p.unadjudicated} not yet human-adjudicated)`,
         ...tagLines,
     ].join('\n');
 }
@@ -264,6 +299,7 @@ export default {
     scoreRun,
     recallByTag,
     scorePrecision,
+    scorePrecisionBySource,
     scoreRecall,
     wilson,
     f1,
