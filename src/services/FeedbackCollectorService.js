@@ -54,7 +54,7 @@ export class FeedbackCollectorService {
         const empty = {
             collected: 0,
             rows: [],
-            skipped: { noTick: 0, multiTicked: 0, unknownLabel: 0 },
+            skipped: { noTick: 0, multiTicked: 0, unknownLabel: 0, inferred: 0 },
         };
 
         try {
@@ -65,13 +65,24 @@ export class FeedbackCollectorService {
 
             const botAuthor = this._resolveBotAuthor(discussions);
             const rows = [];
-            const skipped = { noTick: 0, multiTicked: 0, unknownLabel: 0 };
+            const skipped = { noTick: 0, multiTicked: 0, unknownLabel: 0, inferred: 0 };
 
             for (const d of discussions) {
                 const row = this._buildRow(d, botAuthor, prUrl, options.repoId);
                 if (row === 'multi') { skipped.multiTicked++; continue; }
                 if (row === 'unknown') { skipped.unknownLabel++; continue; }
-                if (!row) { skipped.noTick++; continue; }
+                if (!row) {
+                    // No box was ticked — but the thread's own state is still
+                    // evidence, once the PR has been decided. See `_inferRow`.
+                    const inferred = this._inferRow(d, botAuthor, prUrl, options);
+                    if (inferred) {
+                        rows.push(inferred);
+                        skipped.inferred++;
+                    } else {
+                        skipped.noTick++;
+                    }
+                    continue;
+                }
                 rows.push(row);
             }
 
@@ -82,7 +93,8 @@ export class FeedbackCollectorService {
 
             console.log(
                 `📝 Feedback: ${rows.length} labelled from ${discussions.length} bot thread(s) ` +
-                `(${skipped.noTick} untouched, ${skipped.multiTicked} multi-ticked, ${skipped.unknownLabel} unknown label)`
+                `(${skipped.inferred} inferred from thread state, ${skipped.noTick} untouched, ` +
+                `${skipped.multiTicked} multi-ticked, ${skipped.unknownLabel} unknown label)`
             );
 
             return { collected: rows.length, rows, skipped };
@@ -131,6 +143,70 @@ export class FeedbackCollectorService {
             line: discussion.line ?? null,
             rule: this._extractRule(bot.body),
             reasoning: this._formatReasoning(discussion.replies || [], botAuthor),
+            collectedAt: Date.now(),
+        };
+    }
+
+    /**
+     * A verdict inferred from the thread's own state, when nobody ticked a box.
+     *
+     * Tick-boxes are the ground truth, and most threads never get one. But a
+     * thread carries a decision anyway, once the PR is no longer in flight:
+     *
+     *   merged + thread RESOLVED    → the team dealt with it. Weak accept.
+     *   merged + thread OPEN, no reply → they shipped past it. Weak reject.
+     *   PR still open               → nothing. The decision has not been made,
+     *                                 and reading an unresolved thread on an open
+     *                                 PR as a rejection would punish the tool for
+     *                                 the author not having got to it yet.
+     *
+     * Both are weaker than a tick and are marked `inferred: true`. That flag is
+     * load-bearing in two places: `getStats` keeps them OUT of the precision
+     * number (which must come from verdicts a human actually gave), and
+     * `_applyToAdaptiveLearning` requires more of them before it will suppress a
+     * rule. Mixing inferred signal into a published accuracy figure would be
+     * inflating it with guesses.
+     *
+     * A thread with a human REPLY but no tick is deliberately left alone: someone
+     * engaged with it in prose, and prose is what `ConventionMiner` reads. Calling
+     * that a reject because they did not also resolve the thread would be the
+     * least defensible reading available.
+     *
+     * @returns {Object|null}
+     */
+    _inferRow(discussion, botAuthor, prUrl, options = {}) {
+        const bot = discussion?.botNote;
+        if (!bot?.id) return null;
+
+        const state = String(options.prState || '').toLowerCase();
+        const decided = state === 'merged' || state === 'closed';
+        if (!decided) return null;
+
+        const humanReplies = (discussion.replies || [])
+            .filter(r => r && r.author && r.author !== botAuthor);
+
+        const resolved = discussion.resolved === true;
+
+        // Replied-to but unresolved: ambiguous, and the prose is already used
+        // elsewhere. No inference.
+        if (!resolved && humanReplies.length) return null;
+
+        const inferredFrom = resolved ? 'resolved-on-merge' : 'unresolved-on-merge';
+
+        return {
+            noteId: bot.id,
+            prUrl,
+            repoId: options.repoId || null,
+            findingId: null,
+            optionKey: null,
+            // Sign carries the direction; `inferred` marks the confidence.
+            weight: resolved ? 1 : -1,
+            inferred: true,
+            inferredFrom,
+            file: discussion.file || null,
+            line: discussion.line ?? null,
+            rule: this._extractRule(bot.body),
+            reasoning: null,
             collectedAt: Date.now(),
         };
     }
@@ -204,15 +280,29 @@ export class FeedbackCollectorService {
      */
     async _applyToAdaptiveLearning(rows, repoId) {
         if (!this.adaptiveLearning?.recordAction) return;
+
+        // An INFERRED rejection ("merged with the thread still open") is real
+        // signal but a weak one — an author can merge past a correct finding for
+        // a dozen reasons. One is not enough to start training a rule down, so an
+        // inferred rejection only counts when the same rule was inferred-rejected
+        // at least twice in this batch. An explicit tick still counts on its own.
+        const inferredRejectionsByRule = new Map();
+        for (const r of rows) {
+            if (r.inferred && r.weight < 0 && r.rule) {
+                inferredRejectionsByRule.set(r.rule, (inferredRejectionsByRule.get(r.rule) || 0) + 1);
+            }
+        }
+
         for (const r of rows) {
             if (r.weight >= 0) continue;
+            if (r.inferred && (inferredRejectionsByRule.get(r.rule) || 0) < 2) continue;
             try {
                 await this.adaptiveLearning.recordAction({
                     action: 'dismiss',
                     repoId: repoId || r.repoId,
                     ruleId: r.rule,
                     filePath: r.file,
-                    reason: r.optionKey,
+                    reason: r.optionKey || r.inferredFrom,
                 });
             } catch (e) {
                 console.warn('[Feedback] Adaptive learning update failed:', e?.message);
@@ -234,9 +324,24 @@ export class FeedbackCollectorService {
      */
     async getStats(repoId = null) {
         const rows = (await this._read()).filter(r => !repoId || r.repoId === repoId);
-        const stats = { total: rows.length, accepted: 0, rejected: 0, neutral: 0, byRule: {} };
+        const stats = {
+            total: rows.length,
+            accepted: 0, rejected: 0, neutral: 0,
+            // Rows whose verdict was INFERRED from thread state rather than given
+            // by a person. Counted separately and excluded from `precision`
+            // below: an accuracy figure built partly from guesses is not an
+            // accuracy figure. See `_inferRow`.
+            inferred: 0, inferredAccepted: 0, inferredRejected: 0,
+            byRule: {},
+        };
 
         for (const r of rows) {
+            if (r.inferred) {
+                stats.inferred++;
+                if (r.weight > 0) stats.inferredAccepted++;
+                else if (r.weight < 0) stats.inferredRejected++;
+                continue;
+            }
             if (r.weight > 0) stats.accepted++;
             else if (r.weight < 0) stats.rejected++;
             else stats.neutral++;

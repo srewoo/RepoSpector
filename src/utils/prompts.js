@@ -693,7 +693,7 @@ export function scoreFileByRisk(file) {
  */
 export function buildPRAnalysisPrompt(prData, options = {}) {
     const {
-        focusAreas = ['security', 'bugs', 'performance', 'style'],
+        focusAreas = ['security', 'bugs', 'performance'],
         maxFilesToReview = 100,
         includeTestAnalysis = true,
         ragContext = null,

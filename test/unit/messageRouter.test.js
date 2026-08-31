@@ -39,14 +39,14 @@ function makeSendResponse() {
 
 describe('messageRouter — registration', () => {
     it('registers and reports a handler', () => {
-        registerHandler('PING', () => {});
+        registerHandler('PING', () => { });
         expect(hasHandler('PING')).toBe(true);
         expect(hasHandler('NOPE')).toBe(false);
     });
 
     it('warns when overwriting an existing handler', () => {
-        registerHandler('PING', () => {});
-        registerHandler('PING', () => {});
+        registerHandler('PING', () => { });
+        registerHandler('PING', () => { });
         expect(console.warn).toHaveBeenCalledWith(
             expect.stringContaining('Overwriting handler')
         );
@@ -54,8 +54,8 @@ describe('messageRouter — registration', () => {
 
     it('bulk-registers via registerHandlers', () => {
         registerHandlers({
-            A: () => {},
-            B: { fn: () => {}, allowContentScript: true },
+            A: () => { },
+            B: { fn: () => { }, allowContentScript: true },
         });
         expect(hasHandler('A')).toBe(true);
         expect(hasHandler('B')).toBe(true);
@@ -193,7 +193,7 @@ describe('messageRouter — dispatch', () => {
             { type: 'GET_SETTINGS', isFromPopup: true },
             {
                 id: 'test-extension-id',
-                tab: { id: 7, url: 'https://gitlab.com/mindtickle/foo/bar' },
+                tab: { id: 7, url: 'https://gitlab.com/sharajrewoo/foo/bar' },
             },
             send
         );

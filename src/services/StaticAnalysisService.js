@@ -12,7 +12,6 @@ import { ConfidenceScorer } from './ConfidenceScorer.js';
 import { EOLService } from './EOLService.js';
 import { ImportGraphService } from './ImportGraphService.js';
 import { SecretsScanner } from './SecretsScanner.js';
-import { SymbolExtractor } from './SymbolExtractor.js';
 import { extractAddedLines, mapAddedBlockLine } from '../utils/patchLines.js';
 
 export class StaticAnalysisService {
@@ -25,7 +24,6 @@ export class StaticAnalysisService {
         this.eolService = options.eolService || (options.enableEOL !== false ? new EOLService(options.eol || {}) : null);
         this.importGraphService = options.importGraphService || new ImportGraphService();
         this.secretsScanner = new SecretsScanner();
-        this.symbolExtractor = new SymbolExtractor();
 
         // Optional services (injected from background)
         this.adaptiveLearningService = options.adaptiveLearningService || null;
@@ -338,66 +336,6 @@ export class StaticAnalysisService {
         } catch (e) {
             console.warn('Secrets scan failed:', e.message);
             analyzerStatus.secrets = { status: 'skipped', reason: `tool error: ${e.message}` };
-        }
-
-        // #24 — Exported functions with no corresponding test file → BLOCKING finding
-        try {
-            const testFilePatterns = [/_test\.(js|ts|jsx|tsx|py|go)$/, /\.test\.(js|ts|jsx|tsx)$/, /\.spec\.(js|ts|jsx|tsx)$/, /^test_.*\.py$/, /tests?\//];
-            const changedTestFiles = (prData.files || []).filter(f =>
-                testFilePatterns.some(p => p.test(f.filename))
-            );
-            // Only run this check when no test files were changed alongside source files
-            const changedSourceFiles = (prData.files || []).filter(f =>
-                /\.(js|ts|jsx|tsx|py|go)$/.test(f.filename) &&
-                !testFilePatterns.some(p => p.test(f.filename)) &&
-                f.status !== 'removed' && f.patch
-            );
-
-            if (changedSourceFiles.length > 0 && changedTestFiles.length === 0) {
-                const uncoveredFunctions = [];
-                for (const file of changedSourceFiles) {
-                    // Symbols are extracted from the added-lines block, so their
-                    // startLine is block-relative like every other analyzer's.
-                    const { code: addedCode, lineNumbers } = extractAddedLines(file.patch || '');
-                    const symbols = this.symbolExtractor.extractFromJavaScript(addedCode, {
-                        filePath: file.filename
-                    });
-                    const exportedFns = (symbols?.functions || []).filter(s => s.isExported);
-                    for (const fn of exportedFns) {
-                        uncoveredFunctions.push({
-                            file: file.filename,
-                            fn: fn.name,
-                            line: mapAddedBlockLine(fn.startLine, lineNumbers)
-                        });
-                    }
-                }
-
-                for (const { file, fn, line } of uncoveredFunctions) {
-                    analysisResult.findings.push({
-                        id: `no-test-${file}-${fn}`,
-                        filePath: file,
-                        file,
-                        line,
-                        severity: 'high',
-                        category: 'quality',
-                        bucket: 'BLOCKING',
-                        rule: 'standards/javascript/testing.md → JS-TEST-001 "Every exported function must have at least one unit test"',
-                        title: `No test for exported function \`${fn}\``,
-                        message: `Exported function \`${fn}\` in ${file} was added or modified but no test file was changed in this PR.`,
-                        fix: `Add a test in a \`*.test.ts\` / \`*.spec.ts\` file that exercises the behaviour of \`${fn}\`.`,
-                        source: 'static',
-                        tool: 'coverage-check',
-                        confidence: 0.85
-                    });
-                }
-
-                if (uncoveredFunctions.length > 0) {
-                    analysisResult.totalFindings = analysisResult.findings.length;
-                    console.log(`🧪 Coverage check: ${uncoveredFunctions.length} exported functions have no tests`);
-                }
-            }
-        } catch (e) {
-            console.warn('Exported-function coverage check failed:', e.message);
         }
 
         // Apply adaptive learning adjustments

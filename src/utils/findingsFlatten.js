@@ -41,6 +41,21 @@ export function flattenPerFileFindings(perFileFindings = []) {
  * @returns {Object}
  */
 export function normalizeStaticFinding(f) {
+    // An EXTERNAL finding (an ingested SARIF/rdjson report, or a CI check
+    // annotation) travels this same path — the review handler merges it into
+    // `staticResult.findings` so the prompt sees it — but it must not be
+    // relabelled as one of ours.
+    //
+    // Overwriting `source` here erased the attribution: `inlineCommentFormatter`
+    // renders "Reported by CodeQL" only for `source === 'external'`, so the whole
+    // point of ingesting another tool's findings — that the reader can see WHO
+    // found it — was silently discarded the moment the finding was flattened.
+    // Prefixing the rule as `static/js/sql-injection` broke it twice over: that
+    // is not a rule id anyone can look up, and it no longer matches the rule the
+    // feedback ledger recorded, so `PriorFindingService` could never find its
+    // history.
+    const isExternal = f.source === 'external';
+
     return {
         ...f,
         file: f.file || f.filePath || null,
@@ -50,8 +65,8 @@ export function normalizeStaticFinding(f) {
         title: f.title || f.message || '',
         description: f.description || f.message || '',
         suggestion: f.suggestion || f.recommendation || '',
-        rule: f.rule || (f.ruleId ? `static/${f.ruleId}` : null),
-        source: 'static'
+        rule: f.rule || (f.ruleId ? (isExternal ? f.ruleId : `static/${f.ruleId}`) : null),
+        source: isExternal ? 'external' : 'static'
     };
 }
 

@@ -8,9 +8,9 @@
  *    another full review on their own API key.
  *
  * 2. STALE HIT. Same PR, head SHA moved → do NOT discard the old review.
- *    Bastion's `docs/Caching.md` feeds the prior payload back into the next run
- *    as `<cached_review>` priming context: "keep findings still applicable, drop
- *    ones the new diff resolved, add anything new." Without this, consecutive
+ *    Feed the prior payload back into the next run as `<cached_review>`
+ *    priming context: keep findings still applicable, drop ones the new diff
+ *    resolved, add anything new. Without this, consecutive
  *    reviews of the same PR are independent rolls of the dice — a finding
  *    appears, vanishes on the next push for no visible reason, and reappears
  *    later. `IncrementalReviewService` already narrows WHICH files get re-read;
@@ -20,14 +20,14 @@
  * so a lookup can answer "what did we last say, and at which revision?" — which
  * is exactly the question the stale path needs answered.
  *
- * Hard rule, from Bastion's skip-rule design: a SKIP or DEFER outcome NEVER
+ * Hard rule of the skip-rule design: a SKIP or DEFER outcome NEVER
  * touches this cache, in either direction. A draft MR that gets marked ready, or
  * a red pipeline that goes green, must produce a real review rather than
  * replaying the "skipped" note forever.
  */
 
 const STORAGE_KEY = 'repospectorReviewCache';
-const DEFAULT_TTL_MS = 72 * 60 * 60 * 1000;  // 72h, matching Bastion's default
+const DEFAULT_TTL_MS = 72 * 60 * 60 * 1000;  // 72h: long enough to span a review cycle
 const DEFAULT_MAX_ENTRIES = 50;
 
 /** Verdicts that must never be cached — see the module note. */

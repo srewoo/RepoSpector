@@ -8,9 +8,8 @@
  * "Is this the right abstraction", "this breaks the caller", "where is the test
  * for this" all need the surrounding file at minimum.
  *
- * Bastion gets this for free — its driver `git clone`s the repo, so the
- * `code-analyst` sub-agent can `Read` any path. Its `<skill_adaptations>` table
- * replaces every "diff only" fallback in the review skill with real file access.
+ * A server-side reviewer gets this for free — it `git clone`s the repo, so any
+ * path can simply be read and no step has to fall back to "diff only".
  *
  * We cannot clone: an MV3 service worker has no filesystem, and the user pays
  * per token. So this service does the bounded equivalent —
@@ -23,7 +22,7 @@
  * partial context is enormously better than no review.
  *
  * The absence of a test file is itself a signal — `testFileMissing` is what lets
- * the prompt raise Bastion's "new exported function has no test" finding.
+ * the prompt raise the "new exported function has no test" finding.
  */
 
 import { isTestFile, testCandidatesForProduction } from './testFileUtils.js';

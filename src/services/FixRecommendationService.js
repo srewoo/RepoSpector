@@ -1,4 +1,6 @@
 import { FIX_RECOMMENDATION_SYSTEM_PROMPT, buildFixRecommendationPrompt } from '../utils/fixRecommendationPrompts.js';
+import { PRIORITY } from '../utils/callBudget.js';
+import { settingsForStage } from '../utils/modelTiers.js';
 
 /**
  * FixRecommendationService — generates a concrete suggested patch per finding.
@@ -63,7 +65,7 @@ export class FixRecommendationService {
                             { role: 'system', content: FIX_RECOMMENDATION_SYSTEM_PROMPT },
                             { role: 'user', content: prompt }
                         ],
-                        { provider: settings.provider, model: settings.model, apiKey: settings.apiKey, stream: false }
+                        { ...settingsForStage({ stage: 'fixes', provider: settings.provider, model: settings.model, apiKey: settings.apiKey, lightModel: settings.lightModel }), stream: false, budgetStage: 'fixes', budgetPriority: PRIORITY.OPTIONAL }
                     );
                     usage.input += resp?.usage?.input || 0;
                     usage.output += resp?.usage?.output || 0;

@@ -13,8 +13,6 @@
  * Inspired by GitNexus's process-processor.
  */
 
-import { _KnowledgeGraphService } from './KnowledgeGraphService.js';
-
 const DEFAULT_CONFIG = {
     maxTraceDepth: 10,
     maxBranching: 4,

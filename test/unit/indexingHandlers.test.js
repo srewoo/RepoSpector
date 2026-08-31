@@ -165,8 +165,8 @@ describe('indexingHandlers', () => {
             const svc = makeSvc();
             svc.ragService.vectorStore.getAllRepoIds = jest.fn(async () => [
                 { repoId: 80804743 },
-                { repoId: 'mindtickle/enggx/sentinel' },
-                { repoId: 'mindtickle/migrated-call-ai/access-control' },
+                { repoId: 'acme/platform/audit-service' },
+                { repoId: 'acme/platform/access-control' },
             ]);
 
             const send = jest.fn();
@@ -178,7 +178,7 @@ describe('indexingHandlers', () => {
             // Numeric id is coerced to a string and classified, not crashed on.
             expect(res.data[0].repoId).toBe('80804743');
             expect(res.data[0].platform).toBe('unknown');
-            expect(res.data[1].repoId).toBe('mindtickle/enggx/sentinel');
+            expect(res.data[1].repoId).toBe('acme/platform/audit-service');
         });
 
         it('returns the healthy repos when one entry blows up', async () => {

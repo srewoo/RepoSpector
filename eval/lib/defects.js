@@ -193,10 +193,11 @@ export function injectIntoFile(file, options = {}) {
         .filter(d => (only ? only.includes(d.id) : true));
 
     if (catalogue.length === 0 || !file.patch) {
-        return { patch: file.patch, injected: [] };
+        return { patch: file.patch, injected: [], edits: [] };
     }
 
     const injected = [];
+    const edits = [];
     const usedDefects = new Set();
     const lines = file.patch.split('\n');
 
@@ -232,6 +233,13 @@ export function injectIntoFile(file, options = {}) {
 
             lines[i] = `+${after}`;
             usedDefects.add(defect.id);
+            // The FULL rewritten line, keyed by its real file line. `before`/`after`
+            // below are trimmed and truncated for human reading and cannot be used
+            // to reproduce the edit; this can. `eval/fetch-content.js` caches the
+            // real post-change file, and the injected patch has to stay in step
+            // with it or `dynamicContext.verifyAlignment` correctly refuses to
+            // expand anything and the whole file-context path goes untested.
+            edits.push({ line: fileLine, content: after });
             injected.push({
                 id: defect.id,
                 category: defect.category,
@@ -245,7 +253,7 @@ export function injectIntoFile(file, options = {}) {
         }
     }
 
-    return { patch: lines.join('\n'), injected };
+    return { patch: lines.join('\n'), injected, edits };
 }
 
 /**
@@ -256,9 +264,10 @@ export function injectIntoFile(file, options = {}) {
  * @returns {{prData:object, injected:Array}}
  */
 export function injectIntoPr(prData, options = {}) {
-    const { maxPerPr = 6 } = options;
+    const { maxPerPr = 6, fileContents = null } = options;
     const injected = [];
     const files = [];
+    const nextContents = fileContents ? { ...fileContents } : null;
 
     for (const file of prData.files ?? []) {
         if (injected.length >= maxPerPr) { files.push(file); continue; }
@@ -268,9 +277,30 @@ export function injectIntoPr(prData, options = {}) {
         });
         files.push({ ...file, patch: res.patch });
         injected.push(...res.injected);
+
+        // Keep the cached post-change file in step with the mutated patch.
+        //
+        // Without this the injected corpus has a patch saying one thing and a
+        // cached file saying another, `verifyAlignment` (correctly) refuses to
+        // expand, and every run silently falls back to patch-only — which is the
+        // exact "the harness didn't test it" failure this alignment exists to
+        // prevent. Injection only ever rewrites a line in place, so a line-for-
+        // line substitution is sufficient and cannot shift any numbering.
+        if (nextContents && res.edits?.length && typeof nextContents[file.filename] === 'string') {
+            const contentLines = nextContents[file.filename].split('\n');
+            for (const edit of res.edits) {
+                const idx = edit.line - 1;
+                if (idx >= 0 && idx < contentLines.length) contentLines[idx] = edit.content;
+            }
+            nextContents[file.filename] = contentLines.join('\n');
+        }
     }
 
-    return { prData: { ...prData, files }, injected };
+    return {
+        prData: { ...prData, files },
+        injected,
+        ...(nextContents ? { fileContents: nextContents } : {}),
+    };
 }
 
 export default { DEFECTS, defectsFor, isInjectable, injectIntoFile, injectIntoPr };

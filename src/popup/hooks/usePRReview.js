@@ -65,6 +65,11 @@ export function usePRReview({ analysisResult, staticAnalysisResult, prUrl, prDat
     const [generatedChangelog, setGeneratedChangelog] = useState(null);
     const [generatedMermaid, setGeneratedMermaid] = useState(null);
     const [generatedRepoInfo, setGeneratedRepoInfo] = useState(null);
+    // The PR tools added alongside the review: labels and docstrings produce
+    // output the panel renders; /ask-line and /history stay chat-driven because
+    // both need a typed argument.
+    const [generatedLabels, setGeneratedLabels] = useState(null);
+    const [generatedDocstrings, setGeneratedDocstrings] = useState(null);
     const [generating, setGenerating] = useState(null);
 
     const {
@@ -86,11 +91,12 @@ export function usePRReview({ analysisResult, staticAnalysisResult, prUrl, prDat
         multiPassFindings.length > 0 ? multiPassFindings : parseLLMFindings(analysis),
         [multiPassFindings, analysis]
     );
-    // Prefer the VERIFIED set when present — it is the complete, deduped list (LLM +
-    // static, false positives removed, patches attached), so it replaces the raw
-    // combine (which would otherwise double-count static findings).
+    // Prefer the VERIFIED set whenever the field is present, INCLUDING an empty
+    // array. Empty means the precision gate reviewed the candidates and rejected
+    // every one. Falling back to raw findings in that case resurrects known false
+    // positives and turns a clean review into a noisy one.
     const findings = useMemo(() => {
-        if (Array.isArray(verifiedFindings) && verifiedFindings.length) {
+        if (Array.isArray(verifiedFindings)) {
             return convertVerifiedFindings(verifiedFindings);
         }
         return [...staticFindings, ...llmFindings];
@@ -232,6 +238,8 @@ export function usePRReview({ analysisResult, staticAnalysisResult, prUrl, prDat
         generatedChangelog, setGeneratedChangelog,
         generatedMermaid, setGeneratedMermaid,
         generatedRepoInfo, setGeneratedRepoInfo,
+        generatedLabels, setGeneratedLabels,
+        generatedDocstrings, setGeneratedDocstrings,
         generating, setGenerating,
         // Derived data
         findings, staticFindings, llmFindings,

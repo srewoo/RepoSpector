@@ -1,4 +1,6 @@
 import { SCORING_SYSTEM_PROMPT, buildScoringPrompt } from '../utils/scoringPrompts.js';
+import { PRIORITY } from '../utils/callBudget.js';
+import { settingsForStage } from '../utils/modelTiers.js';
 
 /**
  * SuggestionScorer — rank surviving findings by how much they are worth saying.
@@ -59,7 +61,7 @@ export class SuggestionScorer {
                         { role: 'system', content: SCORING_SYSTEM_PROMPT },
                         { role: 'user', content: buildScoringPrompt(batch, { prTitle: prData.title }) },
                     ],
-                    { provider: settings.provider, model: settings.model, apiKey: settings.apiKey, stream: false },
+                    { ...settingsForStage({ stage: 'scoring', provider: settings.provider, model: settings.model, apiKey: settings.apiKey, lightModel: settings.lightModel }), stream: false, budgetStage: 'scoring', budgetPriority: PRIORITY.OPTIONAL },
                 );
                 usage.input += resp?.usage?.input || 0;
                 usage.output += resp?.usage?.output || 0;

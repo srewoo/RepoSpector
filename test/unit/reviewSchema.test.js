@@ -21,6 +21,9 @@ describe('reviewSchema', () => {
                 file: 'src/db/users.js',
                 line: '42',
                 codeSnippet: 'db.query("SELECT * FROM u WHERE id=" + id)',
+                confidence: 0.93,
+                score: 9,
+                impact: 'Another user\'s records are exposed',
             };
             const f = toCanonicalFinding(legacy);
             expect(f.severity).toBe(SEVERITY.BLOCKING);
@@ -30,6 +33,9 @@ describe('reviewSchema', () => {
             expect(f.line).toBe(42);
             expect(f.evidence).toContain('SELECT *');
             expect(f.suggestion).toContain('Unparameterized');
+            expect(f.confidence).toBe(0.93);
+            expect(f.score).toBe(9);
+            expect(f.impact).toContain('records');
             expect(f.id).toMatch(/^f_/);
         });
 

@@ -7,7 +7,7 @@
  * Posting all 69 inline is worse than posting none: the reviewer learns to
  * collapse the bot's comments, and the 7 real findings go with them.
  *
- * Bastion's `<findings_policy>` is the fix, and it is blunt on purpose:
+ * The posting policy is the fix, and it is blunt on purpose:
  *
  *   1. Blocking only. `code_feedback` carries ONLY severity=blocking.
  *   2. Suggestions and nitpicks live in the summary, under explicit
@@ -115,7 +115,7 @@ function normalizedConfidence(f) {
  *        absent disables the gate. A finding with NO score is never dropped by
  *        it — an unscored finding means the scorer did not run or did not
  *        answer, which is not evidence against the finding.
- * @param {boolean} [options.blockingOnlyInline=true] - the Bastion policy. Set
+ * @param {boolean} [options.blockingOnlyInline=true] - the default policy. Set
  *        false to restore the old "post everything" behaviour.
  * @param {number} [options.maxInline=15] - hard cap on inline comments
  * @returns {{
@@ -207,7 +207,7 @@ export function partitionForPosting(findings, options = {}) {
         kept.push(f);
     }
 
-    // ── Gate 3: the Bastion partition ────────────────────────────────────
+    // ── Gate 3: the partition ────────────────────────────────────────────
     const inline = [];
     const suggestions = [];
     const nitpicks = [];
@@ -233,8 +233,8 @@ export function partitionForPosting(findings, options = {}) {
     }
 
     // A blocking finding with no location can't be posted inline. Demote it to
-    // the summary rather than dropping it — Bastion does the same ("if you
-    // can't name a file, lift it to summary_markdown").
+    // the summary rather than dropping it: a real defect we merely failed to
+    // anchor is still worth telling the reviewer about.
     const postable = [];
     for (const f of inline) {
         if (!findingPath(f) || findingLine(f) == null) {

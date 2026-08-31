@@ -33,7 +33,7 @@ describe('postingSeverity', () => {
     });
 });
 
-describe('partitionForPosting — the Bastion findings policy', () => {
+describe('partitionForPosting — the findings policy', () => {
     it('posts only blocking findings inline', () => {
         const { inline, suggestions, nitpicks } = partitionForPosting([
             f({ severity: 'critical', title: 'RCE' }),

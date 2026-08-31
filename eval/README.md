@@ -115,6 +115,44 @@ node eval/score.js --corpus eval/corpus/mr-50.json --write-baseline
 
 `npm run eval` scores the synthetic fixture; `npm run eval:gate` gates on it.
 
+### Step zero: cache the file content
+
+```bash
+node eval/fetch-content.js --corpus eval/corpus/public-prs.json
+```
+
+Without this, **every context-dependent feature is inactive** and the run
+measures the patch-only pipeline. `eval/run.js` says so loudly at startup, and
+`runStats.filesWithContent` is `0` for every case.
+
+The content is fetched once, at each case's `headSha`, under the same caps
+`ReviewFileContextService` applies in production (12 files, 60 kB each, 400 kB
+total). Pinning the SHA is the whole game: the default branch has moved on since
+these PRs merged, and content from a later commit disagrees with the cached
+patch, at which point hunk expansion is refused and this silently does nothing.
+
+**Check `patchesAligned` before trusting any comparison.** The run summary prints
+it. Zero on a corpus that *has* content means the content has drifted from the
+patches and both sides of your A/B measured patch-only.
+
+If you use an injected corpus, re-run `eval/inject.js` after fetching — it rewrites
+the cached content in step with the mutated patches, so alignment survives
+injection.
+
+### A/B switches
+
+```bash
+# Does expanding hunks to their enclosing function beat pasting whole files?
+node eval/run.js --corpus eval/corpus/large-files.json
+node eval/run.js --corpus eval/corpus/large-files.json --no-dynamic-context
+
+# Does widening the diff scope find more, or just say more?
+node eval/run.js --corpus eval/corpus/public-prs.json --filter-mode diff_context
+```
+
+`--resume` accounts for these switches, so flipping one re-runs the affected
+cases instead of mixing two pipelines into one score.
+
 ## The baseline, and what CI actually checks
 
 `eval/baseline.json` records the thresholds the gate enforces. Its committed
@@ -479,7 +517,18 @@ effect is not.
    on precision until a human adjudicates a sample. Use `eval/adjudicate.js`,
    and see its own warning about why an LLM verifying its own kind of finding is
    the failure mode this harness exists to catch.
-2. **The convention miner shipped in the product, but this harness still never
+2. **File context is wired; retrieval and the code graph are not.**
+   `eval/fetch-content.js` + `eval/lib/fileContext.js` now give the harness the
+   same `fileContext` and `declarationsByFile` the extension builds, so full-file
+   context, hunk expansion, the filter mode, the fail level and external-scanner
+   ingestion are all exercised on the real pipeline. `ragContext` and
+   `graphContext` are still absent, and deliberately: both need an indexed
+   repository, and a graph built from only the changed files would be a graph of
+   12 files presented as a graph of the repo — a worse lie than the absence. Read
+   a `REPOSPECTOR_CONTEXT_PROFILE` comparison as a statement about file context,
+   not about retrieval.
+
+3. **The convention miner shipped in the product, but this harness still never
    exercises it.** `ConventionMiner` now has two production triggers (index
    completion and PR-page detection) and a review-path integration that awaits
    an in-flight mine before falling back — so a real review of a repo with

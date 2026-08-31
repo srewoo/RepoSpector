@@ -2,6 +2,9 @@ import { BatchProcessor } from '../utils/batchProcessor.js';
 import { FileGroupingStrategy } from './FileGroupingStrategy.js';
 import { scoreFileByRisk } from '../utils/prompts.js';
 import { HUNK_WINDOWING } from '../utils/constants.js';
+import { PRIORITY } from '../utils/callBudget.js';
+import { fitFilesToBudget } from '../utils/diffBudget.js';
+import { tokenManager } from '../utils/tokenManager.js';
 import {
     PER_FILE_REVIEW_SYSTEM_PROMPT,
     AGGREGATION_SYSTEM_PROMPT,
@@ -32,7 +35,7 @@ export class MultiPassReviewEngine {
      */
     async execute(prData, context = {}, settings = {}, options = {}, onProgress = null) {
         const startTime = Date.now();
-        const { focusAreas = ['security', 'bugs', 'performance', 'style'] } = options;
+        const { focusAreas = ['security', 'bugs', 'performance'] } = options;
         const maxConcurrent = options.maxConcurrent || 3;
 
         // Service-worker keepalive — every 25s, inside MV3's 30s idle window.
@@ -128,7 +131,43 @@ export class MultiPassReviewEngine {
             const results = await batchProcessor.processBatches(
                 [reviewUnits], // Single batch, concurrency handled by semaphore
                 async (unit) => {
-                    const prompt = buildPerFileReviewPrompt(unit, {
+                    // ── Diff budget ──────────────────────────────────────────
+                    //
+                    // Reserve room for the RESPONSE before deciding how much diff
+                    // to send. A prompt that fills the window comes back truncated,
+                    // which surfaces as a JSON parse failure — a review that had all
+                    // the context it needed and produced nothing. Files that do not
+                    // fit are named rather than dropped silently, so the model cannot
+                    // conclude that a caller was never updated. See utils/diffBudget.js.
+                    const contextWindow = tokenManager.getModelLimit(settings.model);
+                    const fitted = fitFilesToBudget({
+                        files: unit.files,
+                        contextWindowTokens: contextWindow,
+                        // Everything else in this prompt — preamble, rules, RAG,
+                        // graph slice, full-file context — measured once the prompt
+                        // is built would be circular, so charge a flat estimate of
+                        // the non-diff sections against the window.
+                        promptTokens: Math.round(contextWindow * 0.2),
+                    });
+
+                    // Never review nothing. If even the first file does not fit, the
+                    // unit is reviewed as-is: an over-long prompt that the provider
+                    // may still handle beats skipping a changed file outright, and
+                    // `HunkWindower` has already split anything genuinely huge.
+                    const unitForPrompt = fitted.included.length
+                        ? { ...unit, files: fitted.included }
+                        : unit;
+                    const omittedFiles = fitted.included.length ? fitted.omitted : [];
+
+                    if (omittedFiles.length) {
+                        console.log(
+                            `✂️  Diff budget: showing ${fitted.included.length}/${unit.files.length} `
+                            + `file(s) of this unit (${fitted.stats.diffTokens} diff tokens, `
+                            + `${fitted.stats.deletionOnlyHunksRemoved} deletion-only hunk(s) stripped)`
+                        );
+                    }
+
+                    const prompt = buildPerFileReviewPrompt(unitForPrompt, {
                         prContext,
                         focusAreas,
                         ragChunks: this._getRAGChunksForUnit(ragByFile, unit),
@@ -159,7 +198,13 @@ export class MultiPassReviewEngine {
                         fileContext: context.fileContext || null,
                         intentBlock: context.intentBlock || '',
                         // How much retrieved repo context this prompt may carry.
-                        contextBudget: context.contextBudget || null
+                        contextBudget: context.contextBudget || null,
+                        // Declaration ranges per file, so a large file's hunks are
+                        // grown to the function or class that encloses them instead
+                        // of the whole file being pasted in. See utils/dynamicContext.js.
+                        declarationsByFile: context.declarationsByFile || null,
+                        dynamicContext: context.dynamicContext || null,
+                        omittedFiles,
                     });
 
                     const response = await this.llmService.streamChat(
@@ -171,6 +216,8 @@ export class MultiPassReviewEngine {
                             provider: settings.provider,
                             model: settings.model,
                             apiKey: settings.apiKey,
+                            budgetStage: 'per-file',
+                            budgetPriority: PRIORITY.ESSENTIAL,
                             stream: false
                         }
                     );
@@ -236,6 +283,8 @@ export class MultiPassReviewEngine {
                     provider: settings.provider,
                     model: settings.model,
                     apiKey: settings.apiKey,
+                    budgetStage: 'aggregate',
+                    budgetPriority: PRIORITY.ESSENTIAL,
                     stream: false
                 }
             );

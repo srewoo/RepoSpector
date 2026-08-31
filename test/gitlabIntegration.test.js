@@ -16,7 +16,7 @@ describe('GitLab Integration', () => {
         
         mockWindow = {
             location: {
-                href: 'https://gitlab.com/mindtickle/migrated-call-ai/react/-/blob/master/applications/callai-admin/src/utils/index.js?ref_type=heads',
+                href: 'https://gitlab.com/acme/web-platform/react/-/blob/master/applications/admin-ui/src/utils/index.js?ref_type=heads',
                 hostname: 'gitlab.com'
             }
         };
@@ -176,7 +176,7 @@ describe('GitLab Integration', () => {
             const testUrls = [
                 'https://gitlab.com/user/repo/-/blob/main/file.js',
                 'https://gitlab.com/group/subgroup/repo/-/blob/master/src/index.js',
-                'https://gitlab.com/mindtickle/migrated-call-ai/react/-/blob/master/applications/callai-admin/src/utils/index.js?ref_type=heads',
+                'https://gitlab.com/acme/web-platform/react/-/blob/master/applications/admin-ui/src/utils/index.js?ref_type=heads',
                 'https://gitlab.example.com/private/repo/-/blob/develop/test.js'
             ];
 
@@ -202,13 +202,13 @@ describe('GitLab Integration', () => {
 
     describe('URL Parsing', () => {
         it('should parse GitLab URLs correctly', async () => {
-            const url = 'https://gitlab.com/mindtickle/migrated-call-ai/react/-/blob/master/applications/callai-admin/src/utils/index.js?ref_type=heads';
+            const url = 'https://gitlab.com/acme/web-platform/react/-/blob/master/applications/admin-ui/src/utils/index.js?ref_type=heads';
             const context = { code: 'test code', imports: [], exports: [] };
 
             await mockAnalyzer.enhanceWithGitLabContext(context, url, 'smart');
 
-            expect(context.filePath).toBe('applications/callai-admin/src/utils/index.js');
-            expect(context.currentDirectory).toBe('applications/callai-admin/src/utils');
+            expect(context.filePath).toBe('applications/admin-ui/src/utils/index.js');
+            expect(context.currentDirectory).toBe('applications/admin-ui/src/utils');
         });
 
         it('should handle GitLab URLs without file paths', async () => {

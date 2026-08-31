@@ -189,7 +189,7 @@ function AppContent() {
                 data: {
                     prUrl,
                     options: {
-                        focusAreas: focusArea ? [focusArea] : ['security', 'bugs', 'performance', 'style'],
+                        focusAreas: focusArea ? [focusArea] : ['security', 'bugs', 'performance'],
                         enableESLint: true,
                         enableSemgrep: true,
                         enableDependency: true

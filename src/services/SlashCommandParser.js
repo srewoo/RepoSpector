@@ -142,6 +142,36 @@ const SLASH_COMMANDS = {
         handler: 'GENERATE_PR_DESCRIPTION',
         category: 'review'
     },
+    '/labels': {
+        description: 'Suggest labels for the current PR (deterministic, no model call)',
+        usage: '/labels [apply]',
+        requiresIndex: false,
+        handler: 'GENERATE_PR_LABELS',
+        category: 'review',
+        subcommands: ['apply']
+    },
+    '/add-docs': {
+        description: 'Write docstrings for functions this PR added or changed',
+        usage: '/add-docs',
+        requiresIndex: false,
+        handler: 'GENERATE_DOCSTRINGS',
+        category: 'docs'
+    },
+    '/ask-line': {
+        description: 'Ask about one line of the diff',
+        usage: '/ask-line <file>:<line> <question>',
+        requiresIndex: false,
+        handler: 'ASK_LINE_QUESTION',
+        category: 'review',
+        requiresArg: true
+    },
+    '/history': {
+        description: 'Prior review verdicts on the code this PR touches',
+        usage: '/history',
+        requiresIndex: false,
+        handler: 'PRIOR_REVIEW_HISTORY',
+        category: 'review'
+    },
     '/help': {
         description: 'Show available commands',
         usage: '/help',
@@ -447,6 +477,50 @@ export class SlashCommandParser {
                     payload: { prUrl: tabUrl },
                     displayMessage: 'Generating PR description...',
                     responseType: 'pr-description'
+                };
+
+            case 'GENERATE_PR_LABELS':
+                return {
+                    messageType: 'GENERATE_PR_LABELS',
+                    // `apply` is opt-in per invocation: writing to the PR is not
+                    // something a read command should do because the user typed a
+                    // subcommand-shaped word.
+                    payload: { prUrl: tabUrl, apply: subcommand === 'apply' },
+                    displayMessage: subcommand === 'apply'
+                        ? 'Generating and applying labels...'
+                        : 'Suggesting labels...',
+                    responseType: 'labels'
+                };
+
+            case 'GENERATE_DOCSTRINGS':
+                return {
+                    messageType: 'GENERATE_DOCSTRINGS',
+                    payload: { prUrl: tabUrl },
+                    displayMessage: 'Writing docstrings for changed declarations...',
+                    responseType: 'docstrings'
+                };
+
+            case 'ASK_LINE_QUESTION': {
+                // `<file>:<line> <rest is the question>`. The target is the first
+                // whitespace-delimited token, so a question containing a colon
+                // cannot be mistaken for part of the path.
+                const firstSpace = args.search(/\s/);
+                const target = firstSpace === -1 ? args : args.slice(0, firstSpace);
+                const question = firstSpace === -1 ? '' : args.slice(firstSpace + 1).trim();
+                return {
+                    messageType: 'ASK_LINE_QUESTION',
+                    payload: { prUrl: tabUrl, target, question },
+                    displayMessage: `Reading ${target}...`,
+                    responseType: 'text'
+                };
+            }
+
+            case 'PRIOR_REVIEW_HISTORY':
+                return {
+                    messageType: 'PRIOR_REVIEW_HISTORY',
+                    payload: { prUrl: tabUrl },
+                    displayMessage: 'Looking up prior review verdicts...',
+                    responseType: 'text'
                 };
 
             case 'HELP':

@@ -781,6 +781,373 @@ export class PullRequestService {
         throw new Error(`Updating description not supported for: ${prInfo.platform}`);
     }
 
+    // ==========================================
+    // Persistent summary comment
+    // ==========================================
+
+    /**
+     * The PR's top-level comments, enough to find our own summary among them.
+     *
+     * Deliberately just `{id, body, author}` — the caller needs to match a marker
+     * and edit by id, and returning whole API objects would invite consumers to
+     * depend on host-shaped fields.
+     *
+     * Never throws: an unreadable comment list means "no existing summary", and
+     * the caller posts a new one. Worst case is a duplicate comment, not a lost
+     * review.
+     *
+     * @param {string} url
+     * @returns {Promise<Array<{id:*, body:string, author:string|null}>>}
+     */
+    async fetchIssueComments(url) {
+        const prInfo = this.parsePullRequestUrl(url);
+        if (!prInfo) return [];
+
+        try {
+            if (prInfo.platform === 'github') {
+                const { owner, repo, prNumber } = prInfo;
+                const resp = await fetch(
+                    `${this.githubApiFor(prInfo)}/repos/${owner}/${repo}/issues/${prNumber}/comments?per_page=100`,
+                    {
+                        headers: {
+                            Accept: 'application/vnd.github.v3+json',
+                            ...(this.githubToken ? { Authorization: `token ${this.githubToken}` } : {}),
+                        },
+                    },
+                );
+                if (!resp.ok) return [];
+                return ((await resp.json()) || []).map(c => ({
+                    id: c.id, body: c.body || '', author: c.user?.login || null,
+                }));
+            }
+
+            if (prInfo.platform === 'gitlab') {
+                const { owner, repo, mrNumber, projectPath } = prInfo;
+                const projectId = encodeURIComponent(projectPath || `${owner}/${repo}`);
+                const resp = await fetch(
+                    `${this.gitlabApiFor(prInfo)}/projects/${projectId}/merge_requests/${mrNumber}/notes?per_page=100&sort=asc`,
+                    { headers: this.gitlabToken ? { 'PRIVATE-TOKEN': this.gitlabToken } : {} },
+                );
+                if (!resp.ok) return [];
+                return ((await resp.json()) || [])
+                    // System notes ("added 3 commits") are not comments and can
+                    // never be ours.
+                    .filter(n => n && n.system !== true)
+                    .map(n => ({ id: n.id, body: n.body || '', author: n.author?.username || null }));
+            }
+        } catch (e) {
+            console.warn('Could not read PR comments:', e.message);
+        }
+        return [];
+    }
+
+    /**
+     * Edit one existing top-level comment.
+     *
+     * @param {string} url
+     * @param {string|number} commentId
+     * @param {string} body
+     */
+    async updateIssueComment(url, commentId, body) {
+        const prInfo = this.parsePullRequestUrl(url);
+        if (!prInfo) throw new Error(`Unsupported PR URL: ${url}`);
+
+        if (prInfo.platform === 'github') {
+            const { owner, repo } = prInfo;
+            if (!this.githubToken) throw new Error('GitHub token required to update a comment');
+            const resp = await fetch(
+                `${this.githubApiFor(prInfo)}/repos/${owner}/${repo}/issues/comments/${commentId}`,
+                {
+                    method: 'PATCH',
+                    headers: {
+                        Accept: 'application/vnd.github.v3+json',
+                        Authorization: `token ${this.githubToken}`,
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ body }),
+                },
+            );
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                throw new Error(`GitHub API error (${resp.status}): ${err.message || resp.statusText}`);
+            }
+            return { success: true, platform: 'github', updated: commentId };
+        }
+
+        if (prInfo.platform === 'gitlab') {
+            const { owner, repo, mrNumber, projectPath } = prInfo;
+            if (!this.gitlabToken) throw new Error('GitLab token required to update a note');
+            const projectId = encodeURIComponent(projectPath || `${owner}/${repo}`);
+            const resp = await fetch(
+                `${this.gitlabApiFor(prInfo)}/projects/${projectId}/merge_requests/${mrNumber}/notes/${commentId}`,
+                {
+                    method: 'PUT',
+                    headers: { 'PRIVATE-TOKEN': this.gitlabToken, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ body }),
+                },
+            );
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                throw new Error(`GitLab API error (${resp.status}): ${err.message || resp.statusText}`);
+            }
+            return { success: true, platform: 'gitlab', updated: commentId };
+        }
+
+        throw new Error(`Updating a comment is not supported for: ${prInfo.platform}`);
+    }
+
+    // ==========================================
+    // External scanner reports (SARIF / rdjson)
+    // ==========================================
+
+    /**
+     * Annotations from every check run on a commit (GitHub only).
+     *
+     * This is the zero-configuration source of deterministic findings: any CI
+     * check that reports annotations already exposes them here — reviewdog's
+     * `github-pr-check` reporter, CodeQL uploads, Actions problem matchers.
+     *
+     * Two API calls per check run (list runs, then annotations per run), so it is
+     * capped: a repo with thirty checks is not worth sixty calls on a review's
+     * critical path, and the checks that annotate are almost always the first few.
+     *
+     * Never throws — an unreadable check list yields [].
+     *
+     * @param {string} url
+     * @param {string|null} sha - the commit to read; the PR head when omitted
+     * @returns {Promise<Array<{path,startLine,endLine,level,title,message,checkName,detailsUrl}>>}
+     */
+    async fetchCheckAnnotations(url, sha = null) {
+        const prInfo = this.parsePullRequestUrl(url);
+        if (!prInfo || prInfo.platform !== 'github') return [];
+
+        const { owner, repo } = prInfo;
+        const api = this.githubApiFor(prInfo);
+        const headers = {
+            Accept: 'application/vnd.github.v3+json',
+            ...(this.githubToken ? { Authorization: `token ${this.githubToken}` } : {}),
+        };
+
+        const MAX_RUNS = 10;
+        const MAX_ANNOTATIONS = 200;
+
+        try {
+            let ref = sha;
+            if (!ref) {
+                const pr = await fetch(`${api}/repos/${owner}/${repo}/pulls/${prInfo.prNumber}`, { headers });
+                if (!pr.ok) return [];
+                ref = (await pr.json())?.head?.sha;
+            }
+            if (!ref) return [];
+
+            const runsResp = await fetch(
+                `${api}/repos/${owner}/${repo}/commits/${ref}/check-runs?per_page=${MAX_RUNS}`,
+                { headers },
+            );
+            if (!runsResp.ok) return [];
+
+            const runs = (await runsResp.json())?.check_runs || [];
+            const out = [];
+
+            for (const run of runs) {
+                if (out.length >= MAX_ANNOTATIONS) break;
+                // `output.annotations_count` saves a call per check that has none,
+                // which is most of them.
+                if (!run?.id || !run?.output?.annotations_count) continue;
+
+                try {
+                    const annResp = await fetch(
+                        `${api}/repos/${owner}/${repo}/check-runs/${run.id}/annotations?per_page=100`,
+                        { headers },
+                    );
+                    if (!annResp.ok) continue;
+
+                    for (const a of (await annResp.json()) || []) {
+                        if (out.length >= MAX_ANNOTATIONS) break;
+                        out.push({
+                            path: a.path || null,
+                            startLine: Number.isInteger(a.start_line) ? a.start_line : null,
+                            endLine: Number.isInteger(a.end_line) ? a.end_line : null,
+                            level: a.annotation_level || null,
+                            title: a.title || null,
+                            message: a.message || null,
+                            checkName: run.name || null,
+                            detailsUrl: run.details_url || run.html_url || null,
+                        });
+                    }
+                } catch (e) {
+                    console.warn(`Check annotations for run ${run.id}: ${e.message}`);
+                }
+            }
+
+            return out;
+        } catch (e) {
+            console.warn('Failed to fetch check annotations:', e.message);
+            return [];
+        }
+    }
+
+    /**
+     * One file out of a CI job's artifacts.
+     *
+     * GitLab only, and deliberately so. GitLab serves a single artifact file by
+     * path (`/jobs/:id/artifacts/:path`), which is a plain fetch. GitHub only
+     * serves artifacts as a ZIP of the whole upload, which an MV3 service worker
+     * cannot unpack without shipping an inflate implementation — and GitHub users
+     * have `fetchCheckAnnotations`, which needs no configuration at all. Adding a
+     * ZIP decoder to serve a source that is already covered is not worth the
+     * bundle.
+     *
+     * The artifact is taken from the pipeline for `ref` (the head SHA under
+     * review). An artifact from an older pipeline describes code that is not in
+     * this diff.
+     *
+     * @param {string} url
+     * @param {Object} opts - {job, path, ref}
+     * @returns {Promise<string>} the file's text
+     */
+    async fetchJobArtifact(url, { job = null, path, ref = null } = {}) {
+        const prInfo = this.parsePullRequestUrl(url);
+        if (!prInfo) throw new Error(`Unsupported PR URL: ${url}`);
+        if (prInfo.platform !== 'gitlab') {
+            throw new Error('Artifact fetching is GitLab-only; GitHub findings come from check annotations');
+        }
+        if (!path) throw new Error('An artifact path is required');
+        if (!this.gitlabToken) throw new Error('GitLab token required to read job artifacts');
+
+        const { owner, repo, projectPath, mrNumber } = prInfo;
+        const api = this.gitlabApiFor(prInfo);
+        const projectId = encodeURIComponent(projectPath || `${owner}/${repo}`);
+        const headers = { 'PRIVATE-TOKEN': this.gitlabToken };
+
+        // Find the pipeline for the commit under review. Falling back to "latest
+        // pipeline" would silently read an artifact built from different code.
+        let pipelineId = null;
+
+        if (ref) {
+            const byShaResp = await fetch(
+                `${api}/projects/${projectId}/pipelines?sha=${encodeURIComponent(ref)}&per_page=1`,
+                { headers },
+            );
+            if (byShaResp.ok) {
+                const list = await byShaResp.json();
+                pipelineId = Array.isArray(list) && list[0]?.id ? list[0].id : null;
+            }
+        }
+
+        if (!pipelineId) {
+            // MR pipelines can be attached to a merge-result commit that is not
+            // the source-branch SHA, so the MR's own head_pipeline is the fallback
+            // rather than the project's latest.
+            const mrResp = await fetch(
+                `${api}/projects/${projectId}/merge_requests/${mrNumber}`,
+                { headers },
+            );
+            if (!mrResp.ok) throw new Error(`Could not read MR pipeline (${mrResp.status})`);
+            pipelineId = (await mrResp.json())?.head_pipeline?.id || null;
+        }
+
+        if (!pipelineId) throw new Error('No pipeline found for this MR');
+
+        const jobsResp = await fetch(
+            `${api}/projects/${projectId}/pipelines/${pipelineId}/jobs?per_page=100`,
+            { headers },
+        );
+        if (!jobsResp.ok) throw new Error(`Could not list pipeline jobs (${jobsResp.status})`);
+
+        const jobs = await jobsResp.json();
+        if (!Array.isArray(jobs) || !jobs.length) throw new Error('Pipeline has no jobs');
+
+        // Named job, or the most recent job that produced any artifacts.
+        const target = job
+            ? jobs.find(j => j?.name === job)
+            : jobs.find(j => Array.isArray(j?.artifacts) && j.artifacts.length);
+
+        if (!target?.id) {
+            throw new Error(job ? `No job named "${job}" in the pipeline` : 'No job with artifacts');
+        }
+
+        const artifactResp = await fetch(
+            `${api}/projects/${projectId}/jobs/${target.id}/artifacts/${path.split('/').map(encodeURIComponent).join('/')}`,
+            { headers },
+        );
+        if (!artifactResp.ok) {
+            throw new Error(`Artifact "${path}" not found in job "${target.name}" (${artifactResp.status})`);
+        }
+
+        return await artifactResp.text();
+    }
+
+    /**
+     * Replace the PR/MR label set.
+     *
+     * Both hosts model labels as a full-set write, not an append — there is no
+     * "add one label" endpoint on the MR resource — so callers must pass the
+     * labels they want to KEEP as well. `LabelGeneratorService.apply` does that
+     * merge; going through it is what stops a review from deleting a triager's
+     * own labels.
+     *
+     * @param {string} url
+     * @param {string[]} labels - the complete desired set
+     */
+    async setLabels(url, labels = []) {
+        const prInfo = this.parsePullRequestUrl(url);
+        if (!prInfo) throw new Error(`Unsupported PR URL: ${url}`);
+
+        const clean = [...new Set(
+            (labels || []).map(l => (typeof l === 'string' ? l : l?.name)).filter(Boolean)
+        )];
+
+        if (prInfo.platform === 'github') {
+            const { owner, repo, prNumber } = prInfo;
+            if (!this.githubToken) throw new Error('GitHub token required to set labels');
+            // Labels live on the ISSUE resource, not the pull resource — a PATCH
+            // to /pulls/:n silently ignores a `labels` field.
+            const response = await fetch(
+                `${this.githubApiFor(prInfo)}/repos/${owner}/${repo}/issues/${prNumber}/labels`,
+                {
+                    method: 'PUT',
+                    headers: {
+                        'Accept': 'application/vnd.github.v3+json',
+                        'Authorization': `token ${this.githubToken}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ labels: clean })
+                }
+            );
+            if (!response.ok) {
+                const err = await response.json().catch(() => ({}));
+                throw new Error(`GitHub API error (${response.status}): ${err.message || response.statusText}`);
+            }
+            return { success: true, platform: 'github', labels: clean };
+        }
+
+        if (prInfo.platform === 'gitlab') {
+            const { owner, repo, mrNumber, projectPath } = prInfo;
+            if (!this.gitlabToken) throw new Error('GitLab token required to set labels');
+            const encodedProject = encodeURIComponent(projectPath || `${owner}/${repo}`);
+            const response = await fetch(
+                `${this.gitlabApiFor(prInfo)}/projects/${encodedProject}/merge_requests/${mrNumber}`,
+                {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'PRIVATE-TOKEN': this.gitlabToken
+                    },
+                    // GitLab takes a comma-separated string here, not an array.
+                    body: JSON.stringify({ labels: clean.join(',') })
+                }
+            );
+            if (!response.ok) {
+                const err = await response.json().catch(() => ({}));
+                throw new Error(`GitLab API error (${response.status}): ${err.message || response.statusText}`);
+            }
+            return { success: true, platform: 'gitlab', labels: clean };
+        }
+
+        throw new Error(`Setting labels not supported for: ${prInfo.platform}`);
+    }
+
     async updateGitHubPRDescription(prInfo, description) {
         const { owner, repo, prNumber } = prInfo;
         if (!this.githubToken) throw new Error('GitHub token required to update PR description');

@@ -15,12 +15,49 @@ import {
     normalizeAnthropicToolCalls,
     normalizeOpenAIToolCalls,
 } from '../utils/toolProtocol.js';
+import { PRIORITY } from '../utils/callBudget.js';
 
 export class LLMService {
     constructor() {
         this.activeRequests = new Map();
         this.maxRetries = 3;
         this.baseDelay = 1000; // 1 second
+        /**
+         * Optional per-review ceiling on LLM calls (see utils/callBudget.js).
+         * Null means unmetered, which is what every non-review caller (chat,
+         * key validation) gets — a budget is a property of one review, not of
+         * the service, so the orchestrator sets and clears it.
+         */
+        this.callBudget = null;
+    }
+
+    /**
+     * Meter every call this service makes against `budget` until it is cleared.
+     *
+     * Enforced HERE rather than at each call site on purpose: the pipeline's call
+     * count is a product of chunking × windowing × passes, and any budget that
+     * each new pass has to remember to check is a budget that leaks the first
+     * time someone adds one.
+     *
+     * @param {import('../utils/callBudget.js').CallBudget|null} budget
+     */
+    setCallBudget(budget) {
+        this.callBudget = budget || null;
+    }
+
+    clearCallBudget() {
+        this.callBudget = null;
+    }
+
+    /**
+     * Thrown when a call is refused by the budget.
+     *
+     * A refusal must be distinguishable from a provider failure: the caller
+     * skips its stage and the review continues, rather than retrying (there is
+     * nothing transient to wait for) or reporting the model as unavailable.
+     */
+    static isBudgetError(error) {
+        return !!error && error.name === 'CallBudgetExceededError';
     }
 
     /**
@@ -120,6 +157,11 @@ export class LLMService {
             streaming: stream,
             onChunk,
             tabId,
+            // Budget labels are pass-through: `callLLM` is where the ceiling is
+            // enforced, but every review pass reaches it via streamChat, so a
+            // label dropped here would make the whole review one anonymous stage.
+            ...(options.budgetStage ? { budgetStage: options.budgetStage } : {}),
+            ...(options.budgetPriority ? { budgetPriority: options.budgetPriority } : {}),
             // Undefined leaves each provider adapter on its own default, so this
             // changes nothing for callers that do not ask.
             ...(Number.isFinite(timeout) ? { timeout } : {}),
@@ -165,6 +207,32 @@ export class LLMService {
     async callLLM(requestData, apiKey, options = {}) {
         const provider = this.getProvider(requestData.model);
         const modelId = this.getModelId(requestData.model);
+
+        // Budget check BEFORE any provider work. `stage`/`priority` travel with
+        // the call so the ceiling can refuse a cosmetic pass while still funding
+        // one that produces findings; a caller that passes neither is treated as
+        // essential, which is the safe default for an unlabelled call.
+        //
+        // Retries are NOT re-metered: `withRetry` wraps the dispatch below, so
+        // one logical call costs one unit however many times the transport is
+        // replayed. Metering retries would let a flaky provider consume the
+        // user's whole review budget.
+        if (this.callBudget) {
+            const granted = this.callBudget.tryConsume(1, {
+                stage: options.budgetStage || 'llm',
+                priority: options.budgetPriority || PRIORITY.ESSENTIAL,
+            });
+            if (!granted) {
+                const err = new Error(
+                    `LLM call budget exhausted (${this.callBudget.used}/${this.callBudget.limit}) `
+                    + `— refused stage "${options.budgetStage || 'llm'}". `
+                    + 'Raise "Max AI calls per review" in Settings, or set it to 0 for no limit.'
+                );
+                err.name = 'CallBudgetExceededError';
+                err.budget = this.callBudget.snapshot();
+                throw err;
+            }
+        }
 
         console.log(`🤖 LLMService: Routing to provider '${provider}' with model '${modelId}'`);
 

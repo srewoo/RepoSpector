@@ -8,10 +8,9 @@
  * has to wait for a release, and every user is on a different ruleset depending
  * on when they last updated.
  *
- * Bastion solves this with `src/plugin_sync/syncer.py`, which pulls the
- * `code-review` skill and the language standards from `mindtickle-claude-plugins`
- * on every service start, and BASTION.md then insists: "Always Read SKILL.md
- * from disk inside each review — do not rely on memorized content."
+ * The fix used by server-side reviewers: pull the review rules and language
+ * standards from a shared repository on every start, and read them from disk
+ * inside each review rather than relying on memorized content.
  *
  * The extension equivalent: fetch markdown from a configured source, cache it in
  * chrome.storage with a TTL, and fall back to the bundled text on any failure.

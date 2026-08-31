@@ -1,5 +1,6 @@
 import { FINDER_LENSES, buildLensFinderPrompt, activeLenses } from '../utils/finderLensPrompts.js';
 import { freshFindings } from '../utils/findingDedup.js';
+import { PRIORITY } from '../utils/callBudget.js';
 
 /**
  * MultiFinderService — recall booster.
@@ -111,6 +112,8 @@ export class MultiFinderService {
                             provider: settings.provider,
                             model: settings.model,
                             apiKey: settings.apiKey,
+                            budgetStage: 'finder',
+                            budgetPriority: PRIORITY.ESSENTIAL,
                             stream: false,
                             timeout: FINDER_TIMEOUT_MS,
                         }

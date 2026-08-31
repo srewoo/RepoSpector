@@ -9,10 +9,10 @@
  *   - CI is red on `test_kafka_consumer` — does this diff explain that?
  *   - a reviewer already objected to this approach in the discussion.
  *
- * Bastion pre-computes exactly three blocks and injects them before the LLM
- * runs (`<jira_context>`, `<gitlab_context>`, `<mr_stats>`), and its workflow
- * step 4 states outright that "acceptance criterion 2 (error retry) is not
- * addressed in this diff" is a legitimate finding. Grepping RepoSpector for
+ * The approach: pre-compute a few context blocks (issue tracker, host
+ * discussion, MR stats) and inject them before the LLM runs, so that
+ * "acceptance criterion 2 (error retry) is not addressed in this diff" becomes
+ * a legitimate finding. Grepping RepoSpector for
  * `acceptanceCriteria` / `pipeline_status` returned nothing — a whole class of
  * finding it structurally could not produce.
  *

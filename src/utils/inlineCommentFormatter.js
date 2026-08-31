@@ -23,6 +23,7 @@ import { liftEngineFindings } from '../services/engineContract.js';
 import { snapToCommentableLine } from './patchLines.js';
 import { withMarker } from './commentDedupe.js';
 import { attachFeedbackFooter } from './feedbackFooter.js';
+import { relocationNote } from './findingFilterMode.js';
 
 /** Canonical severities (blocking/suggestion/nitpick) mapped onto legacy names. */
 const SEVERITY_ALIAS = {
@@ -106,7 +107,25 @@ export function buildCommentBody(f) {
     const ruleInfo = rule ? ` (\`${rule}\`)` : '';
 
     const headline = (f.title || f.message || f.description || 'Issue').split('\n')[0].trim();
-    const lines = [`${emoji} **${severity.toUpperCase()}**${tool}${ruleInfo}: ${headline}`];
+
+    // A rule id the reader can look up beats one they have to trust. External
+    // scanners carry `helpUri`; linking it is the difference between a checkable
+    // claim and an assertion. See utils/externalFindings.js.
+    const ruleLink = f.ruleUrl && rule ? ` ([\`${rule}\`](${f.ruleUrl}))` : ruleInfo;
+
+    const lines = [`${emoji} **${severity.toUpperCase()}**${tool}${ruleLink}: ${headline}`];
+
+    // Who actually found this. A finding from the team's own CodeQL run should not
+    // read as this tool's opinion — the attribution is most of why it is credible.
+    if (f.source === 'external' && f.attribution) {
+        lines.push('', `_${f.attribution}._`);
+    }
+
+    // If the comment is not on the line the finding named, say so. Moving a
+    // comment onto a line nobody chose and staying quiet about it is a small
+    // dishonesty that compounds. See utils/findingFilterMode.js.
+    const moved = relocationNote(f);
+    if (moved) lines.push('', moved.trim());
 
     // Rationale — only when it adds something beyond the headline.
     const detail = (f.description || f.message || '').trim();

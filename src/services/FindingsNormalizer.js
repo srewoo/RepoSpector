@@ -1,7 +1,7 @@
 /**
  * FindingsNormalizer — hard-filter findings to the MR's changed hunks.
  *
- * Mirrors Bastion's `assigned_hunks` mechanism: the LLM often emits findings
+ * Hunk assignment: the LLM often emits findings
  * for unchanged code (because it can see the file's full context). Those are
  * noise — the reviewer can't act on code outside the diff. We drop them at
  * the boundary so the UI only renders findings the reviewer can engage with.
@@ -17,8 +17,8 @@ import { DiffParser } from '../utils/diffParser.js';
 
 /**
  * Key names LLMs actually emit instead of the schema's. Every entry here was a
- * real drift mode Bastion hit in production (`src/driver/findings_normalizer.py`
- * carries the same table) — a typo'd key is worse than a missing one, because
+ * real drift mode observed in production — a typo'd key is worse than a
+ * missing one, because
  * the field silently reads as `undefined` and the finding is dropped or
  * mis-severitied downstream rather than failing loudly.
  */

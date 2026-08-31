@@ -82,9 +82,9 @@ const JS_EXTS = new Set(['js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs']);
  * Given a PRODUCTION file path, return candidate test file paths, best guess
  * first. The inverse of `productionCandidatesForTest`.
  *
- * Used by the review context builder: Bastion's reviewer can open the test file
- * from its clone, which is how it produces "this new exported function has no
- * test" findings. We have no clone, so we guess the path and fetch it — a
+ * Used by the review context builder: a reviewer with a full clone can simply
+ * open the test file, which is how "this new exported function has no test"
+ * findings get produced. We have no clone, so we guess the path and fetch it — a
  * bounded number of cheap API calls, most of which hit on the first candidate.
  *
  * Returns [] for a path that is already a test file (nothing to look up).

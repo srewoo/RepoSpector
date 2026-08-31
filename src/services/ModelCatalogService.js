@@ -30,6 +30,13 @@ const DATED_SNAPSHOT = /^(.*)-\d{4}-\d{2}-\d{2}$/;
  * version sorts last rather than being guessed at.
  */
 function versionOf(bare) {
+    // A fine-tune carries its base model inside the id
+    // (`ft:gpt-3.5-turbo-0613:org::id`). Version it by that base, or every
+    // fine-tune sorts as "no recognisable version" and lands at the bottom
+    // regardless of how new the model it was trained from is.
+    const ft = String(bare).match(/^ft:([^:]+):/i);
+    if (ft) return versionOf(ft[1]);
+
     const m = String(bare).match(/(?:^|[a-z-])(?:gpt|o|claude[a-z-]*|gemini|llama|mistral|grok)?-?(\d+)(?:\.(\d+))?/i);
     if (!m) return { major: -1, minor: -1 };
     return { major: Number(m[1]), minor: m[2] ? Number(m[2]) : 0 };
@@ -56,9 +63,17 @@ export function rankModels(models) {
         return !snap || !ids.has(snap[1]);
     });
 
+    // Strip ONLY the provider prefix. `split(':').pop()` took the LAST segment,
+    // which for a fine-tune (`openai:ft:gpt-3.5-turbo-0613:org::88pNyu07`) is the
+    // opaque suffix `88pNyu07` — and `versionOf` read the leading digits of that
+    // as "version 88", sorting every fine-tune above the newest flagship and
+    // handing one of them the ⭐. A colon is legal inside a model id; only the
+    // first one delimits the provider.
+    const bareOf = (id) => String(id).replace(/^[^:]+:/, '');
+
     const sorted = [...deduped].sort((a, b) => {
-        const bareA = a.id.split(':').pop();
-        const bareB = b.id.split(':').pop();
+        const bareA = bareOf(a.id);
+        const bareB = bareOf(b.id);
         const va = versionOf(bareA);
         const vb = versionOf(bareB);
         if (vb.major !== va.major) return vb.major - va.major;
@@ -89,8 +104,19 @@ async function fetchOpenAICompatible(baseUrl, apiKey, provider) {
 const FETCHERS = {
     async openai(apiKey) {
         // Keep only chat/reasoning families; hide embeddings/audio/image/etc.
+        //
+        // `ft:` is explicitly included. A fine-tune is named
+        // `ft:gpt-3.5-turbo-0613:<org>::<id>`, so a pattern anchored on the family
+        // prefix dropped every one — an organisation's OWN fine-tuned models were
+        // the one category of model it could be certain it wanted, and they were
+        // the only category invisible in the dropdown. Measured against a real
+        // key: 15 of 22 models this filter rejected were that org's fine-tunes.
+        //
+        // `chat-latest` and `computer-use-preview` are chat models whose ids
+        // simply do not start with a family name; both are usable and both were
+        // being hidden by an implementation detail of the regex.
         const all = await fetchOpenAICompatible('https://api.openai.com/v1', apiKey, 'openai');
-        return all.filter(m => /(^openai:)(gpt|o\d|chatgpt)/i.test(m.id));
+        return all.filter(m => /(^openai:)(ft:|gpt|o\d|chatgpt|chat-|computer-use)/i.test(m.id));
     },
 
     async anthropic(apiKey) {

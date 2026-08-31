@@ -187,7 +187,10 @@ describe('FeedbackCollectorService', () => {
 
         const res = await svc.collect('http://pr/1');
         expect(res.collected).toBe(0);
-        expect(res.skipped).toEqual({ noTick: 1, multiTicked: 1, unknownLabel: 1 });
+        // `inferred` counts threads whose verdict was read from thread state
+        // instead of a tick — zero here because the PR state was not supplied,
+        // so nothing was decided yet. See FeedbackCollectorService._inferRow.
+        expect(res.skipped).toEqual({ noTick: 1, multiTicked: 1, unknownLabel: 1, inferred: 0 });
     });
 
     it('down-weights a rule the team called a false positive', async () => {

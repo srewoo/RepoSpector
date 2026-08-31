@@ -115,7 +115,7 @@ describe('settingsHandlers', () => {
     });
 });
 
-const { ensureHostAccess, parseHostList } = require('../../src/background/handlers/settingsHandlers.js');
+const { ensureHostAccess } = require('../../src/background/handlers/settingsHandlers.js');
 
 describe('ensureHostAccess with both forges', () => {
     const ORIGINAL_CHROME = global.chrome;

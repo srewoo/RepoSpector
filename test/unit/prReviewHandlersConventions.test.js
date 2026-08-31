@@ -21,8 +21,6 @@
  * test does not hang for the real 15s.
  */
 
-const SHORT_DEADLINE_MS = 30;
-
 jest.mock('../../src/utils/constants.js', () => {
     const actual = jest.requireActual('../../src/utils/constants.js');
     return { ...actual, CONVENTION_WARM_DEADLINE_MS: 30 };

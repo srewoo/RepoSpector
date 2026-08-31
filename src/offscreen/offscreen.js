@@ -21,7 +21,9 @@ const _BENIGN_MODEL_WARNINGS = [
     /scheme 'chrome-extension' is unsupported/i
 ];
 for (const level of ['warn', 'error']) {
+    // eslint-disable-next-line no-console
     const original = console[level].bind(console);
+    // eslint-disable-next-line no-console
     console[level] = (...args) => {
         const text = args.map((a) => (typeof a === 'string' ? a : a?.message || '')).join(' ');
         if (_BENIGN_MODEL_WARNINGS.some((re) => re.test(text))) return;

@@ -1,7 +1,7 @@
 /**
  * ConventionMiner — learn a team's review conventions from its own history.
  *
- * Measured motivation: on a 50-MR benchmark of real MindTickle merge requests,
+ * Measured motivation: on a 50-MR benchmark of a real team's merge requests,
  * RepoSpector matched 0 of 66 issues human reviewers raised. Reading those 66,
  * the largest single class was not defects at all — it was CONVENTION:
  *
@@ -10,7 +10,7 @@
  *   "For naming the route, it's better to follow REST norms."
  *   "Can you please use bgcolor token here?"
  *   "Why are we not using ErrorPage from DL?"
- *   "Use mindtickle's default date formatter."
+ *   "Use our default date formatter."
  *
  * No general-purpose reviewer can produce these. They are not in the diff, not in
  * any public best-practice list, and not in the generic `src/standards/*.md`. They

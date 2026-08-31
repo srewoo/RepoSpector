@@ -57,7 +57,7 @@ describe('reviewerRequests', () => {
     it('excludes chatter and very short comments', () => {
         const kept = reviewerRequests([
             note('a', 'LGTM'), note('a', '+1'), note('a', 'thanks!'), note('a', 'ok'),
-            note('b', 'Please use the mindtickle default date formatter for consistency.'),
+            note('b', 'Please use our default date formatter for consistency.'),
         ]);
         expect(kept).toHaveLength(1);
     });

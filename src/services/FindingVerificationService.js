@@ -5,6 +5,7 @@ import { checkStaticPremise } from '../utils/staticRulePremise.js';
 import { diffsByFile as buildDiffsByFile } from '../utils/siblingSweep.js';
 import { assessImportClaim } from '../utils/importClaimGate.js';
 import { markLowValue } from '../utils/lowValueGate.js';
+import { PRIORITY } from '../utils/callBudget.js';
 
 /**
  * FindingVerificationService — adversarial second pass to cut false positives.
@@ -207,7 +208,7 @@ export class FindingVerificationService {
                             { role: 'system', content: VERIFICATION_SYSTEM_PROMPT },
                             { role: 'user', content: prompt }
                         ],
-                        { provider: settings.provider, model: settings.model, apiKey: settings.apiKey, stream: false }
+                        { provider: settings.provider, model: settings.model, apiKey: settings.apiKey, stream: false, budgetStage: 'verify', budgetPriority: PRIORITY.IMPORTANT }
                     );
                     usage.input += resp?.usage?.input || 0;
                     usage.output += resp?.usage?.output || 0;

@@ -99,6 +99,12 @@ export function toCanonicalFinding(raw, defaults = {}) {
         title: raw.title ?? null,
         suggestion: raw.suggestion ?? raw.message ?? raw.description ?? '',
         evidence: raw.evidence ?? raw.codeSnippet ?? null,
+        description: raw.description ?? raw.message ?? '',
+        impact: raw.impact ?? null,
+        confidence: normalizeConfidence(raw.confidence),
+        score: normalizeScore(raw.score),
+        scoreSource: raw.scoreSource ?? null,
+        tool: raw.tool ?? null,
         source: raw.source ?? defaults.source ?? 'llm', // llm | eslint | semgrep | secrets | osv | compliance
         // ── Escalation ──────────────────────────────────────────────────────
         // "This cannot be settled from the diff; a human with specific
@@ -116,6 +122,20 @@ export function toCanonicalFinding(raw, defaults = {}) {
             }
             : null,
     };
+}
+
+function normalizeConfidence(value) {
+    if (value == null) return null;
+    const n = Number(value);
+    if (!Number.isFinite(n)) return null;
+    const normalized = n > 1 ? n / 100 : n;
+    return Math.min(1, Math.max(0, normalized));
+}
+
+function normalizeScore(value) {
+    if (value == null) return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.min(10, Math.max(1, n)) : null;
 }
 
 /** Unknown or missing expertise falls back to DOMAIN rather than being dropped. */
@@ -137,7 +157,7 @@ export function makeFindingId() {
 }
 
 /**
- * Roll a list of canonical findings into a verdict per Bastion's rules:
+ * Roll a list of canonical findings into a verdict:
  *   any BLOCKING → BLOCK
  *   else any SUGGESTION → NEEDS_DISCUSSION
  *   else → APPROVE
@@ -160,7 +180,7 @@ export function rollupVerdict(findings) {
 
 /**
  * Build the final report consumed by the UI / cache / webhook bot.
- * `summary` is split by phase so we can render two sections (Bastion-style).
+ * `summary` is split by phase so we can render two sections.
  */
 export function buildVerdictReport({ findings = [], summary = {}, meta = {}, override } = {}) {
     const canonical = findings.map((f) => toCanonicalFinding(f)).filter(Boolean);

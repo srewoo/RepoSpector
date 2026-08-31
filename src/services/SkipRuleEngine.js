@@ -1,7 +1,7 @@
 /**
  * SkipRuleEngine — classifies a PR/MR before any LLM spend.
  *
- * Inspired by Bastion's docs/Skip_Rules_And_Edge_Cases.md. Goal: cheap
+ * Goal: cheap
  * short-circuit verdicts for changes that don't deserve a full review,
  * plus DEFER signals for transient blockers (merge conflict, failing CI).
  *

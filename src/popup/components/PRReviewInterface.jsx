@@ -2,6 +2,7 @@ import React, { useState, useCallback, useEffect } from 'react';
 import { cn } from '@/lib/utils';
 import { MotionDiv, LazyAnimatePresence } from './ui/MotionDiv';
 import { usePRReview } from '../hooks/usePRReview.js';
+import { ExportService } from '@/services/ExportService';
 import { parseStandardsChecklist, parseSummaryCounts } from '../utils/findingsParser.js';
 import {
     GitPullRequest,
@@ -21,6 +22,7 @@ import {
     FileText,
     GitBranch,
     BookOpen,
+    Tag,
     Copy,
     Download
 } from 'lucide-react';
@@ -76,6 +78,8 @@ export function PRReviewInterface({
         generatedChangelog, setGeneratedChangelog,
         generatedMermaid, setGeneratedMermaid,
         generatedRepoInfo, setGeneratedRepoInfo,
+        generatedLabels, setGeneratedLabels,
+        generatedDocstrings, setGeneratedDocstrings,
         generating, setGenerating,
         findings, staticFindings,
         effectiveVerdict, riskScore, effectiveRecommendation,
@@ -236,6 +240,62 @@ export function PRReviewInterface({
             setGenerating(null);
         }
     }, [prUrl, generating]);
+
+    // Labels. Deterministic and free — no model call — so it is safe to offer as a
+    // one-click action rather than behind a confirmation.
+    const handleSuggestLabels = useCallback(async (apply = false) => {
+        if (!prUrl || generating) return;
+        setGenerating('labels');
+        try {
+            const response = await chrome.runtime.sendMessage({
+                type: 'GENERATE_PR_LABELS',
+                // Applying WRITES to the PR, so it is only ever an explicit act.
+                // The review's findings feed the risk labels (`security`,
+                // `review/blocking`). Absent before a review has run, which is
+                // fine — the diff-derived labels do not need them.
+                data: { prUrl, apply, findings: findings || [] },
+            });
+            if (response.success) setGeneratedLabels(response.data);
+        } catch (err) {
+            console.error('Failed to suggest labels:', err);
+        } finally {
+            setGenerating(null);
+        }
+    }, [prUrl, generating, findings]);
+
+    const handleGenerateDocstrings = useCallback(async () => {
+        if (!prUrl || generating) return;
+        setGenerating('docstrings');
+        try {
+            const response = await chrome.runtime.sendMessage({
+                type: 'GENERATE_DOCSTRINGS',
+                data: { prUrl },
+            });
+            if (response.success) setGeneratedDocstrings(response.data);
+        } catch (err) {
+            console.error('Failed to generate docstrings:', err);
+        } finally {
+            setGenerating(null);
+        }
+    }, [prUrl, generating]);
+
+    // SARIF export. Purely local — no model call and no network — so it needs no
+    // budget, no spinner state and no error path beyond the download itself.
+    const handleExportSarif = useCallback(() => {
+        if (!findings?.length) return;
+        try {
+            const json = ExportService.exportFindingsAsSarif(findings, {
+                prUrl,
+                commitSha: prData?.headSha || null,
+                model: analysisResult?.model || null,
+                version: chrome.runtime?.getManifest?.()?.version,
+            });
+            const slug = (prUrl || 'review').split('/').slice(-3).join('-').replace(/[^\w.-]/g, '');
+            ExportService.download(json, `repospector-${slug}.sarif`, 'application/json');
+        } catch (err) {
+            console.error('Failed to export SARIF:', err);
+        }
+    }, [findings, prUrl, prData, analysisResult]);
 
     const handleGenerateRepoInfo = useCallback(async () => {
         if (!prUrl || generating) return;
@@ -536,8 +596,128 @@ export function PRReviewInterface({
                                     {generating === 'repoinfo' ? <RefreshCw className="w-3 h-3 mr-1 animate-spin" /> : <FileText className="w-3 h-3 mr-1" />}
                                     RepoInfo.md
                                 </Button>
+                                <Button
+                                    variant="outline" size="sm"
+                                    onClick={() => handleSuggestLabels(false)}
+                                    disabled={!!generating}
+                                    className="text-xs"
+                                    title="Derived from the diff — no model call, no cost"
+                                >
+                                    {generating === 'labels' ? <RefreshCw className="w-3 h-3 mr-1 animate-spin" /> : <Tag className="w-3 h-3 mr-1" />}
+                                    Labels
+                                </Button>
+                                <Button
+                                    variant="outline" size="sm"
+                                    onClick={handleGenerateDocstrings}
+                                    disabled={!!generating}
+                                    className="text-xs"
+                                    title="Docstrings for functions this PR added or changed that have none"
+                                >
+                                    {generating === 'docstrings' ? <RefreshCw className="w-3 h-3 mr-1 animate-spin" /> : <BookOpen className="w-3 h-3 mr-1" />}
+                                    Docstrings
+                                </Button>
+                                <Button
+                                    variant="outline" size="sm"
+                                    onClick={handleExportSarif}
+                                    disabled={!!generating || !(findings && findings.length)}
+                                    className="text-xs"
+                                    title="SARIF 2.1.0 — upload to GitHub code scanning, or feed your own dashboard"
+                                >
+                                    <Download className="w-3 h-3 mr-1" />
+                                    Export SARIF
+                                </Button>
                             </div>
+                            <p className="text-[11px] text-textMuted mt-3">
+                                Also available in Chat: <code>/ask-line file.js:214 why?</code> for a
+                                question about one line, and <code>/history</code> for what your team
+                                decided about this code before.
+                            </p>
                         </Card>
+
+                        {/* Suggested labels */}
+                        {generatedLabels && (
+                            <Card>
+                                <CardHeader className="pb-2">
+                                    <CardTitle className="text-sm">Suggested labels</CardTitle>
+                                </CardHeader>
+                                <CardContent className="space-y-2">
+                                    {generatedLabels.labels?.length ? (
+                                        <>
+                                            <div className="flex flex-wrap gap-1.5">
+                                                {generatedLabels.labels.map(l => (
+                                                    <span
+                                                        key={l}
+                                                        title={(generatedLabels.reasons?.[l] || []).join('; ')}
+                                                        className="px-2 py-0.5 text-[11px] rounded-full bg-primary/10 text-primary border border-primary/20"
+                                                    >
+                                                        {l}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                            {/* Every label names the files that produced it — a wrong
+                                                label is a rule to fix, not a prompt to re-roll. */}
+                                            <p className="text-[11px] text-textMuted">
+                                                Hover a label for why it was applied.
+                                            </p>
+                                            {generatedLabels.applied?.applied?.length ? (
+                                                <p className="text-xs text-green-600 dark:text-green-400">
+                                                    Applied: {generatedLabels.applied.applied.join(', ')}
+                                                </p>
+                                            ) : generatedLabels.applied?.error ? (
+                                                <p className="text-xs text-red-500">
+                                                    Could not apply: {generatedLabels.applied.error}
+                                                </p>
+                                            ) : (
+                                                <Button
+                                                    variant="outline" size="sm"
+                                                    onClick={() => handleSuggestLabels(true)}
+                                                    disabled={!!generating}
+                                                    className="text-xs"
+                                                >
+                                                    Apply to PR
+                                                </Button>
+                                            )}
+                                        </>
+                                    ) : (
+                                        <p className="text-xs text-textMuted">No labels matched this diff.</p>
+                                    )}
+                                    {generatedLabels.skipped?.length > 0 && (
+                                        <p className="text-[11px] text-amber-600 dark:text-amber-400">
+                                            {generatedLabels.skipped.length} custom label rule(s) unusable:{' '}
+                                            {generatedLabels.skipped.map(sk => `${sk.label} (${sk.reason})`).join('; ')}
+                                        </p>
+                                    )}
+                                </CardContent>
+                            </Card>
+                        )}
+
+                        {/* Generated docstrings */}
+                        {generatedDocstrings && (
+                            <Card>
+                                <CardHeader className="pb-2">
+                                    <CardTitle className="text-sm">Docstrings</CardTitle>
+                                </CardHeader>
+                                <CardContent className="space-y-3">
+                                    {generatedDocstrings.docstrings?.length ? (
+                                        generatedDocstrings.docstrings.map((d, i) => (
+                                            <div key={`${d.filename}:${d.name}:${i}`} className="space-y-1">
+                                                <p className="text-xs font-medium text-text">
+                                                    {d.filename}:{d.insertAtLine} — <code>{d.name}</code>
+                                                </p>
+                                                <pre className="text-[11px] bg-background border border-white/10 rounded-lg p-2 overflow-x-auto whitespace-pre">
+                                                    {d.docstring}
+                                                </pre>
+                                            </div>
+                                        ))
+                                    ) : (
+                                        <p className="text-xs text-textMuted">
+                                            {generatedDocstrings.message
+                                                || 'Nothing to document in this PR.'}
+                                        </p>
+                                    )}
+                                </CardContent>
+                            </Card>
+                        )}
 
                         {/* Generated PR Description */}
                         {generatedDescription && (
@@ -709,9 +889,9 @@ export function PRReviewInterface({
                         ) : (
                             <Card className="p-6 text-center">
                                 <CheckCircle className="w-12 h-12 mx-auto text-green-500 mb-3" />
-                                <p className="text-text">No findings detected</p>
+                                <p className="text-text">No genuine problems found</p>
                                 <p className="text-sm text-textMuted mt-1">
-                                    The code looks good based on static analysis
+                                    The reviewed changes passed RepoSpector's evidence and confidence checks.
                                 </p>
                             </Card>
                         )}

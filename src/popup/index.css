@@ -1589,6 +1589,10 @@ pre::-webkit-scrollbar-thumb:hover {
   white-space: nowrap;
 }
 
+.whitespace-pre {
+  white-space: pre;
+}
+
 .whitespace-pre-line {
   white-space: pre-line;
 }
@@ -2141,6 +2145,10 @@ pre::-webkit-scrollbar-thumb:hover {
   font-size: 10px;
 }
 
+.text-\[11px\] {
+  font-size: 11px;
+}
+
 .text-base {
   font-size: 1rem;
   line-height: 1.5rem;
@@ -2172,6 +2180,10 @@ pre::-webkit-scrollbar-thumb:hover {
 
 .font-medium {
   font-weight: 500;
+}
+
+.font-normal {
+  font-weight: 400;
 }
 
 .font-semibold {
@@ -2224,6 +2236,11 @@ pre::-webkit-scrollbar-thumb:hover {
   color: rgb(251 191 36 / var(--tw-text-opacity, 1));
 }
 
+.text-amber-600 {
+  --tw-text-opacity: 1;
+  color: rgb(217 119 6 / var(--tw-text-opacity, 1));
+}
+
 .text-blue-300 {
   --tw-text-opacity: 1;
   color: rgb(147 197 253 / var(--tw-text-opacity, 1));
@@ -2266,6 +2283,11 @@ pre::-webkit-scrollbar-thumb:hover {
 .text-green-500 {
   --tw-text-opacity: 1;
   color: rgb(34 197 94 / var(--tw-text-opacity, 1));
+}
+
+.text-green-600 {
+  --tw-text-opacity: 1;
+  color: rgb(22 163 74 / var(--tw-text-opacity, 1));
 }
 
 .text-orange-500 {
@@ -2738,5 +2760,15 @@ pre::-webkit-scrollbar-thumb:hover {
 @media (prefers-color-scheme: dark) {
   .dark\:bg-white\/25 {
     background-color: rgb(255 255 255 / 0.25);
+  }
+
+  .dark\:text-amber-400 {
+    --tw-text-opacity: 1;
+    color: rgb(251 191 36 / var(--tw-text-opacity, 1));
+  }
+
+  .dark\:text-green-400 {
+    --tw-text-opacity: 1;
+    color: rgb(74 222 128 / var(--tw-text-opacity, 1));
   }
 }

@@ -90,8 +90,17 @@ export class ReviewCrossRepoService {
     async _discoverIndexedRepos(currentRepoId, max = 5) {
         try {
             const ids = await this._listIndexedRepos();
+            const current = String(currentRepoId ?? '');
             return (ids || [])
-                .filter(id => id && id !== currentRepoId)
+                // The real store (`VectorStore.getAllRepoIds`) hands back
+                // `{repoId, chunksCount}` objects, not bare strings — only the
+                // test doubles returned strings, so this path shipped comparing
+                // an object to a repoId (never equal, so the repo under review
+                // was walked against itself) and rendering it into progress text
+                // as "Checking [object Object]...". Normalise both shapes here.
+                .map(entry => (entry && typeof entry === 'object' ? entry.repoId : entry))
+                .map(id => String(id ?? ''))
+                .filter(id => id && id !== current)
                 .slice(0, max)
                 .map(repoId => ({ repoId, url: null, discovered: true }));
         } catch (e) {
@@ -100,6 +109,10 @@ export class ReviewCrossRepoService {
         }
     }
 
+    /**
+     * @returns {Promise<Array<{repoId:string}|string>>} the vector store returns
+     * `{repoId, chunksCount}` entries; `_discoverIndexedRepos` normalises either shape.
+     */
     async _defaultListIndexedRepos() {
         const store = this.vectorStore;
         if (!store?.getAllRepoIds) return [];
@@ -264,8 +277,8 @@ export class ReviewCrossRepoService {
     /**
      * Promote cross-repo impact into actual FINDINGS, not just narrative.
      *
-     * A markdown section at the bottom of the summary is read by nobody. Bastion
-     * emits these as `code_feedback` entries tagged
+     * A markdown section at the bottom of the summary is read by nobody. These
+     * are emitted as findings tagged
      * `rule: "cross-repo-coupling:<consumer_repo>"` precisely so they land in the
      * reviewer's face — "you changed this proto and service X still reads the old
      * field" is the single highest-value finding a multi-repo reviewer can
@@ -310,8 +323,8 @@ export class ReviewCrossRepoService {
                     category: 'architecture',
                     phase: 'deep',
                     source: 'cross-repo',
-                    // Tag mirrors Bastion's so downstream dedupe can recognise
-                    // these as load-bearing and never collapse them.
+                    // A stable, recognisable tag so downstream dedupe treats
+                    // these as load-bearing and never collapses them.
                     rule: `cross-repo-coupling:${dep.repoId}`,
                     // Deliberately unanchored: the defect is in ANOTHER repo, so
                     // there is no line in this diff to attach it to. The posting

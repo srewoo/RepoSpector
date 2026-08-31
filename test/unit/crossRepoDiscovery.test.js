@@ -104,6 +104,44 @@ describe('discovery fallback', () => {
         expect(out.dependents.map(d => d.repoId)).toEqual(['acme/declared']);
     });
 
+    it('accepts the {repoId, chunksCount} shape the real vector store returns', async () => {
+        // VectorStore.getAllRepoIds() resolves objects, not strings. Treating an
+        // entry as a bare id made the progress line read "Checking [object
+        // Object]..." and let the repo under review be walked against itself.
+        const svc = makeService({
+            indexedRepos: [
+                { repoId: 'gh:acme/api', chunksCount: 900 },
+                { repoId: 'gh:acme/web', chunksCount: 120 },
+            ],
+            graphs: {
+                'gh:acme/web': graphWith({ save: [{ filePath: 'src/app.js', line: 12 }] }),
+            },
+        });
+
+        const messages = [];
+        const out = await svc.run({
+            prData: PR_DATA,
+            customConfig: {},
+            currentRepoId: 'gh:acme/api',
+            onProgress: (p) => messages.push(p.message),
+        });
+
+        expect(out.stats.discoveredRepos).toBe(1); // the current repo is excluded
+        expect(out.dependents.map(d => d.repoId)).toEqual(['gh:acme/web']);
+        expect(messages.join(' ')).not.toContain('[object Object]');
+    });
+
+    it('coerces a numeric repoId (GitLab project ids) to a string', async () => {
+        const svc = makeService({
+            indexedRepos: [{ repoId: 12345, chunksCount: 7 }],
+            graphs: { '12345': graphWith({ save: [{ filePath: 'a.js' }] }) },
+        });
+        const out = await svc.run({
+            prData: PR_DATA, customConfig: {}, currentRepoId: 'gh:acme/api',
+        });
+        expect(out.dependents.map(d => d.repoId)).toEqual(['12345']);
+    });
+
     it('survives a store that cannot list repos', async () => {
         const svc = makeService({
             listIndexedRepos: async () => { throw new Error('IndexedDB unavailable'); },

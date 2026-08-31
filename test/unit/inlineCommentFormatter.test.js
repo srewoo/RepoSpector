@@ -189,6 +189,59 @@ describe('formatInlineComments — noise control', () => {
     });
 });
 
+describe('buildCommentBody — credibility markers', () => {
+    it('links the rule id when the finding carries a rule URL', () => {
+        // A rule the reader can look up beats one they have to trust. This is the
+        // payload SARIF ingestion exists to deliver.
+        const body = buildCommentBody({
+            title: 'Tainted input reaches exec()',
+            severity: 'high',
+            ruleId: 'js/command-injection',
+            ruleUrl: 'https://codeql.github.com/help/js-command-injection/',
+        });
+        expect(body).toContain('[`js/command-injection`](https://codeql.github.com/help/js-command-injection/)');
+    });
+
+    it('falls back to a plain rule id with no URL', () => {
+        const body = buildCommentBody({ title: 'x', ruleId: 'my-rule' });
+        expect(body).toContain('(`my-rule`)');
+        expect(body).not.toContain('](');
+    });
+
+    it('attributes an external finding to the tool that found it', () => {
+        // A CodeQL finding must not read as this tool's opinion — the
+        // attribution is most of why it is credible.
+        const body = buildCommentBody({
+            title: 'Vulnerable dependency',
+            source: 'external',
+            attribution: 'Reported by Trivy',
+        });
+        expect(body).toContain('_Reported by Trivy._');
+    });
+
+    it('does not attribute RepoSpector\'s own findings to anyone else', () => {
+        const body = buildCommentBody({ title: 'x', source: 'static', attribution: 'Reported by X' });
+        expect(body).not.toContain('Reported by X');
+    });
+
+    it('says when the comment is not on the line the finding named', () => {
+        // Moving a comment onto a line nobody chose and staying quiet about it is
+        // a small dishonesty that compounds.
+        const body = buildCommentBody({
+            title: 'Off-by-one',
+            line: 11,
+            relocated: { from: 13, to: 11, distance: 2 },
+        });
+        expect(body).toMatch(/reported on line 13/);
+        expect(body).toMatch(/moved 2 line\(s\)/);
+    });
+
+    it('says nothing about relocation when the finding was not moved', () => {
+        const body = buildCommentBody({ title: 'x', line: 11 });
+        expect(body).not.toMatch(/moved/);
+    });
+});
+
 describe('buildCommentBody', () => {
     it('renders rationale, evidence, rule and a suggestion block', () => {
         const body = buildCommentBody({

@@ -33,8 +33,6 @@ import { FindingVerificationService } from '../../services/FindingVerificationSe
 import { FixRecommendationService } from '../../services/FixRecommendationService.js';
 import { SuggestionScorer } from '../../services/SuggestionScorer.js';
 import { ReviewGraphContextService } from '../../services/ReviewGraphContextService.js';
-import { scanAddedTodos, renderTodoSection } from '../../utils/todoScanner.js';
-import { suggestSplit, renderSplitSuggestion } from '../../utils/prSplitSuggester.js';
 import { MultiFinderService } from '../../services/MultiFinderService.js';
 import { ReviewReuseContextService } from '../../services/ReviewReuseContextService.js';
 import { RepoExplorerService } from '../../services/RepoExplorerService.js';
@@ -51,6 +49,15 @@ import { buildCanonicalFindings, countBlocking } from '../../utils/findingsFlatt
 import { REVIEW_MODE, IncrementalReviewService } from '../../services/IncrementalReviewService.js';
 import { resolveModel } from '../../utils/modelResolver.js';
 import { ConventionMiner } from '../../services/ConventionMiner.js';
+import { SymbolExtractor } from '../../services/SymbolExtractor.js';
+import { detectLanguageFromPath } from '../../utils/languageMap.js';
+import { CallBudget, PRIORITY } from '../../utils/callBudget.js';
+import { PriorFindingService } from '../../services/PriorFindingService.js';
+import { resolveConfig, explainOverrides } from '../../utils/configPrecedence.js';
+import { ExternalFindingsService } from '../../services/ExternalFindingsService.js';
+import { applyFilterMode, describeFilterMode } from '../../utils/findingFilterMode.js';
+import { decideFailure, describeFailLevel } from '../../utils/failLevel.js';
+import { describeTiering, settingsForStage } from '../../utils/modelTiers.js';
 import { CONVENTION_WARM_DEADLINE_MS } from '../../utils/constants.js';
 import {
     partitionForPosting,
@@ -59,6 +66,12 @@ import {
     renderPolicyNote
 } from '../../utils/reviewPostingPolicy.js';
 import { collectPriorBotComments, suppressAlreadyPosted } from '../../utils/commentDedupe.js';
+import { planSummary } from '../../utils/persistentSummary.js';
+import {
+    renderExternalSection,
+    renderProvenanceNote,
+    renderContextNote,
+} from '../../utils/reviewProvenance.js';
 import { stripFeedbackFooter } from '../../utils/feedbackFooter.js';
 import { ReviewFileContextService } from '../../services/ReviewFileContextService.js';
 import { buildIntentBlock } from '../../utils/reviewIntentContext.js';
@@ -71,6 +84,11 @@ import {
     renderPrimingContext
 } from '../../services/ReviewCacheService.js';
 import { detectPlatformOrGitHub, gitlabApiBase, githubApiBase, parseRepoRef } from '../../utils/gitHosts.js';
+import {
+    filterGenuineProblems,
+    buildPrecisionAnalysis,
+    summarizeGenuineProblems,
+} from '../../utils/genuineProblemGate.js';
 
 /**
  * Load `.repospector.yaml` for the repo a PR/MR belongs to.
@@ -296,6 +314,12 @@ function adaptOrchestratorReport(report) {
         source: f.source,
         phase: f.phase,
         codeSnippet: f.evidence || null,
+        description: f.description || '',
+        impact: f.impact || null,
+        confidence: f.confidence ?? null,
+        score: f.score ?? null,
+        scoreSource: f.scoreSource ?? null,
+        tool: f.tool ?? null,
     }));
     const analysisParts = [];
     if (report.summary?.deep)      analysisParts.push(`## Deep Review\n\n${report.summary.deep}`);
@@ -444,7 +468,7 @@ export function createPrReviewHandlers(svc) {
         return handleMultiPassPRReview({
             data: {
                 prUrl,
-                options: { focusAreas: ['security', 'bugs', 'performance', 'style'], enableESLint: true, enableSemgrep: true, enableDependency: true }
+                options: { focusAreas: ['security', 'bugs', 'performance'], enableESLint: true, enableSemgrep: true, enableDependency: true }
             }
         }, sendResponse, sender);
     }
@@ -546,7 +570,7 @@ export function createPrReviewHandlers(svc) {
                 const prLangs = detectLanguages(prData.files);
                 const standardsBlock = buildStandardsBlock(prLangs);
                 userPrompt = buildPRAnalysisPrompt(prData, {
-                    focusAreas: options.focusAreas || ['security', 'bugs', 'performance', 'style'],
+                    focusAreas: options.focusAreas || ['security', 'bugs', 'performance'],
                     maxFilesToReview: options.maxFiles || 100,
                     includeTestAnalysis: options.includeTestAnalysis !== false,
                     standardsBlock: { ...standardsBlock, langs: [...prLangs] },
@@ -944,7 +968,7 @@ export function createPrReviewHandlers(svc) {
                 }
                 systemPrompt = PR_ANALYSIS_SYSTEM_PROMPT;
                 userPrompt = buildPRAnalysisPrompt(prData, {
-                    focusAreas: options.focusAreas || ['security', 'bugs', 'performance', 'style'],
+                    focusAreas: options.focusAreas || ['security', 'bugs', 'performance'],
                     maxFilesToReview: options.maxFiles || 100,
                     includeTestAnalysis: options.includeTestAnalysis !== false,
                     ragContext,
@@ -1128,7 +1152,14 @@ export function createPrReviewHandlers(svc) {
                         pullRequestService: svc.pullRequestService,
                         adaptiveLearning: svc.adaptiveLearningService || null,
                     });
-                    await collector.collect(prUrl, { repoId });
+                    // `prState` lets the collector read a verdict from a thread
+                    // whose box nobody ticked — resolved on a merged PR is a weak
+                    // accept, still-open on a merged PR a weak reject. Most
+                    // threads never get a tick, so this is where most of the
+                    // ground truth actually comes from. Inferred rows are kept
+                    // out of the precision figure; see
+                    // FeedbackCollectorService._inferRow.
+                    await collector.collect(prUrl, { repoId, prState: prData?.state || null });
                 } catch (e) {
                     console.warn('Feedback collection failed (non-fatal):', e?.message);
                 }
@@ -1140,7 +1171,22 @@ export function createPrReviewHandlers(svc) {
             // Review-quality toggles (default ON), overridable via .repospector.yaml
             // `settings` block or the extension's reviewSettings. Everything below
             // runs on the user's own BYOK model — nothing leaves the machine.
-            const rqCfg = { ...(reviewSettings || {}), ...(customConfig?.settings || {}) };
+            // Layered resolution, not a spread: defaults → user Settings → org
+            // policy → .repospector.yaml → this call. The chain, what an org may
+            // pin, and why a repo config can never supply a credential are all
+            // documented in utils/configPrecedence.js. `rqCfg` keeps its name and
+            // shape so every existing `rqCfg.x !== false` test still reads the
+            // same value it did before.
+            const configResolution = resolveConfig({
+                user: reviewSettings || {},
+                org: settings.orgPolicy || null,
+                repo: customConfig?.settings || {},
+                call: options.settings || null,
+            });
+            const rqCfg = configResolution.config;
+            if (configResolution.rejected.length) {
+                for (const line of explainOverrides(configResolution)) console.warn(`⚙️  ${line}`);
+            }
             const graphContextEnabled = rqCfg.graphContext !== false && options.graphContext !== false;
             // Verification ALWAYS runs — but "verification" now means the
             // deterministic evidence gates (cited line absent, construct only on
@@ -1182,11 +1228,12 @@ export function createPrReviewHandlers(svc) {
             // what gets posted, which is a strict improvement over the old
             // severity-only sort — every self-declared `high` used to be
             // interchangeable, so the inline cap truncated arbitrarily.
-            // The DROP threshold is separately off by default (0): with the
-            // pipeline currently under-producing findings, gating on score
-            // would cut recall to buy precision we have not yet earned.
+            // Precision-first default: a finding must be valuable enough that a
+            // competent reviewer would want to interrupt the author with it.
+            // Repositories can raise this threshold, but cannot make an unscored
+            // or low-value candidate become a reported defect.
             const scoringEnabled = rqCfg.scoreFindings !== false && options.scoreFindings !== false;
-            const minScore = Number(rqCfg.minScore ?? options.minScore ?? 0);
+            const minScore = Math.max(7, Number(rqCfg.minScore ?? options.minScore ?? 7));
             // 'blocking' (default) | 'background' | false — see the indexing block below.
             // Without this, RAG + graph context are dark for any repo the user never
             // manually indexed.
@@ -1467,6 +1514,51 @@ export function createPrReviewHandlers(svc) {
 
             console.log(`📊 Static analysis found ${staticResult.totalFindings} issues`);
 
+            // ── External scanner findings ─────────────────────────────────────
+            //
+            // The team's OWN tools — CodeQL, golangci-lint, Trivy, Semgrep — read
+            // from GitHub check annotations (no configuration needed) or from a
+            // SARIF/rdjson artifact declared in `.repospector.yaml`. These are the
+            // highest-credibility findings a review can carry: they cannot be
+            // hallucinated, they carry a rule id and usually a documentation URL,
+            // and the reader already trusts the tool that produced them.
+            //
+            // Merged into `staticResult.findings` so the review prompt SEES them
+            // (the prompt asks the model to validate pre-detected findings and to
+            // find what they missed), and appended to the final set after the
+            // precision gate so a gate built for model output cannot suppress a
+            // scanner's match. Same reasoning as the cross-repo findings below.
+            let externalResult = null;
+            if (rqCfg.externalFindings !== false) {
+                try {
+                    const extSvc = new ExternalFindingsService({
+                        pullRequestService: svc.pullRequestService,
+                    });
+                    externalResult = await extSvc.collect({
+                        prUrl,
+                        prData,
+                        config: customConfig,
+                        reports: options.externalReports || [],
+                        options: { checkAnnotations: rqCfg.checkAnnotations !== false },
+                    });
+
+                    if (externalResult.findings.length) {
+                        staticResult.findings.push(...externalResult.findings);
+                        staticResult.totalFindings = staticResult.findings.length;
+                        console.log(
+                            `🛰️  External findings: ${externalResult.findings.length} from `
+                            + `${externalResult.stats.tools.join(', ') || 'CI'} `
+                            + `(${externalResult.stats.ok}/${externalResult.stats.sources} source(s) read)`
+                        );
+                    }
+                    for (const src of externalResult.sources.filter(x => !x.ok)) {
+                        console.warn(`🛰️  External source "${src.name}" not read: ${src.error}`);
+                    }
+                } catch (e) {
+                    console.warn('External findings (non-fatal):', e?.message);
+                }
+            }
+
             // Cache deterministic scores
             const reviewEffort = svc.pullRequestService.estimateReviewEffort(prData);
             if (!svc.prScoreCache.has(prUrl)) {
@@ -1614,6 +1706,38 @@ export function createPrReviewHandlers(svc) {
                 }
             }
 
+            // ── Declaration ranges, for hunk expansion ───────────────────────
+            //
+            // `dynamicContext` grows each hunk out to the function or class that
+            // encloses it, which needs to know where those start and end.
+            // SymbolExtractor already computes exactly that (it is the node layer
+            // of the knowledge graph) and is pure and synchronous, so it runs here
+            // over the content we just fetched rather than requiring a graph
+            // lookup — the graph may be stale or absent for a file this PR adds.
+            //
+            // Without ranges, expansion still works: it falls back to a fixed
+            // asymmetric window. So this is best-effort by construction.
+            let declarationsByFile = null;
+            if (fileContext && reviewSettings.enableDynamicContext !== false) {
+                declarationsByFile = new Map();
+                try {
+                    const extractor = new SymbolExtractor();
+                    for (const [filename, ctx] of fileContext.entries()) {
+                        if (!ctx?.fullContent) continue;
+                        const language = detectLanguageFromPath(filename);
+                        if (!language || language === 'unknown') continue;
+                        const symbols = extractor.extractSymbols(ctx.fullContent, language, filename);
+                        if (symbols?.length) declarationsByFile.set(filename, symbols);
+                    }
+                    console.log(
+                        `🔎 Declaration ranges for ${declarationsByFile.size} file(s) — hunks will expand to their enclosing component`
+                    );
+                } catch (e) {
+                    console.warn('Declaration extraction failed (non-fatal):', e?.message);
+                    declarationsByFile = null;
+                }
+            }
+
             // ── Phase 2: intent ──────────────────────────────────────────────
             // What was this change SUPPOSED to do? Ticket + acceptance criteria,
             // CI state, author's description. Pure/synchronous — cannot fail.
@@ -1683,6 +1807,8 @@ export function createPrReviewHandlers(svc) {
                 standardsText,
                 repoInstructions,
                 fileContext,
+                declarationsByFile,
+                dynamicContext: { enabled: reviewSettings.enableDynamicContext !== false },
                 intentBlock,
                 contextBudget,
                 incremental: reviewPlan?.mode === REVIEW_MODE.INCREMENTAL
@@ -1693,13 +1819,26 @@ export function createPrReviewHandlers(svc) {
                     }
                     : null
             };
+            // ── Model tiering ─────────────────────────────────────────────
+            //
+            // The heavy model reasons about code; the light one restates, ranks
+            // and formats. With no light model configured every stage resolves to
+            // the single model, so nothing changes for anyone who has not opted
+            // in — a tiering scheme that silently downgraded the review pass would
+            // trade accuracy for cost without asking. See utils/modelTiers.js.
+            const lightModel = rqCfg.lightModel || null;
+            const tieringNote = describeTiering({ model: multiPassModel, lightModel });
+            if (tieringNote) console.log(`🪶 ${tieringNote}`);
+
             const reviewSettings_ = {
                 provider: settings.provider,
                 model: multiPassModel,
-                apiKey: settings.apiKey
+                apiKey: settings.apiKey,
+                // Read by the stages listed as LIGHT in modelTiers.STAGE_TIERS.
+                lightModel,
             };
             const reviewOptions = {
-                focusAreas: options.focusAreas || ['security', 'bugs', 'performance', 'style'],
+                focusAreas: options.focusAreas || ['security', 'bugs', 'performance'],
                 maxConcurrent: options.maxConcurrent || 3,
                 maxFilesToReview: options.maxFiles || 50
             };
@@ -1709,6 +1848,44 @@ export function createPrReviewHandlers(svc) {
             // removed. `AegisClient` import + `apps/api` remain in the
             // repository for future re-enable; see docs/adr/0001-backend-service.md.
             let result;
+
+            // ── Cost ceiling for THIS review ─────────────────────────────────
+            //
+            // Armed on the shared LLMService and cleared in the `finally` below.
+            // The service is a singleton on the background worker, so leaving a
+            // budget attached would meter unrelated later work (chat, key
+            // validation) against a review's exhausted allowance.
+            //
+            // Every pass from here on reaches `LLMService.callLLM`, which refuses
+            // a call once the ceiling is hit. Refusal is not an outage: the stage
+            // that asked catches it, is skipped, and the review completes with
+            // what it has — reported in `reviewQuality.callBudget`.
+            const callBudget = CallBudget.fromSettings(
+                { maxAiCalls: reviewSettings.maxAiCalls },
+                {
+                    onRefusal: (r) => console.warn(
+                        `💸 Call budget refused stage "${r.stage}" (${r.requested} call(s), `
+                        + `${r.remaining} left of ${callBudget.limit})`
+                    ),
+                },
+            );
+            // Tolerant, but LOUD. An LLM client without the method (a test double,
+            // or a future replacement) must not crash the review — but a silently
+            // unmetered review is exactly the runaway this ceiling exists to
+            // prevent, so a missing method is reported rather than shrugged off.
+            if (typeof svc.llmService?.setCallBudget === 'function') {
+                svc.llmService.setCallBudget(callBudget);
+            } else {
+                console.warn(
+                    '⚠️  LLM client does not support setCallBudget — this review is NOT metered '
+                    + 'and "Max AI calls per review" will not be enforced.'
+                );
+            }
+            console.log(
+                callBudget.unlimited
+                    ? '💸 Call budget: unlimited (maxAiCalls = 0)'
+                    : `💸 Call budget: ${callBudget.limit} LLM call(s) for this review`
+            );
 
             if (!result) {
                 if (useOrchestrator) {
@@ -1741,6 +1918,8 @@ export function createPrReviewHandlers(svc) {
             let fixStats = null;
             let finderStats = null;
             let explorationStats = null;
+            let precisionStats = null;
+            let precisionDropped = [];
 
             // 1) Canonical flat list (LLM per-file findings + deterministic static)
             //
@@ -1879,23 +2058,6 @@ export function createPrReviewHandlers(svc) {
                 console.warn('Missing-test finder skipped:', e?.message);
             }
 
-            // 3a-bis) Sibling sweep — the instances of a flagged pattern that were
-            //     never reviewed. Runs AFTER verification on purpose: sweeping from
-            //     unverified findings would propagate a false positive into five
-            //     more. Output is advisory and kept out of `verifiedFindings`, so
-            //     it can never be posted as an inline comment or counted as a
-            //     finding — measured precision does not permit multiplying claims.
-            let siblingHits = [];
-            try {
-                const { sweepSiblings, diffsByFile } = await import('../../utils/siblingSweep.js');
-                siblingHits = sweepSiblings(verifiedFindings, diffsByFile(prData));
-                if (siblingHits.length) {
-                    console.log(`🧹 Sibling sweep: ${siblingHits.length} unflagged candidate(s) of already-flagged patterns`);
-                }
-            } catch (e) {
-                console.warn('Sibling sweep skipped:', e?.message);
-            }
-
             // 3b) Self-reflection scoring — how much is each finding WORTH SAYING?
             //     Verification settled whether findings are real; this ranks the
             //     survivors so the inline cap keeps the valuable ones.
@@ -2013,18 +2175,102 @@ export function createPrReviewHandlers(svc) {
                 console.warn('Cross-repo impact (non-fatal):', e?.message);
             }
 
-            // Sibling sweep output — rendered as ONE advisory block, never as
-            // inline comments. These are candidates the reviewer did not verify;
-            // posting them at each site would present unverified guesses with the
-            // same weight as adjudicated findings, which is the failure mode this
-            // whole pipeline is built to avoid.
-            if (siblingHits.length && typeof result.analysis === 'string') {
+            // Final precision gate. Candidate generation and specialist passes
+            // intentionally cast a wide net; only concrete, evidence-backed,
+            // high-confidence defects cross this boundary. This accepted array
+            // is the sole source for UI, verdict, metrics, cache, and posting.
+            const precisionResult = filterGenuineProblems(verifiedFindings, {
+                minConfidence: Math.max(0.8, Number(rqCfg.minConfidence ?? options.minConfidence ?? 0.8)),
+                minScore,
+            });
+            verifiedFindings = precisionResult.findings;
+            precisionStats = precisionResult.stats;
+            precisionDropped = precisionResult.dropped;
+            if (precisionStats.dropped) {
+                console.log(
+                    `🎯 Precision gate: kept ${precisionStats.kept}/${precisionStats.input}; `
+                    + `suppressed ${precisionStats.dropped} unproven or low-value candidate(s)`,
+                );
+            }
+
+            // External scanner findings survive the precision gate unconditionally.
+            //
+            // That gate exists to demand evidence from findings a model asserted.
+            // A CodeQL match is not an assertion — it is a scanner's output, with
+            // a rule id and a link. Judging it by the model-output standard would
+            // suppress the most credible findings in the review, and re-adding
+            // them here (rather than exempting them inside the gate) keeps the
+            // gate's own logic about one kind of input.
+            if (externalResult?.findings?.length) {
+                const alreadyThere = new Set(verifiedFindings.map(f => `${f.filePath || f.file}:${f.line}:${f.ruleId}`));
+                const readd = externalResult.findings.filter(
+                    f => !alreadyThere.has(`${f.filePath}:${f.line}:${f.ruleId}`)
+                );
+                if (readd.length) {
+                    verifiedFindings = [...verifiedFindings, ...readd];
+                    console.log(`🛰️  Re-added ${readd.length} external finding(s) after the precision gate`);
+                }
+            }
+
+            // ── Diff scope, stated ────────────────────────────────────────────
+            //
+            // One named policy for which lines a finding may be reported on,
+            // replacing the implicit union of assigned-hunk normalization,
+            // `commentableLines` and a ±5 snap. `added` is the default. A finding
+            // moved to a nearby line now says so — see utils/findingFilterMode.js.
+            let filterModeStats = null;
+            let filterModeDropped = [];
+            try {
+                const filtered = applyFilterMode(verifiedFindings, prData.files || [], {
+                    mode: rqCfg.filterMode,
+                });
+                verifiedFindings = filtered.kept;
+                filterModeStats = filtered.stats;
+                filterModeDropped = filtered.dropped;
+                console.log(`🎚️  ${describeFilterMode(filtered.stats)}`);
+            } catch (e) {
+                console.warn('Filter mode (non-fatal):', e?.message);
+            }
+
+            // ── Prior review history ──────────────────────────────────────────
+            //
+            // What this team decided about these rules on this code before. The
+            // ledger `FeedbackCollectorService` accumulates is the only ground
+            // truth RepoSpector has that a hosted competitor cannot copy, and
+            // until now it was consumed ONLY as a confidence number inside
+            // `AdaptiveLearningService` — the reviewer never saw "you rejected
+            // this rule twice on this file, most recently with 'intentional, see
+            // ADR-14'", which is decisive information.
+            //
+            // ANNOTATES, never filters. Suppression on the strength of past
+            // rejections belongs to the posting policy, where every other
+            // suppression decision already lives and is already reported; a
+            // service that silently dropped findings from this data would make
+            // "the review stopped mentioning X" untraceable.
+            let priorFindingStats = null;
+            let relatedPRs = [];
+            if (rqCfg.priorFindings !== false) {
                 try {
-                    const { renderSweep } = await import('../../utils/siblingSweep.js');
-                    const sweepSection = renderSweep(siblingHits);
-                    if (sweepSection) result.analysis += `\n\n---\n\n${sweepSection}\n`;
+                    const priorSvc = new PriorFindingService({
+                        feedbackCollector: new FeedbackCollectorService({
+                            pullRequestService: svc.pullRequestService,
+                            adaptiveLearning: svc.adaptiveLearningService || null,
+                        }),
+                    });
+                    const annotated = await priorSvc.annotate(verifiedFindings, { repoId });
+                    verifiedFindings = annotated.findings;
+                    priorFindingStats = annotated.stats;
+                    relatedPRs = await priorSvc.relatedPRs(prData, { repoId });
+
+                    if (annotated.stats.withHistory) {
+                        console.log(
+                            `🕰️  Prior history: ${annotated.stats.withHistory} finding(s) raised before `
+                            + `(${annotated.stats.suppressRecommended} the team has settled, `
+                            + `${annotated.stats.deprioritizeRecommended} leaning rejected)`
+                        );
+                    }
                 } catch (e) {
-                    console.warn('Sibling sweep render skipped:', e?.message);
+                    console.warn('Prior review history (non-fatal):', e?.message);
                 }
             }
 
@@ -2059,12 +2305,23 @@ export function createPrReviewHandlers(svc) {
                         { role: 'user', content: summaryPrompt }
                     ],
                     {
-                        provider: settings.provider,
-                        // The SAME model the review used. This read `settings.model`,
-                        // so a `.repospector.yaml` model pin applied to the review but
-                        // not to the summary — two different models in one result.
-                        model: multiPassModel,
-                        apiKey: settings.apiKey,
+                        // The review's model, or the light model when one is
+                        // configured: the summary restates findings that are
+                        // already fixed, cited and verified, so it is composition
+                        // rather than analysis. Still honours a
+                        // `.repospector.yaml` model pin — reading
+                        // `settings.model` here once meant the pin applied to the
+                        // review but not the summary, i.e. two models in one
+                        // result.
+                        ...settingsForStage({
+                            stage: 'summary',
+                            provider: settings.provider,
+                            model: multiPassModel,
+                            apiKey: settings.apiKey,
+                            lightModel,
+                        }),
+                        budgetStage: 'summary',
+                        budgetPriority: PRIORITY.OPTIONAL,
                         stream: false,
                         context: 'PR summary'
                     }
@@ -2083,7 +2340,7 @@ export function createPrReviewHandlers(svc) {
                     repoId,
                     prUrl,
                     findings: verifiedFindings.filter(f => f.source !== 'static'),
-                    staticFindings: staticResult.findings || [],
+                    staticFindings: verifiedFindings.filter(f => f.source === 'static'),
                     reviewType: reviewPlan?.mode === REVIEW_MODE.INCREMENTAL ? 'multi-pass-incremental' : 'multi-pass',
                     filesReviewed: filesForEngine.length
                 });
@@ -2118,8 +2375,19 @@ export function createPrReviewHandlers(svc) {
             const multiPassBlocking = countBlocking(verifiedFindings);
             const gateOutcome = describeGateOutcome(result);
             // A partial run still escalates on what it DID read; it just cannot approve.
-            const blockingVerdict = multiPassBlocking > 0 ? 'CHANGES_REQUESTED' : null;
-            const blockingEvent = multiPassBlocking > 0 ? 'REQUEST_CHANGES' : null;
+            //
+            // The merge gate is now a declared threshold rather than
+            // "any blocking finding". Default `high` reproduces the old
+            // behaviour exactly; a team can set `failLevel: none` to comment
+            // without ever blocking, and an org can pin it. See utils/failLevel.js.
+            //
+            // Verdict and event both come from ONE decision: they were two
+            // independent expressions of the same rule before, which is one edit
+            // away from contradicting each other.
+            const failDecision = decideFailure(verifiedFindings, { failLevel: rqCfg.failLevel });
+            const blockingVerdict = failDecision.verdict;
+            const blockingEvent = failDecision.reviewEvent;
+            console.log(`🚧 ${describeFailLevel(failDecision)}`);
             const multiPassVerdict = gateOutcome
                 ? (gateOutcome.partialOnly ? (blockingVerdict ?? gateOutcome.verdict) : gateOutcome.verdict)
                 : (blockingVerdict ?? 'APPROVED');
@@ -2132,6 +2400,48 @@ export function createPrReviewHandlers(svc) {
                     `reporting ${multiPassVerdict}/${multiPassReviewEvent} instead of an approval`
                 );
             }
+
+            const reviewWasSkipped = !!gateOutcome
+                && !gateOutcome.partialOnly
+                && gateOutcome.gateVerdict !== 'APPROVE';
+            result.analysis = buildPrecisionAnalysis(verifiedFindings, {
+                skipped: reviewWasSkipped,
+                partial: !!gateOutcome?.partialOnly,
+                reason: gateOutcome?.reason,
+            });
+            if (indexStatus === 'index-failed' || indexStatus === 'indexing-started') {
+                const contextCaveat = indexStatus === 'index-failed'
+                    ? `Reviewed without repository context because indexing failed${indexError ? `: ${indexError}` : ''}; this result is based on the diff and changed-file context only.`
+                    : 'Reviewed without repository context because indexing is still in progress; this result is based on the diff and changed-file context only.';
+                result.analysis += `\n\n> ⚠️ ${contextCaveat}`;
+            }
+
+            // Both kinds of DETERMINISTIC finding: our own analyzers and any
+            // ingested scanner report. This drives the panel's static-analysis
+            // view, and a CodeQL match belongs there — it is exactly the class of
+            // finding that view exists to show. They stay distinguishable by
+            // `source`/`attribution`, which is what the comment renderer uses.
+            const reportableStaticFindings = verifiedFindings.filter(
+                f => f.source === 'static' || f.source === 'external'
+            );
+            const precisionRiskScore = svc.staticAnalysisService?.confidenceScorer
+                ?.calculateRiskScore?.(verifiedFindings)
+                ?? (verifiedFindings.length === 0
+                    ? { score: 100, level: 'low', description: 'No genuine problems found' }
+                    : { score: null, level: 'unknown', description: 'Evidence-backed problems found' });
+            const precisionRecommendation = verifiedFindings.length === 0
+                ? {
+                    action: 'approve',
+                    verdict: 'Clean',
+                    reason: 'No genuine problems were found in the changed code',
+                    priority: [],
+                }
+                : {
+                    action: multiPassBlocking > 0 ? 'block' : 'review',
+                    verdict: multiPassBlocking > 0 ? 'Changes Requested' : 'Problems Found',
+                    reason: `${verifiedFindings.length} evidence-backed problem(s) found`,
+                    priority: ['Address the reported defects'],
+                };
 
             const responseData = {
                     reviewedAt: Date.now(),
@@ -2149,9 +2459,7 @@ export function createPrReviewHandlers(svc) {
                     // True only when the pipeline read NO code. A partial review read
                     // real files and may legitimately request changes on them, so it is
                     // not "skipped" — it is reported via `partial` instead.
-                    reviewSkipped: !!gateOutcome
-                        && !gateOutcome.partialOnly
-                        && gateOutcome.gateVerdict !== 'APPROVE',
+                    reviewSkipped: reviewWasSkipped,
                     partial: result._orchestrated?.meta?.partial ?? null,
                     aiSummary,
                     isMultiPass: true,
@@ -2164,12 +2472,53 @@ export function createPrReviewHandlers(svc) {
                         citation: citationStats,
                         scoring: scoringStats,
                         minScore,
+                        precision: precisionStats,
+                        precisionDropped,
                         multiFinder: finderStats,
                         repoExploration: explorationStats,
                         verification: verificationStats,
                         droppedFalsePositives: droppedFindings,
                         fixes: fixStats,
                         graphContextUsed: !!graphContextObj?.available,
+                        // What the ceiling actually cost this review: total spend,
+                        // per-stage breakdown, and any stage it refused. Without the
+                        // refusal list a budget-shortened review is indistinguishable
+                        // from a review that simply found less.
+                        callBudget: callBudget.snapshot(),
+                        callBudgetNote: callBudget.describeIfConstrained() || null,
+                        // Where each review setting came from, and anything a layer
+                        // asked for and did not get — so a toggle that had no effect
+                        // is explainable instead of mysterious.
+                        configProvenance: configResolution.provenance,
+                        configEnforced: configResolution.enforced,
+                        configRejected: configResolution.rejected,
+                        // Which of the team's own scanners were read, and what
+                        // each contributed — including the ones that failed. A
+                        // review that silently lost its CodeQL findings looks
+                        // identical to one where CodeQL found nothing, and the
+                        // second is a much stronger claim.
+                        externalFindings: externalResult
+                            ? { sources: externalResult.sources, stats: externalResult.stats }
+                            : null,
+                        // The diff scope that was applied, and everything it
+                        // dropped or moved.
+                        filterMode: filterModeStats,
+                        filterModeNote: filterModeStats ? describeFilterMode(filterModeStats) : null,
+                        filterModeDropped,
+                        // Why this review blocks, or why it does not.
+                        failLevel: {
+                            level: failDecision.level,
+                            blocks: failDecision.blocks,
+                            reason: failDecision.reason,
+                            blockingCount: failDecision.blockingFindings.length,
+                        },
+                        failLevelNote: describeFailLevel(failDecision),
+                        modelTiering: tieringNote || null,
+                        // What this team decided about these rules before, and the
+                        // PRs that touched the same files. Drives the "Prior review
+                        // history" section of the summary.
+                        priorFindings: priorFindingStats,
+                        relatedPRs,
                         crossRepo: crossRepoReport,
                         indexStatus,
                         indexError,
@@ -2194,10 +2543,11 @@ export function createPrReviewHandlers(svc) {
                     reviewUnits: result.reviewUnits,
                     processingTime: result.processingTime,
                     staticAnalysis: {
-                        findings: staticResult.findings,
-                        summary: staticResult.summary,
-                        riskScore: cachedScores.riskScore,
-                        recommendation: staticResult.recommendation
+                        findings: reportableStaticFindings,
+                        summary: summarizeGenuineProblems(reportableStaticFindings),
+                        unfilteredCount: staticResult.findings.length,
+                        riskScore: precisionRiskScore,
+                        recommendation: precisionRecommendation
                     },
                     prSummary: svc.pullRequestService.generatePRSummary(prData),
                     reviewEffort: cachedScores.reviewEffort,
@@ -2266,6 +2616,12 @@ export function createPrReviewHandlers(svc) {
                 success: false,
                 error: svc.getErrorMessage(error)
             });
+        } finally {
+            // The LLMService is a singleton on the worker: a budget left attached
+            // would meter the user's next chat message against this review's
+            // exhausted allowance. Cleared on every exit path, including a throw
+            // before the review ever started.
+            try { svc.llmService?.clearCallBudget?.(); } catch { /* ignore */ }
         }
     }
 
@@ -2314,7 +2670,7 @@ export function createPrReviewHandlers(svc) {
                 console.warn('Could not fetch PR for line validation / dedupe; posting without it:', e.message);
             }
 
-            // ── Posting policy (Bastion <findings_policy>) ────────────────────
+            // ── Posting policy ────────────────────────────────────────────────
             // Only BLOCKING findings earn an inline comment. Everything else is
             // reported in the summary body. At the precision this pipeline
             // currently measures, posting every finding inline trains reviewers
@@ -2396,25 +2752,37 @@ export function createPrReviewHandlers(svc) {
             const escalationSection = renderEscalationSection(policy.escalations || []);
             if (escalationSection) summaryBody += `\n${escalationSection}\n`;
 
-            // Two deterministic, token-free sections. Both are informational
-            // rather than findings: neither claims anything is wrong, so neither
-            // belongs in the findings pipeline or under the inline cap.
-            // `prDataForLines` may be null when the PR fetch above failed; both
-            // scans need the patches, so skip rather than emit empty sections.
-            if (prDataForLines) {
-                try {
-                    const todoSection = renderTodoSection(scanAddedTodos(prDataForLines));
-                    if (todoSection) summaryBody += `\n${todoSection}\n`;
-
-                    const splitSection = renderSplitSuggestion(suggestSplit(prDataForLines));
-                    if (splitSection) summaryBody += `\n${splitSection}\n`;
-                } catch (e) {
-                    console.warn('Informational sections (non-fatal):', e?.message);
-                }
-            }
-
             const policyNote = renderPolicyNote(policy.stats);
             if (policyNote) summaryBody += `\n${policyNote}\n`;
+
+            // ── Provenance ────────────────────────────────────────────────────
+            //
+            // Which of the team's own scanners were read, what scope the review
+            // held itself to, why it did or did not request changes, and anything
+            // the call ceiling cut. All of this previously existed only in
+            // `console.log` and `reviewQuality` — i.e. nowhere the person the
+            // review is written for would ever see it. A guarantee nobody can see
+            // is not a guarantee. See utils/reviewProvenance.js.
+            const rq = analysisResult?.reviewQuality || null;
+
+            const externalSection = renderExternalSection(rq?.externalFindings);
+            if (externalSection) summaryBody += `\n${externalSection}\n`;
+
+            // What this team decided about these rules before. Rendered from the
+            // findings themselves (each carries `priorFindings` after the review
+            // annotated it), so it stays in step with whatever survived the
+            // posting policy rather than describing findings that were cut.
+            const historySection = PriorFindingService.renderSection({
+                annotatedFindings: [...inlineFindings, ...(policy.suggestions || []), ...(policy.nitpicks || [])],
+                relatedPRs: analysisResult?.reviewQuality?.relatedPRs || [],
+            });
+            if (historySection) summaryBody += `\n${historySection}\n`;
+
+            const contextNote = renderContextNote(rq);
+            if (contextNote) summaryBody += `\n${contextNote}\n`;
+
+            const provenanceNote = renderProvenanceNote(rq);
+            if (provenanceNote) summaryBody += `\n${provenanceNote}\n`;
 
             const inlineComments = options.includeInlineComments !== false
                 ? svc.pullRequestService.formatInlineComments(
@@ -2445,13 +2813,64 @@ export function createPrReviewHandlers(svc) {
                 postEvent = 'COMMENT';
             }
 
+            // ── One summary per PR, updated in place ──────────────────────
+            //
+            // Every run used to post a NEW summary. A PR reviewed five times
+            // accumulated five, four of them describing code that no longer
+            // exists, and the reader had to work out which was current from
+            // timestamps. The previous body is folded into a collapsed history
+            // block rather than discarded, because replies are attached to it.
+            //
+            // The inline comments still go through `postReview` — those are
+            // per-line and already deduped by `commentDedupe`.
+            let summaryUpdated = null;
+            let summaryForPost = summaryBody;
+
+            if (reviewSettings.persistentSummary !== false) {
+                try {
+                    const existing = await svc.pullRequestService.fetchIssueComments(prUrl);
+                    const plan = planSummary({
+                        summary: summaryBody,
+                        comments: existing,
+                        // `prDataForLines` is this handler's freshly fetched PR
+                        // (see above); the review's own `prData` is not in scope
+                        // here. `analysisResult` carries the SHA the review
+                        // actually ran against, which is the more accurate label
+                        // when the head has moved since — so prefer it.
+                        headSha: analysisResult?.prData?.headSha
+                            || analysisResult?.incremental?.headSha
+                            || prDataForLines?.headSha
+                            || null,
+                    });
+
+                    if (plan.action === 'update') {
+                        await svc.pullRequestService.updateIssueComment(prUrl, plan.commentId, plan.body);
+                        summaryUpdated = plan.commentId;
+                        // Already posted, so the review call below must not repeat
+                        // it — but it still carries the inline comments and the
+                        // APPROVE/REQUEST_CHANGES event, which live on the review
+                        // object rather than on a comment.
+                        summaryForPost = '';
+                        console.log(`♻️  Updated the existing review summary (comment ${plan.commentId})`);
+                    } else {
+                        summaryForPost = plan.body;
+                    }
+                } catch (e) {
+                    // Soft: fall back to posting a fresh summary. A failed edit
+                    // must never cost the review.
+                    console.warn('Persistent summary unavailable, posting a new comment:', e?.message);
+                    summaryForPost = summaryBody;
+                }
+            }
+
             // Post the review
             const result = await svc.pullRequestService.postReview(prUrl, {
-                summary: summaryBody,
+                summary: summaryForPost,
                 inlineComments,
                 event: postEvent, // COMMENT, APPROVE, REQUEST_CHANGES
                 diffRefs: prDataForLines?.diffRefs || null
             });
+            if (summaryUpdated) result.summaryUpdatedInPlace = summaryUpdated;
 
             console.log(
                 `✅ Posted PR review: ${result.commentsPosted}/${result.commentsAttempted ?? inlineComments.length} inline comments, ` +

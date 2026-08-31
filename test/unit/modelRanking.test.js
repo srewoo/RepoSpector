@@ -12,6 +12,58 @@ const { rankModels } = require('../../src/services/ModelCatalogService.js');
 
 const ids = (list) => list.map(m => m.id);
 
+describe('rankModels — fine-tuned models', () => {
+    // A fine-tune is `ft:<base>:<org>::<suffix>`. Measured against a real key:
+    // 15 of the 22 models the family filter rejected were that org's OWN
+    // fine-tunes — the one category of model a team can be certain it wants, and
+    // the only one the dropdown could not show.
+    const FT = 'openai:ft:gpt-3.5-turbo-0613:acme-dev::88pNyu07';
+
+    it('ranks a fine-tune by its BASE model, not by its id suffix', () => {
+        // `split(':').pop()` yielded `88pNyu07`, whose leading digits read as
+        // "version 88" — so every fine-tune outranked the newest flagship and one
+        // of them took the ⭐.
+        const ranked = rankModels([
+            { id: FT, name: 'ft' },
+            { id: 'openai:gpt-5.6-sol', name: 'sol' },
+            { id: 'openai:gpt-4.1', name: '4.1' },
+        ]);
+
+        expect(ids(ranked)[0]).toBe('openai:gpt-5.6-sol');
+        expect(ranked[0].recommended).toBe(true);
+        // 3.5 base, so it sorts below 4.1.
+        expect(ids(ranked)[2]).toBe(FT);
+    });
+
+    it('never gives the star to a fine-tune when a newer base model exists', () => {
+        const ranked = rankModels([{ id: FT, name: 'ft' }, { id: 'openai:gpt-5', name: '5' }]);
+        expect(ranked.find(m => m.recommended).id).toBe('openai:gpt-5');
+    });
+
+    it('orders two fine-tunes by their own base versions', () => {
+        const ranked = rankModels([
+            { id: 'openai:ft:gpt-3.5-turbo-0613:acme::a', name: 'old' },
+            { id: 'openai:ft:gpt-4.1-mini:acme::b', name: 'new' },
+        ]);
+        expect(ids(ranked)[0]).toBe('openai:ft:gpt-4.1-mini:acme::b');
+    });
+
+    it('does not mistake a fine-tune for a dated snapshot', () => {
+        // `ft:gpt-3.5-turbo-0613:...` contains no trailing date, and the base's
+        // `-0613` must not be read as one.
+        const ranked = rankModels([{ id: FT, name: 'ft' }]);
+        expect(ids(ranked)).toEqual([FT]);
+    });
+
+    it('keeps ranking ids that contain no colon beyond the provider', () => {
+        const ranked = rankModels([
+            { id: 'openai:chat-latest', name: 'chat-latest' },
+            { id: 'openai:gpt-5.6-sol', name: 'sol' },
+        ]);
+        expect(ids(ranked)[0]).toBe('openai:gpt-5.6-sol');
+    });
+});
+
 describe('rankModels', () => {
     it('puts the newest version first, across families', () => {
         const out = rankModels([

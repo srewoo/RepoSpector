@@ -8,7 +8,7 @@
  * - Best Practices (25 points)
  */
 
-import { _validateSyntax, quickValidate } from './syntaxValidator.js';
+import { quickValidate } from './syntaxValidator.js';
 
 /**
  * Framework-specific patterns for test detection

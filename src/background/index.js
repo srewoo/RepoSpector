@@ -80,6 +80,7 @@ import { createIndexingHandlers } from './handlers/indexingHandlers.js';
 import { createChatHandlers } from './handlers/chatHandlers.js';
 import { createGeneratorHandlers } from './handlers/generatorHandlers.js';
 import { createPrReviewHandlers } from './handlers/prReviewHandlers.js';
+import { createPrToolHandlers } from './handlers/prToolHandlers.js';
 import { parseHostList } from './handlers/settingsHandlers.js';
 import { setGitLabHosts, getGitLabHosts, setGitHubHosts, getGitHubHosts } from '../utils/gitHosts.js';
 
@@ -1690,13 +1691,13 @@ Format your response in a developer-friendly way with code examples where approp
                             // Request came from popup - send to popup only
                             finalMessage.targetInstance = 'popup';
                             chrome.runtime.sendMessage(finalMessage).catch((error) => {
-                                console.debug('Could not send final chunk to popup:', error);
+                                console.warn('Could not send final chunk to popup:', error);
                             });
                         } else {
                             // Request came from content script - send to tab only
                             finalMessage.targetInstance = 'content';
                             chrome.tabs.sendMessage(tabId, finalMessage).catch((error) => {
-                                console.debug('Could not send final chunk to tab:', error);
+                                console.warn('Could not send final chunk to tab:', error);
                             });
                         }
                     }
@@ -1757,22 +1758,18 @@ Format your response in a developer-friendly way with code examples where approp
                                         // Add targetInstance to ensure popup picks it up
                                         chunkMessage.targetInstance = 'popup';
                                         chrome.runtime.sendMessage(chunkMessage).catch((error) => {
-                                            console.debug('Could not send chunk to popup:', error);
+                                            console.warn('Could not send chunk to popup:', error);
                                         });
                                     } else {
                                         // Request came from content script - send to tab only
                                         // Add targetInstance to ensure content script picks it up
                                         chunkMessage.targetInstance = 'content';
                                         chrome.tabs.sendMessage(tabId, chunkMessage).catch((error) => {
-                                            console.debug('Could not send chunk to tab:', error);
+                                            console.warn('Could not send chunk to tab:', error);
                                         });
                                     }
                                 }
 
-                                // Log progress every 10 chunks
-                                if (chunkCount % 10 === 0) {
-                                    console.log(`📊 Streaming progress: ${chunkCount} chunks, ${fullContent.length} chars`);
-                                }
                             }
                         } catch (e) {
                             console.warn('Failed to parse streaming chunk:', e);
@@ -2203,6 +2200,7 @@ const indexingHandlers = createIndexingHandlers(svc);
 const chatHandlers = createChatHandlers(svc);
 const generatorHandlers = createGeneratorHandlers(svc);
 const prReviewHandlers = createPrReviewHandlers(svc);
+const prToolHandlers = createPrToolHandlers(svc);
 
 registerHandlers({
     // Test generation — handleGenerateTests stays on the class (invoked by processQueue)
@@ -2217,6 +2215,9 @@ registerHandlers({
     ...contextHandlers,
     ...indexingHandlers,
     ...prReviewHandlers,
+    // /labels, /add-docs, /ask-line, /history — PR-scoped tools that are not the
+    // review itself.
+    ...prToolHandlers,
     ...threadHandlers,
     ...generatorHandlers,
     ...analysisHandlers,

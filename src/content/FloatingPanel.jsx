@@ -79,7 +79,7 @@ export function FloatingPanel({ onClose }) {
                 data: {
                     prUrl: window.location.href,
                     options: {
-                        focusAreas: ['security', 'bugs', 'performance', 'style'],
+                        focusAreas: ['security', 'bugs', 'performance'],
                         enableESLint: true,
                         enableSemgrep: true,
                         enableDependency: true,

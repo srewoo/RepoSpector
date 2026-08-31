@@ -40,6 +40,7 @@ import {
     buildToolResultMessages,
 } from '../utils/toolProtocol.js';
 import { numberLines } from '../utils/chunkLines.js';
+import { PRIORITY } from '../utils/callBudget.js';
 
 /** Tool definitions in the OpenAI shape; LLMService translates for Anthropic. */
 export const EXPLORER_TOOLS = Object.freeze([
@@ -241,6 +242,8 @@ export class RepoExplorerService {
                 provider: settings.provider,
                 model: settings.model,
                 apiKey: settings.apiKey,
+                budgetStage: 'explore',
+                budgetPriority: PRIORITY.OPTIONAL,
                 stream: false,
                 tools: EXPLORER_TOOLS,
             });
@@ -291,6 +294,8 @@ export class RepoExplorerService {
                     provider: settings.provider,
                     model: settings.model,
                     apiKey: settings.apiKey,
+                    budgetStage: 'explore',
+                    budgetPriority: PRIORITY.OPTIONAL,
                     stream: false,
                 });
                 usage.input += final?.usage?.input || 0;

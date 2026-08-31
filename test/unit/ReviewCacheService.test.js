@@ -164,7 +164,7 @@ describe('renderPrimingContext', () => {
         expect(md).toBe('');
     });
 
-    it('accepts the bastion-style code_feedback key as well as findings', () => {
+    it('accepts the code_feedback key as well as findings', () => {
         const md = renderPrimingContext({
             headSha: 'x',
             payload: { code_feedback: [{ relevant_file: 'a.go', line_number: 3, severity: 'blocking', suggestion: 'fix it' }] },

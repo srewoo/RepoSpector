@@ -1,5 +1,5 @@
 /**
- * CrossRepoService — Bastion's killer feature implemented for Aegis.
+ * CrossRepoService — cross-repo impact analysis, server-side.
  *
  * Given an MR's brief.shared_contracts + brief.changed_signatures, find
  * consumer repos and verify they don't break.

@@ -4,6 +4,12 @@ import { Button } from './ui/Button';
 import { Card, CardHeader, CardTitle, CardContent } from './ui/Card';
 import { Collapsible } from './ui/Collapsible';
 import { useTheme } from '../contexts/ThemeContext';
+import {
+    DEFAULT_MAX_AI_CALLS,
+    MIN_MAX_AI_CALLS,
+    MAX_MAX_AI_CALLS,
+    normalizeMaxAiCalls,
+} from '../../utils/callBudget.js';
 
 const LLM_PROVIDERS = {
     OPENAI: 'openai',
@@ -97,6 +103,15 @@ export function Settings({ onClose }) {
 
     // Review quality settings
     const [severityThreshold, setSeverityThreshold] = useState('medium');
+    // Cost ceiling. Held as a STRING so the field can be empty while typing —
+    // storing a number here forces a 0 the moment the user clears it, and 0 means
+    // "unlimited", i.e. backspacing the field would silently remove the cap.
+    const [maxAiCalls, setMaxAiCalls] = useState(String(DEFAULT_MAX_AI_CALLS));
+    const [enableDynamicContext, setEnableDynamicContext] = useState(true);
+    const [filterMode, setFilterMode] = useState('added');
+    const [failLevel, setFailLevel] = useState('high');
+    const [lightModel, setLightModel] = useState('');
+    const [persistentSummary, setPersistentSummary] = useState(true);
     const [groupFindings, setGroupFindings] = useState(true);
 
     // Analysis feature toggles
@@ -160,6 +175,14 @@ export function Settings({ onClose }) {
                     // Load review quality settings
                     if (settings.reviewSettings) {
                         setSeverityThreshold(settings.reviewSettings.severityThreshold || 'medium');
+                        setMaxAiCalls(String(
+                            settings.reviewSettings.maxAiCalls ?? DEFAULT_MAX_AI_CALLS
+                        ));
+                        setEnableDynamicContext(settings.reviewSettings.enableDynamicContext !== false);
+                        setFilterMode(settings.reviewSettings.filterMode || 'added');
+                        setFailLevel(settings.reviewSettings.failLevel || 'high');
+                        setLightModel(settings.reviewSettings.lightModel || '');
+                        setPersistentSummary(settings.reviewSettings.persistentSummary !== false);
                         setGroupFindings(settings.reviewSettings.groupRelatedFindings !== false);
                         setEnableOSV(settings.reviewSettings.enableOSV !== false);
                         setEnableEOL(settings.reviewSettings.enableEOL !== false);
@@ -330,6 +353,17 @@ export function Settings({ onClose }) {
                         githubEnterpriseHosts: githubEnterpriseHosts,
                         reviewSettings: {
                             severityThreshold: severityThreshold,
+                            // Normalized on the way in, not on the way out: the
+                            // stored value is then always a usable ceiling, so a
+                            // typo cannot reach the pipeline as "unlimited".
+                            maxAiCalls: normalizeMaxAiCalls(maxAiCalls),
+                            enableDynamicContext: enableDynamicContext,
+                            filterMode: filterMode,
+                            failLevel: failLevel,
+                            // Empty means "no tiering" — every stage uses the one
+                            // model, which is the conservative default.
+                            lightModel: lightModel.trim() || null,
+                            persistentSummary: persistentSummary,
                             groupRelatedFindings: groupFindings,
                             enableOSV: enableOSV,
                             enableEOL: enableEOL,
@@ -855,6 +889,147 @@ export function Settings({ onClose }) {
                         </select>
                         <p className="text-xs text-textMuted">
                             Filter out low-priority findings to reduce noise
+                        </p>
+                    </div>
+
+                    <div className="space-y-2">
+                        <label className="text-sm font-medium text-text" htmlFor="max-ai-calls">
+                            Max AI Calls per Review
+                        </label>
+                        <input
+                            id="max-ai-calls"
+                            type="number"
+                            min={MIN_MAX_AI_CALLS}
+                            max={MAX_MAX_AI_CALLS}
+                            step={1}
+                            value={maxAiCalls}
+                            onChange={(e) => setMaxAiCalls(e.target.value)}
+                            onBlur={() => setMaxAiCalls(String(normalizeMaxAiCalls(maxAiCalls)))}
+                            placeholder={String(DEFAULT_MAX_AI_CALLS)}
+                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+                        />
+                        <p className="text-xs text-textMuted">
+                            A hard ceiling on how many model calls one review may make. A large PR is
+                            split into review units and each surviving finding is verified and scored,
+                            so the call count multiplies — this is what stops a single review from
+                            costing far more than you expected. When the ceiling is reached the review
+                            still completes and tells you which passes it skipped.
+                            {' '}<strong>0 means no limit.</strong> Default {DEFAULT_MAX_AI_CALLS}.
+                        </p>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                            <p className="text-sm font-medium text-text">Expand Hunks to Enclosing Function</p>
+                            <p className="text-xs text-textMuted">
+                                For large files, show each change grown out to the function or class
+                                that contains it, instead of pasting the whole file. Cheaper, and it
+                                keeps the model&apos;s attention on the changed component.
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => setEnableDynamicContext(!enableDynamicContext)}
+                            className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
+                                enableDynamicContext ? 'bg-primary' : 'bg-black/25 dark:bg-white/25'
+                            }`}
+                        >
+                            <span
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white shadow-sm ring-1 ring-black/10 rounded-full transition-transform ${
+                                    enableDynamicContext ? 'translate-x-5' : 'translate-x-0'
+                                }`}
+                            />
+                        </button>
+                    </div>
+
+                    <div className="space-y-2">
+                        <label className="text-sm font-medium text-text" htmlFor="filter-mode">
+                            Where Findings May Be Reported
+                        </label>
+                        <select
+                            id="filter-mode"
+                            value={filterMode}
+                            onChange={(e) => setFilterMode(e.target.value)}
+                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+                        >
+                            <option value="added">Lines this PR added (strictest)</option>
+                            <option value="diff_context">Added lines and their diff context</option>
+                            <option value="file">Anywhere in the changed files</option>
+                            <option value="nofilter">Anywhere (no filtering)</option>
+                        </select>
+                        <p className="text-xs text-textMuted">
+                            A finding outside this scope is not reported. A finding just outside it is
+                            moved to the nearest line in scope <em>and says so</em>, rather than being
+                            moved silently. Widening this surfaces issues in code you did not touch —
+                            useful for an audit, noisy for a review.
+                        </p>
+                    </div>
+
+                    <div className="space-y-2">
+                        <label className="text-sm font-medium text-text" htmlFor="fail-level">
+                            Block the Merge At
+                        </label>
+                        <select
+                            id="fail-level"
+                            value={failLevel}
+                            onChange={(e) => setFailLevel(e.target.value)}
+                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+                        >
+                            <option value="none">Never — always comment, never request changes</option>
+                            <option value="critical">Critical findings only</option>
+                            <option value="high">High and critical (default)</option>
+                            <option value="medium">Medium and above</option>
+                            <option value="any">Any finding at all</option>
+                        </select>
+                        <p className="text-xs text-textMuted">
+                            Separate from the severity threshold above: that decides what gets
+                            <em> reported</em>, this decides what turns the review into
+                            &ldquo;changes requested&rdquo;. Previously the two were the same knob, so
+                            the only way to stop blocking on a finding was to stop seeing it.
+                        </p>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                            <p className="text-sm font-medium text-text">One Summary Comment per PR</p>
+                            <p className="text-xs text-textMuted">
+                                Update the existing review summary instead of adding a new comment each
+                                run, so the PR always shows the current review rather than a stack of
+                                stale ones. The previous review is kept, collapsed, because replies are
+                                attached to it.
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => setPersistentSummary(!persistentSummary)}
+                            className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
+                                persistentSummary ? 'bg-primary' : 'bg-black/25 dark:bg-white/25'
+                            }`}
+                        >
+                            <span
+                                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white shadow-sm ring-1 ring-black/10 rounded-full transition-transform ${
+                                    persistentSummary ? 'translate-x-5' : 'translate-x-0'
+                                }`}
+                            />
+                        </button>
+                    </div>
+
+                    <div className="space-y-2">
+                        <label className="text-sm font-medium text-text" htmlFor="light-model">
+                            Light Model <span className="text-textMuted font-normal">(optional)</span>
+                        </label>
+                        <input
+                            id="light-model"
+                            type="text"
+                            value={lightModel}
+                            onChange={(e) => setLightModel(e.target.value)}
+                            placeholder="e.g. openai:gpt-4.1-mini — leave empty to use one model everywhere"
+                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+                        />
+                        <p className="text-xs text-textMuted">
+                            A cheaper model for the stages that restate rather than analyse — summary,
+                            re-ranking, fix wording, docstrings. The review and verification passes
+                            always use your main model. Include the provider prefix
+                            (<code>openai:</code>, <code>anthropic:</code>&hellip;) if it differs from
+                            your main provider.
                         </p>
                     </div>
 

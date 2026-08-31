@@ -33,21 +33,24 @@
  * `context.contextBudget` on the same real `MultiPassReviewEngine.execute()`
  * call path production uses (see `prReviewHandlers.js`). That part is real.
  *
- * But a legacy-vs-default run through this harness is currently INERT:
- * `eval/run.js` builds its review context as just `{ staticFindings }` — it
- * supplies no `ragContext`, no `graphContext`, and no `fileContext`. Every key
- * that differs between `LEGACY_BUDGET` and `DEFAULT_BUDGET` governs precisely
- * those three things (RAG chunk count/size, graph context size, full-file
- * fetch count, caller-source inlining). With none of them present, `legacy`
- * and `default` build byte-identical prompts and a diff between the two runs
- * is guaranteed to be null — not evidence the raise is safe, just evidence
- * the harness didn't test it.
+ * A legacy-vs-default run is now PARTIALLY meaningful, and the boundary matters:
  *
- * For this A/B to mean anything, the harness has to build `ragContext`,
- * `graphContext`, and `fileContext` the way `prReviewHandlers` does before
- * calling the engine — i.e. reach context parity with production. That is
- * out of scope here: it needs live indexing/network access this harness
- * doesn't have.
+ *   fileContext   SUPPLIED. `eval/fetch-content.js` caches each case's
+ *                 post-change files into the corpus and `eval/run.js` builds the
+ *                 same `fileContext` Map (plus `declarationsByFile`) that
+ *                 `prReviewHandlers` does. So the keys governing full-file
+ *                 context and hunk expansion are genuinely exercised, and an A/B
+ *                 over them is real.
+ *
+ *   ragContext    STILL ABSENT. Both need an INDEXED repository — embeddings,
+ *   graphContext  BM25, a tree-sitter graph over the whole tree — and the
+ *                 harness has only the changed files. Building a graph from
+ *                 those alone would be a graph of 12 files presented as a graph
+ *                 of the repo, which is a worse lie than the absence.
+ *
+ * So `ragChunks`, `ragChunkChars` and `graphContextChars` still produce a null
+ * diff between the profiles. Read a profile comparison as a statement about file
+ * context, not about retrieval.
  *
  * A sharper point for anyone chasing the attention-dilution hypothesis in the
  * caveat above: that hypothesis is about large FILES, and the knob that
@@ -56,6 +59,17 @@
  * only changes the count once full files are already being fetched. So
  * legacy-vs-default was never the right experiment for dilution, even with
  * context parity. Full-file-context on-versus-off is.
+ *
+ * That experiment is now runnable, and it is the one to run:
+ *
+ *   node eval/fetch-content.js --corpus eval/corpus/large-files.json
+ *   node eval/run.js --corpus eval/corpus/large-files.json                      # expansion on
+ *   node eval/run.js --corpus eval/corpus/large-files.json --no-dynamic-context  # whole files
+ *
+ * `--no-dynamic-context` pastes whole files where expansion would have windowed
+ * them, which is precisely the dilution question. Check `patchesAligned` in the
+ * run summary first: zero means the cached content has drifted from the cached
+ * patches and both runs silently measured patch-only.
  */
 
 /** What shipped before this module existed. Kept exactly, as the A/B baseline. */

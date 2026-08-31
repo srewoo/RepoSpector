@@ -1,5 +1,5 @@
 /**
- * ReviewOrchestrator — Bastion-style two-phase MR review pipeline.
+ * ReviewOrchestrator — two-phase MR review pipeline.
  *
  *   evaluateSkipRules   →  short-circuit verdicts (DOCS_ONLY, oversized, draft, ...)
  *   MRChunker.chunkMR   →  split + build shared mr_brief
@@ -29,7 +29,7 @@ import { liftEngineFindings } from './engineContract.js';
 import { normalizeFindingKeys } from './FindingsNormalizer.js';
 import { parsePatchHunks } from '../utils/patchLines.js';
 
-/** Bastion ships 240s per chunk; match it. */
+/** Wall-clock cap per chunk. */
 export const DEFAULT_CHUNK_TIMEOUT_MS = 240_000;
 
 /**
@@ -57,14 +57,14 @@ export function withTimeout(promise, ms, label) {
 /**
  * Fold per-chunk narratives into one review summary.
  *
- * Bastion runs a cheap Haiku call for this; we do it deterministically instead.
- * A BYOK user pays for every call, and the failure this fixes is structural
+ * Done deterministically rather than with a cheap extra LLM call: a BYOK user
+ * pays for every call, and the failure this fixes is structural
  * rather than stylistic: N chunk narratives concatenated produce N copies of
  * "## Summary", N verdict paragraphs, and a reader who cannot tell where one
  * chunk's opinion ends and the next begins.
  *
- * Bastion's Phase 8 reached the same conclusion — it dropped the per-chunk
- * `### Chunk N/total` headers in favour of one unified `## Code Review` section.
+ * Hence one unified `## Code Review` section rather than per-chunk
+ * `### Chunk N/total` headers.
  *
  * @param {string[]} narratives - per-chunk analysis text, in chunk order
  * @returns {string}
@@ -225,7 +225,7 @@ export class ReviewOrchestrator {
             };
 
             try {
-                // Per-chunk wall-clock cap (Bastion ships 240s). One pathological
+                // Per-chunk wall-clock cap. One pathological
                 // chunk — a huge generated file, a model that stalls mid-stream —
                 // must not hold the whole review hostage. The chunk is recorded as
                 // failed and the remaining chunks still produce a review.

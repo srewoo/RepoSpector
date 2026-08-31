@@ -1,7 +1,7 @@
 /**
  * MRChunker — split an MR into chunks with a shared mr_brief.
  *
- * Bastion's docs/Chunking_Design.md teaches: when you split an MR for
+ * The problem this solves: when you split an MR for
  * parallel review, each chunk loses cross-chunk visibility. The fix is a
  * `mr_brief` — a compact summary of cross-cutting changes (removed exports,
  * signature changes, shared contracts, renames) extracted ONCE from the

@@ -90,7 +90,7 @@ describe('withTimeout', () => {
         await expect(withTimeout(Promise.resolve(1), 0, 'x')).resolves.toBe(1);
     });
 
-    it('defaults to the Bastion-matching 240s', () => {
+    it('defaults to 240s', () => {
         expect(DEFAULT_CHUNK_TIMEOUT_MS).toBe(240_000);
     });
 });

@@ -2,6 +2,8 @@
 
 import { formatPatchWithLineNumbers } from './patchLines.js';
 import { resolveBudget } from './reviewContextBudget.js';
+import { expandPatch, shouldPreferExpansion } from './dynamicContext.js';
+import { stripDeletionOnlyHunks, renderOmittedFiles } from './diffBudget.js';
 
 /**
  * Language-specific review rules injected into per-file prompts
@@ -298,8 +300,15 @@ Report every real issue found in Steps 1-2. Each finding MUST have:
 - A specific fix (not "consider using X" but "replace X with Y")
 
 ## What Goes In Findings vs TestCoverage
-- **findings array**: ACTUAL CODE DEFECTS — deprecated APIs, bugs, security issues, behavioral changes, incorrect API usage, naming inconsistencies. These are problems IN the code being reviewed.
+- **findings array**: ONLY observable code defects introduced by the change — bugs, exploitable security issues, breaking behavioral changes, and incorrect API usage with a concrete failure outcome.
 - **testCoverage field**: Missing test scenarios. NEVER put "missing tests" in findings.
+
+## Precision Contract
+- An empty findings array is a successful, normal review result. Never invent a finding to make the review look useful.
+- Do not report style, naming, formatting, documentation, maintainability preferences, speculative future risks, generic best practices, or optional refactors.
+- Do not report missing tests as defects.
+- Every finding must identify the exact changed line, quote the relevant code, and state a concrete input/state/sequence that produces an observable wrong outcome.
+- If the evidence in this diff cannot prove the problem, omit it. A possible concern is not a finding.
 
 ## Severity Guide
 - **critical**: Will cause data loss, security breach, or crash in production
@@ -330,12 +339,12 @@ Assign confidence honestly: 0.9+ for certain issues, 0.6-0.8 for likely issues, 
 Focus on CHANGED lines (+ lines), but use context lines to understand intent.
 Every diff is presented as numbered hunks: the number at the start of each line
 in \`__new hunk__\` IS that line's number in the file. Report it verbatim.
-If the code is genuinely clean with no issues, return an empty findings array — but this should be RARE. Most real-world diffs have at least one issue.`;
+If the code is clean or no defect can be proven from the supplied evidence, return an empty findings array.`;
 
 export const AGGREGATION_SYSTEM_PROMPT = `You are RepoSpector performing the final synthesis of a multi-pass Pull Request review. You received structured per-file findings from individual file reviews.
 
 ## Your Job
-1. PRESERVE ALL CODE DEFECTS: Every finding from per-file reviews that describes a real code issue (deprecated API, bug, security, behavioral change, incorrect API usage) MUST appear in your output. Do NOT drop or minimize per-file findings.
+1. PRESERVE ONLY PROVEN DEFECTS: Keep a per-file finding only when it identifies a concrete, observable failure supported by the supplied code. Drop style, optional improvements, missing-test complaints, and speculative risks.
 2. DEDUPLICATE: If the exact same issue appears in multiple files, merge them (keep highest severity/confidence). But different issues in different files are NOT duplicates.
 3. CROSS-REFERENCE: Find issues the per-file reviews missed:
    - Interface contract violations (signature changed in one file, callers not updated)
@@ -345,7 +354,7 @@ export const AGGREGATION_SYSTEM_PROMPT = `You are RepoSpector performing the fin
 5. FORMAT the output in the exact markdown structure specified.
 
 ## Critical Rule
-If per-file reviews found N total findings with severity >= medium, your output MUST contain at least N findings in the Critical/Warnings sections (after deduplication). Do NOT silently drop findings or convert code defects into suggestions.`;
+It is correct to return zero findings. Never preserve a claim merely to match the number emitted by an earlier pass.`;
 
 // ─── Prompt Builders ───
 
@@ -392,7 +401,24 @@ export function buildPerFileReviewPrompt(unit, context = {}) {
         fileContext = null,   // Map<filename, {fullContent, testPath, testContent, testFileMissing}>
         intentBlock = '',     // rendered Jira / pipeline / description context
         contextBudget = null, // see reviewContextBudget.js; defaults when absent
+        // Per-file declaration ranges ({filename -> [{startLine, endLine}]}) used
+        // to expand each hunk to its enclosing function/class. Absent for a
+        // caller that has not run SymbolExtractor; expansion then falls back to a
+        // fixed asymmetric window. See utils/dynamicContext.js.
+        declarationsByFile = null,
+        dynamicContext = null, // overrides for DYNAMIC_CONTEXT_DEFAULTS
+        // Files this review unit changed but is NOT showing (dropped by the
+        // diff budget). Rendered by name so the model cannot conclude that a
+        // caller was never updated. See utils/diffBudget.js.
+        omittedFiles = [],
+        // Called once with what the diff section actually did, so the review's
+        // stats block can report expansion/omission without this builder having
+        // to change its return shape (an array of cache-marked parts).
+        onContextStats = null,
     } = context;
+
+    /** Filled in as files are rendered; surfaced on the returned prompt object. */
+    const contextStats = { expandedFiles: 0, fullFileFiles: 0, deletionOnlyHunksRemoved: 0 };
 
     const budget = resolveBudget({ overrides: contextBudget || undefined });
 
@@ -427,8 +453,8 @@ export function buildPerFileReviewPrompt(unit, context = {}) {
 
     // ── Section 1b: Intent — what this change is SUPPOSED to do ──
     // Without this the reviewer can only ask "is this code correct?", never
-    // "is this the change that was asked for?". Bastion treats an unmet
-    // acceptance criterion as a legitimate finding; so do we.
+    // "is this the change that was asked for?". An unmet acceptance criterion
+    // is a legitimate finding.
     if (intentBlock && String(intentBlock).trim()) {
         preamble += `${String(intentBlock).trim()}\n\n---\n\n`;
     }
@@ -550,12 +576,66 @@ ${String(graphContext).slice(0, budget.graphContextChars)}
 
 `;
 
-        // Full post-change content, when we could fetch it. This is the single
-        // biggest context upgrade in the pipeline: a hunk cannot answer "does
-        // this break the caller below", "is this the right abstraction", or
-        // "is this state already tracked elsewhere in the file".
-        if (ctx?.fullContent) {
-            rest += `#### Full file after the change${ctx.truncated ? ' (truncated to fit budget)' : ''}
+        // ── How much of this file the model sees ──
+        //
+        // Two strategies, chosen per file rather than globally:
+        //
+        //   Small file  → the WHOLE post-change file. A hunk cannot answer "does
+        //                 this break the caller below", "is this the right
+        //                 abstraction", or "is this state already tracked
+        //                 elsewhere in the file", and for a few hundred lines the
+        //                 full file is both cheap and strictly more informative.
+        //
+        //   Large file  → the hunks EXPANDED to their enclosing declarations.
+        //                 This is the case `reviewContextBudget.js` documents:
+        //                 misses concentrate in large files, read as attention
+        //                 dilution. Pasting 2,000 lines around a 12-line change
+        //                 is most of that haystack. See utils/dynamicContext.js.
+        //
+        // Expansion is attempted first because its outcome decides whether the
+        // full file is still needed; when it is refused (content that does not
+        // verifiably match the patch — a stale ref or a truncated fetch) the file
+        // falls back to whatever it would have shown before.
+        const declarations = declarationsByFile?.get?.(f.filename)
+            || declarationsByFile?.[f.filename]
+            || [];
+
+        const preferExpansion = ctx?.fullContent
+            && shouldPreferExpansion(ctx.fullContent)
+            && !ctx.truncated;
+
+        let renderPatch = f.patch;
+        // Per-file, NOT the cumulative counter: a unit can hold several files, and
+        // reading the counter here would deny the full-file fallback to every file
+        // after the first one that expanded.
+        let didExpand = false;
+
+        if (preferExpansion) {
+            const expansion = expandPatch({
+                patch: f.patch,
+                filename: f.filename,
+                fileContent: ctx.fullContent,
+                declarations,
+                options: dynamicContext || undefined,
+            });
+            if (expansion.expanded) {
+                renderPatch = expansion.patch;
+                didExpand = true;
+                contextStats.expandedFiles++;
+                rest += `#### Context strategy: hunks expanded to their enclosing function/class
+This file is large (${ctx.fullContent.split('\n').length} lines), so instead of the whole file
+you are shown each changed region grown out to the function or class that contains
+it. Code outside those regions is NOT shown — do not assert that something is
+absent from this file, only that it is absent from what you can see.
+
+`;
+            }
+        }
+
+        if (!didExpand) {
+            if (ctx?.fullContent) {
+                contextStats.fullFileFiles++;
+                rest += `#### Full file after the change${ctx.truncated ? ' (truncated to fit budget)' : ''}
 Use this for context and to judge whether the change fits the file. Only report issues on lines the diff below actually touches.
 
 \`\`\`${f.language || ''}
@@ -563,7 +643,16 @@ ${ctx.fullContent}
 \`\`\`
 
 `;
+            }
         }
+
+        // Deletion-only hunks carry nothing reviewable — the prompt already tells
+        // the model never to report against a removed line, so those tokens buy a
+        // restatement of a rule. On a refactor or a file move they are most of the
+        // diff. See utils/diffBudget.js.
+        const stripped = stripDeletionOnlyHunks(renderPatch);
+        contextStats.deletionOnlyHunksRemoved += stripped.removedHunks;
+        if (stripped.patch) renderPatch = stripped.patch;
 
         // The test file — present or conspicuously absent.
         if (ctx?.testPath && ctx.testContent) {
@@ -596,11 +685,20 @@ Lines marked \`+\` are added by this PR. Lines in \`__old hunk__\` were REMOVED 
 never report a finding against them; the PR has already deleted that code.
 
 \`\`\`
-${formatPatchWithLineNumbers(f.patch, f.filename)}
+${formatPatchWithLineNumbers(renderPatch, f.filename)}
 \`\`\`
 
 `;
     }
+
+    // ── Section 5b: Files changed but not shown ──
+    // Costs a handful of tokens and converts a wrong answer into a stated
+    // limitation: without it the model believes it has seen the whole change and
+    // reports "the caller was never updated" about a file it was not given.
+    const omittedBlock = renderOmittedFiles(omittedFiles);
+    if (omittedBlock) rest += `\n${omittedBlock}\n`;
+
+    onContextStats?.({ ...contextStats, omittedFiles: omittedFiles.length });
 
     // ── Section 6: Required output ──
     const fileNames = unit.files.map(f => `"${f.filename}"`).join(' or ');

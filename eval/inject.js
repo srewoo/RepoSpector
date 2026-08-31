@@ -65,10 +65,14 @@ function main() {
     let total = 0;
 
     for (const kase of cases) {
-        const { prData, injected } = injectIntoPr(kase.prData, {
+        const { prData, injected, fileContents } = injectIntoPr(kase.prData, {
             maxPerFile: args.maxPerFile,
             maxPerPr: args.maxPerPr,
             only: args.only,
+            // Cached post-change file content (from eval/fetch-content.js), if the
+            // input corpus carries it. Injection rewrites it in step with the
+            // patch — see injectIntoPr.
+            fileContents: kase.fileContents || null,
         });
 
         if (injected.length === 0) {
@@ -87,6 +91,7 @@ function main() {
             id: `${kase.id}[injected]`,
             url: kase.url,
             prData,
+            ...(fileContents ? { fileContents } : {}),
             // Ground truth, in the shape the scorer already understands.
             humanComments: injected.map(d => ({
                 file: d.file,

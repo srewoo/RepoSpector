@@ -5,6 +5,8 @@
  * in various formats (Markdown, PNG).
  */
 
+import { toSarifJson } from '../utils/sarifExport.js';
+
 export class ExportService {
     /**
      * Export chat messages as Markdown
@@ -93,6 +95,25 @@ export class ExportService {
             };
             img.src = url;
         });
+    }
+
+    /**
+     * Export a review's findings as SARIF 2.1.0.
+     *
+     * Uploadable to GitHub code scanning
+     * (`github/codeql-action/upload-sarif`, or the
+     * `POST /repos/{o}/{r}/code-scanning/sarifs` API), which is worth more than a
+     * download: alerts persist past the PR, and code scanning's *dismiss with
+     * reason* is a better feedback channel than the tick-box footer — a
+     * deliberate structured verdict, in a UI the team already uses. See
+     * utils/sarifExport.js.
+     *
+     * @param {Array<Object>} findings
+     * @param {Object} [meta] - { version, prUrl, commitSha, model }
+     * @returns {string} SARIF JSON
+     */
+    static exportFindingsAsSarif(findings, meta = {}) {
+        return toSarifJson(findings, meta);
     }
 
     /**
