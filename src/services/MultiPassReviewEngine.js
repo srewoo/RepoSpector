@@ -3,6 +3,7 @@ import { FileGroupingStrategy } from './FileGroupingStrategy.js';
 import { scoreFileByRisk } from '../utils/prompts.js';
 import { HUNK_WINDOWING } from '../utils/constants.js';
 import { PRIORITY } from '../utils/callBudget.js';
+import { isAuthError, markAuthError } from '../utils/authErrors.js';
 import { fitFilesToBudget } from '../utils/diffBudget.js';
 import { tokenManager } from '../utils/tokenManager.js';
 import {
@@ -260,6 +261,16 @@ export class MultiPassReviewEngine {
             });
 
             console.log(`📋 Multi-pass: ${perFileFindings.length} successful, ${failedFiles.length} failed`);
+
+            // A credential failure is not a "failed file" — it is the whole
+            // review failing, and it must not be absorbed into `failedFiles`.
+            // Left tolerated, every unit fails, `perFileFindings` is empty, and
+            // the verdict gate renders "Clean review — no genuine problems
+            // found": a green all-clear on a PR that was never read.
+            const authFailure = results.failed.find(f => f.isAuthError || isAuthError(f.error));
+            if (authFailure) {
+                throw markAuthError(new Error(String(authFailure.error)));
+            }
 
             // ── Phase 4: Aggregation ──
             onProgress?.({ phase: 'aggregating', message: 'Synthesizing cross-file analysis...' });

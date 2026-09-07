@@ -75,6 +75,36 @@ export function renderExternalSection(externalFindings) {
 }
 
 /**
+ * The code-graph section: what the graph checked, what it found, what it cut.
+ *
+ * A clean check is stated positively — "no incompatible signature changes" is
+ * information a reviewer acts on, and it is invisible if only findings render.
+ *
+ * @param {{stats: Object, rules: Object}|null} graphFindings
+ * @returns {string}
+ */
+export function renderGraphSection(graphFindings) {
+    const s = graphFindings?.stats;
+    if (!s || !s.symbols) return '';
+
+    const found = [];
+    if (s.signatureChanges) found.push(`${s.signatureChanges} signature change(s) with callers outside this PR`);
+    if (s.escalations) found.push(`${s.escalations} widely-used symbol(s) flagged for a human`);
+    if (s.untested) found.push(`${s.untested} untested dependency set(s)`);
+
+    const lines = [
+        '### From the code graph',
+        '',
+        `${s.symbols} changed symbol(s) were checked against the repository's call graph and test-coverage edges. `
+        + (found.length
+            ? `Found: ${found.join('; ')}. These findings are facts read from the graph, not model judgement.`
+            : 'Found no incompatible signature changes, no untested dependents, and no high-risk symbols.'),
+    ];
+    if (s.capped) lines.push('', `Note: only the first findings by severity are shown; the rest were cut by the per-review cap.`);
+    return `${lines.join('\n')}\n`;
+}
+
+/**
  * The provenance footnote: scope, merge gate, and any pass the budget cut.
  *
  * @param {Object} reviewQuality - the review's reviewQuality block

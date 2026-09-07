@@ -32,14 +32,18 @@ import { applyFilterMode } from '../src/utils/findingFilterMode.js';
 import { decideFailure } from '../src/utils/failLevel.js';
 import { ExternalFindingsService } from '../src/services/ExternalFindingsService.js';
 import { buildFileContext, buildDeclarations, alignmentReport } from './lib/fileContext.js';
+import { graphFindingsForCase } from './lib/graphContext.js';
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
     const args = {
         corpus: 'eval/corpus/public-prs.json', limit: Infinity, only: null,
         finderMode: 'default', multiFinder: true, finderRounds: 2, label: null,
         // Defaults match the shipped defaults. A harness that runs a
         // configuration nobody ships measures a product nobody has.
         dynamicContext: true, filterMode: 'added', failLevel: 'high',
+        // Graph findings are on by default, matching the shipped reviewer
+        // (see GraphImpactFindingsService wiring in prReviewHandlers).
+        graphFindings: true,
         // A full run is hours of LLM time. Resume is the difference between a
         // crash costing one case and costing the whole run.
         resume: false,
@@ -55,6 +59,7 @@ function parseArgs(argv) {
         else if (a === '--label') args.label = argv[++i];
         else if (a === '--resume') args.resume = true;
         else if (a === '--no-dynamic-context') args.dynamicContext = false;
+        else if (a === '--no-graph-findings') args.graphFindings = false;
         else if (a === '--filter-mode') args.filterMode = argv[++i];
         else if (a === '--fail-level') args.failLevel = argv[++i];
         else if (a === '--help' || a === '-h') args.help = true;
@@ -104,13 +109,18 @@ export async function reviewOne(kase, { llm, settings, opts }) {
         severityThreshold: 'all',
     });
 
-    // ── File context, declarations, external findings ─────────────────────
+    // ── File context, declarations, external findings, graph findings ──────
     //
     // Everything below this comment was previously ABSENT from the harness, so
     // every feature that depends on seeing the file rather than the hunk went
     // untested by the suite that exists to test it, and the documented
     // `REPOSPECTOR_CONTEXT_PROFILE` A/B was guaranteed to produce a null diff
-    // (see reviewContextBudget.js's header, and eval/fetch-content.js).
+    // (see reviewContextBudget.js's header, and eval/fetch-content.js). The
+    // graph is the newest addition: `graphContext.js` builds an in-memory,
+    // regex-extracted code graph from this case's own `fileContents` and turns
+    // it into findings via `GraphImpactFindingsService`. It supplies graph
+    // FINDINGS, not the graph prompt CONTEXT that `reviewContextBudget.js`
+    // still cannot exercise here — see that file's header for the boundary.
     const { fileContext, stats: fcStats } = buildFileContext(kase);
     const { declarationsByFile, stats: declStats } = buildDeclarations(fileContext);
 
@@ -134,6 +144,10 @@ export async function reviewOne(kase, { llm, settings, opts }) {
         });
     }
 
+    // Graph findings are computed here but injected AFTER the gates, below —
+    // not into staticFindings — matching where the shipped handler's
+    // `3a-graph` block appends them (after `verifier.verify()`).
+    const graph = opts.graphFindings !== false ? graphFindingsForCase(kase) : { findings: [], stats: null };
     const staticFindings = [
         ...staticResult.findings,
         ...(external?.findings || []),
@@ -213,6 +227,22 @@ export async function reviewOne(kase, { llm, settings, opts }) {
         findings = [...findings, ...readd];
     }
 
+    // Graph findings enter AFTER the gates, exactly where the shipped handler
+    // puts them (its `3a-graph` block runs after `verifier.verify()`).
+    //
+    // Routing them through the gates instead would diverge from production in
+    // two measurable ways. First, `enforceCitations` and the evidence/
+    // speculation gates judge findings a MODEL asserted; a graph finding is a
+    // fact read from the call graph, so those gates drop it and the harness
+    // would score the reviewer as suppressing findings it actually posts.
+    // Second, `normalizeStaticFinding` (`src/utils/findingsFlatten.js:69`)
+    // relabels every non-'external' source to 'static', so `source: 'graph'`
+    // would be erased and every exported prediction would misreport where it
+    // came from.
+    if (graph.findings.length) {
+        findings = [...findings, ...graph.findings];
+    }
+
     // Diff scope, exactly as the handler applies it. Without this the harness
     // scored findings the extension would never have shown a reviewer, which
     // inflates recall and makes precision incomparable to the shipped product.
@@ -243,6 +273,8 @@ export async function reviewOne(kase, { llm, settings, opts }) {
             staticFindings: staticResult.findings.length,
             externalFindings: external?.findings?.length ?? 0,
             externalSources: external?.stats?.sources ?? 0,
+            graphFindings: graph.findings.length,
+            graphStats: graph.stats,
 
             // ── Context actually supplied (was: none of it) ──
             filesWithContent: fcStats.withContent,
@@ -291,6 +323,7 @@ async function main() {
             '  --no-multi-finder     Disable the multi-finder pass',
             '  --finder-rounds <n>   Multi-finder rounds (default 2)',
             '  --no-dynamic-context  Disable hunk expansion (A/B against the default)',
+            '  --no-graph-findings   Disable graph findings (A/B against the default)',
             '  --filter-mode <m>     added | diff_context | file | nofilter (default added)',
             '  --fail-level <l>      none | info | low | medium | high | critical | any (default high)',
             '',

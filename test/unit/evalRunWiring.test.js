@@ -12,7 +12,7 @@
  * thing under test here is the plumbing, not the model.
  */
 
-const { reviewOne } = require('../../eval/run.js');
+const { reviewOne, parseArgs } = require('../../eval/run.js');
 
 const FILE_LINES = [
     'package main',                            // 1
@@ -215,5 +215,23 @@ describe('reviewOne applies the shipped policies', () => {
         const { stats } = await reviewOne(makeCase(), { llm, settings: SETTINGS, opts: OPTS });
         expect(stats.externalFindings).toBe(0);
         expect(stats.externalSources).toBe(0);
+    });
+});
+
+describe('parseArgs', () => {
+    it('defaults dynamic context and graph findings on', () => {
+        const args = parseArgs([]);
+        expect(args.dynamicContext).toBe(true);
+        expect(args.graphFindings).toBe(true);
+    });
+
+    it('--no-dynamic-context turns off hunk expansion', () => {
+        const args = parseArgs(['--no-dynamic-context']);
+        expect(args.dynamicContext).toBe(false);
+    });
+
+    it('--no-graph-findings turns off graph findings', () => {
+        const args = parseArgs(['--no-graph-findings']);
+        expect(args.graphFindings).toBe(false);
     });
 });

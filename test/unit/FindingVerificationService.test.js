@@ -75,6 +75,15 @@ describe('FindingVerificationService', () => {
         expect(llm.streamChat).not.toHaveBeenCalled();
         expect(findings).toHaveLength(1);
     });
+
+    it('passes graph findings through without asking the refuter', async () => {
+        const llmService = { streamChat: jest.fn() };
+        const svc = new FindingVerificationService({ llmService });
+        const graphFinding = { file: 'src/a.js', line: 3, source: 'graph', rule: 'graph/signature-changed-callers', title: 't', description: 'd', severity: 'high', evidence: 'src/b.js:1' };
+        const res = await svc.verify([graphFinding], { llmRefutation: true, verifyStatic: false });
+        expect(res.findings).toHaveLength(1);
+        expect(llmService.streamChat).not.toHaveBeenCalled();
+    });
 });
 
 describe('llmRefutation defaults', () => {

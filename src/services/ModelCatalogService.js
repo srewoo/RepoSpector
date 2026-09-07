@@ -1,3 +1,10 @@
+import { BedrockClient } from './BedrockClient.js';
+import {
+    BEDROCK_FALLBACK_MODELS,
+    OPENROUTER_FALLBACK_MODELS,
+    NVIDIA_FALLBACK_MODELS,
+} from '../utils/constants.js';
+
 /**
  * ModelCatalogService — fetch the list of available models live from each provider,
  * so the Model dropdown never has to be hand-updated when new models ship.
@@ -11,8 +18,18 @@
  * the same host the reviews already use. Nothing else sees it.
  */
 
+// Substrings that mark a model of the wrong MODALITY — it cannot answer a chat
+// request at all, whichever provider is serving it.
+const NON_CHAT_MODALITY = /(embed|embedding|whisper|tts|audio|realtime|dall[- ]?e|image|moderation|rerank|vision-only|guard|clip|search|transcribe)/i;
+
 // Substrings that mark a NON-chat model we should hide from the dropdown.
-const NON_CHAT = /(embed|embedding|whisper|tts|audio|realtime|dall[- ]?e|image|moderation|rerank|vision-only|guard|clip|search|transcribe|-instruct)/i;
+//
+// `-instruct` belongs here only for the first-party providers, where it marks a
+// legacy completions variant of a model already in the list. It is NOT a
+// modality: on OpenRouter and NVIDIA NIM it is how the chat models are NAMED
+// (`meta/llama-3.3-70b-instruct`), so applying it there emptied most of the
+// catalogue. Those providers filter on NON_CHAT_MODALITY alone.
+const NON_CHAT = new RegExp(`${NON_CHAT_MODALITY.source}|-instruct`, 'i');
 
 /**
  * A dated snapshot of a model that also ships a stable alias: `o4-mini-2025-04-16`
@@ -91,14 +108,27 @@ function normalize(provider, id, name) {
     return { id: `${provider}:${id}`, name: name || id };
 }
 
-async function fetchOpenAICompatible(baseUrl, apiKey, provider) {
+async function fetchOpenAICompatible(baseUrl, apiKey, provider, { reject = NON_CHAT } = {}) {
     const res = await fetch(`${baseUrl}/models`, {
         headers: { Authorization: `Bearer ${apiKey}` }
     });
     if (!res.ok) throw new Error(`${provider} /models ${res.status}`);
     const json = await res.json();
     const ids = (json.data || []).map(m => m.id).filter(Boolean);
-    return ids.filter(id => !NON_CHAT.test(id)).map(id => normalize(provider, id));
+    return ids.filter(id => !reject.test(id)).map(id => normalize(provider, id));
+}
+
+/**
+ * A gateway listing is one API call away from being the only usable list, and
+ * one network blip away from being empty. Both gateways therefore behave like
+ * Bedrock: fall back to the static catalogue and SAY SO, rather than leaving the
+ * dropdown blank or letting a stale list pass for a live read.
+ */
+function staticFallback(provider, models, reason) {
+    const fallback = models.map(m => normalize(provider, m.id, m.name));
+    fallback.isFallback = true;
+    fallback.fallbackReason = reason;
+    return fallback;
 }
 
 const FETCHERS = {
@@ -156,6 +186,80 @@ const FETCHERS = {
         return fetchOpenAICompatible('https://api.mistral.ai/v1', apiKey, 'mistral');
     },
 
+    /**
+     * OpenRouter — hundreds of models across every vendor behind one key.
+     *
+     * Its /models carries a human `name` ("Anthropic: Claude Sonnet 4.5"), which
+     * is the only thing that makes a list this long navigable, so it is used
+     * instead of the raw id. Output modality is checked from `architecture` when
+     * present: the catalogue includes image-generation models whose ids give no
+     * hint of it.
+     */
+    async openrouter(apiKey) {
+        try {
+            const res = await fetch('https://openrouter.ai/api/v1/models', {
+                headers: { Authorization: `Bearer ${apiKey}`, 'X-Title': 'RepoSpector' }
+            });
+            if (!res.ok) throw new Error(`openrouter /models ${res.status}`);
+            const json = await res.json();
+            const models = (json.data || [])
+                .filter(m => m && m.id && !NON_CHAT_MODALITY.test(m.id))
+                .filter(m => {
+                    const out = m.architecture?.output_modalities;
+                    // Absent field means an older response shape, not an image
+                    // model — do not drop a model over a field that is missing.
+                    return !Array.isArray(out) || out.includes('text');
+                })
+                .map(m => normalize('openrouter', m.id, m.name || m.id));
+            if (!models.length) throw new Error('openrouter returned no chat models');
+            return models;
+        } catch (e) {
+            console.warn('OpenRouter live model listing failed, using static list:', e.message);
+            return staticFallback('openrouter', OPENROUTER_FALLBACK_MODELS, e.message);
+        }
+    },
+
+    /**
+     * NVIDIA NIM (build.nvidia.com). OpenAI-compatible listing; ids are
+     * vendor-pathed and overwhelmingly `-instruct`-suffixed, hence the
+     * modality-only filter.
+     */
+    async nvidia(apiKey) {
+        try {
+            const models = await fetchOpenAICompatible(
+                'https://integrate.api.nvidia.com/v1', apiKey, 'nvidia',
+                { reject: NON_CHAT_MODALITY },
+            );
+            if (!models.length) throw new Error('nvidia returned no chat models');
+            return models;
+        } catch (e) {
+            console.warn('NVIDIA NIM live model listing failed, using static list:', e.message);
+            return staticFallback('nvidia', NVIDIA_FALLBACK_MODELS, e.message);
+        }
+    },
+
+    /**
+     * Bedrock takes a credentials object, not a key string — the one provider
+     * whose listing is itself a signed API call. Both listings are attempted
+     * inside the client; a total failure falls back to the static catalogue so
+     * the dropdown is never empty just because the account lacks
+     * `bedrock:ListFoundationModels`.
+     */
+    async bedrock(creds) {
+        const client = new BedrockClient(creds);
+        try {
+            const models = await client.listModels();
+            return models
+                .filter(m => !NON_CHAT.test(m.id))
+                .map(m => normalize('bedrock', m.id, m.name));
+        } catch (e) {
+            console.warn('Bedrock live model listing failed, using static list:', e.message);
+            // Tell the caller this list is the fallback, so the UI can say so
+            // instead of implying it read the account.
+            return staticFallback('bedrock', BEDROCK_FALLBACK_MODELS, e.message);
+        }
+    },
+
     async local() {
         // Ollama — no key; enumerate locally pulled models.
         const res = await fetch('http://localhost:11434/api/tags');
@@ -169,22 +273,37 @@ const FETCHERS = {
 
 export class ModelCatalogService {
     /**
-     * @param {string} provider - 'openai' | 'anthropic' | 'google' | 'groq' | 'mistral' | 'local'
+     * @param {string} provider - 'openai' | 'anthropic' | 'google' | 'groq' | 'mistral'
+     *        | 'openrouter' | 'nvidia' | 'bedrock' | 'local'
      * @param {string} [apiKey] - required for all providers except 'local'
      * @returns {Promise<Array<{id:string, name:string}>>}
      */
-    static async fetchModels(provider, apiKey) {
+    static async fetchModels(provider, credential) {
         const fetcher = FETCHERS[provider];
         if (!fetcher) throw new Error(`No model catalog for provider "${provider}"`);
-        if (provider !== 'local' && (!apiKey || !apiKey.trim())) {
+
+        if (provider === 'bedrock') {
+            // `credential` is { accessKeyId, secretAccessKey, sessionToken, region }.
+            if (!credential?.accessKeyId || !credential?.secretAccessKey) {
+                throw new Error('AWS Access Key ID and Secret Access Key required to list models');
+            }
+        } else if (provider !== 'local' && (typeof credential !== 'string' || !credential.trim())) {
             throw new Error('API key required to list models');
         }
-        const models = await fetcher(apiKey);
+
+        const models = await fetcher(credential);
         if (!Array.isArray(models) || models.length === 0) throw new Error('No models returned');
         // Rank LAST, after every provider-specific filter has run. Ranking inside
         // the fetcher marked a model `recommended` that a later family filter then
         // removed, so the star silently vanished from the dropdown.
-        return rankModels(models);
+        const ranked = rankModels(models);
+        // Carry the fallback marker across ranking so the UI can distinguish a
+        // list read from the account from the hardcoded one.
+        if (models.isFallback) {
+            ranked.isFallback = true;
+            ranked.fallbackReason = models.fallbackReason;
+        }
+        return ranked;
     }
 }
 

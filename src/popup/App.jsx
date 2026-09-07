@@ -11,6 +11,7 @@ import { Button } from './components/ui/Button';
 import { Card, CardContent } from './components/ui/Card';
 import { PRReviewInterface } from './components/PRReviewInterface';
 import { Sparkles, Code2, FileCode, GitPullRequest, RefreshCw, AlertCircle, Github, ExternalLink } from 'lucide-react';
+import { buildAnalyzePROptions } from './prReviewRequestOptions';
 
 // Shape the MULTI_PASS_PR_REVIEW response into the analysisResult the UI consumes.
 // Used by both a live run and by picking up a cached background/auto review.
@@ -44,9 +45,16 @@ function AppContent() {
     const [prAnalysisResult, setPrAnalysisResult] = useState(null);
     const [prStaticAnalysisResult, setPrStaticAnalysisResult] = useState(null);
     const [prAiSummary, setPrAiSummary] = useState(null);
+    // Why the summary is missing, when it is. Without it the empty state cannot
+    // tell "the call was refused" apart from "nothing to summarize".
+    const [prAiSummaryError, setPrAiSummaryError] = useState(null);
     const [prSession, setPrSession] = useState(null);
     const [prLoading, setPrLoading] = useState(false);
     const [prError, setPrError] = useState(null);
+    // 'auth' when the review failed because a credential was rejected. Rendered
+    // differently from an ordinary failure: "Try Again" is useless advice for a
+    // bad key, and the fix is one click away in Settings.
+    const [prErrorKind, setPrErrorKind] = useState(null);
     const [prProgress, setPrProgress] = useState(null);
     const [isOnPRPage, setIsOnPRPage] = useState(false);
     const [isOnGitPage, setIsOnGitPage] = useState(null); // null = loading, true/false = detected
@@ -87,6 +95,15 @@ function AppContent() {
         const progressListener = (message) => {
             if (message.type !== 'PR_REVIEW_PROGRESS') return;
             const data = message.data ?? {};
+
+            // A credential failure ends the review. Show it now rather than
+            // leaving a spinner running until the response arrives.
+            if (data.phase === 'error' && data.errorKind === 'auth') {
+                setPrError(data.message || 'Your API key was rejected.');
+                setPrErrorKind('auth');
+                setPrLoading(false);
+                return;
+            }
             // A background/auto review just finished — pull its cached result in so an
             // already-open popup updates without a manual run.
             if (data.phase === 'complete' && prUrlRef.current) {
@@ -97,6 +114,7 @@ function AppContent() {
                             setPrAnalysisResult(mapReviewData(cached.data));
                             setPrStaticAnalysisResult(cached.data.staticAnalysis);
                             setPrAiSummary(cached.data.aiSummary || null);
+                            setPrAiSummaryError(cached.data.aiSummaryError || null);
                             setPrLoading(false);
                         }
                     })
@@ -154,6 +172,7 @@ function AppContent() {
                                 setPrAnalysisResult(mapReviewData(cached.data));
                                 setPrStaticAnalysisResult(cached.data.staticAnalysis);
                                 setPrAiSummary(cached.data.aiSummary || null);
+                                setPrAiSummaryError(cached.data.aiSummaryError || null);
                             } else if (cached?.status === 'running') {
                                 setPrLoading(true); // background review in flight
                             }
@@ -175,12 +194,14 @@ function AppContent() {
     }, [activeTab]);
 
     // Analyze PR
-    const analyzePR = useCallback(async (focusArea = null) => {
+    const analyzePR = useCallback(async (focusArea = null, { bypassCache = false } = {}) => {
         if (!prUrl) return;
 
         setPrLoading(true);
         setPrError(null);
+        setPrErrorKind(null);
         setPrAiSummary(null);
+        setPrAiSummaryError(null);
 
         try {
             setPrProgress(null);
@@ -188,12 +209,7 @@ function AppContent() {
                 type: 'MULTI_PASS_PR_REVIEW',
                 data: {
                     prUrl,
-                    options: {
-                        focusAreas: focusArea ? [focusArea] : ['security', 'bugs', 'performance'],
-                        enableESLint: true,
-                        enableSemgrep: true,
-                        enableDependency: true
-                    }
+                    options: buildAnalyzePROptions(focusArea, { bypassCache })
                 }
             });
 
@@ -202,6 +218,7 @@ function AppContent() {
                 setPrAnalysisResult(mapReviewData(response.data));
                 setPrStaticAnalysisResult(response.data.staticAnalysis);
                 setPrAiSummary(response.data.aiSummary || null);
+                setPrAiSummaryError(response.data.aiSummaryError || null);
                 // Create a session object for thread management
                 setPrSession({
                     sessionId: `pr-${Date.now()}`,
@@ -210,6 +227,7 @@ function AppContent() {
                 });
             } else {
                 setPrError(response.error || 'Failed to analyze PR');
+                setPrErrorKind(response.errorKind || null);
             }
         } catch (error) {
             setPrError(error.message || 'Failed to analyze PR');
@@ -223,9 +241,15 @@ function AppContent() {
         analyzePR(area);
     }, [analyzePR]);
 
-    // Handle PR refresh
+    // Handle PR refresh. This backs both the "Re-run" affordances the user
+    // presses deliberately (next to "Reviewed Xh ago" and inside a failed
+    // summary card) as well as the "Try Again" button after a hard failure —
+    // all explicit user actions that must not be served a stale cached
+    // review (e.g. one poisoned by a since-fixed provider credit/auth
+    // error). Unlike the automatic/initial analyzePR() call, this bypasses
+    // the review cache.
     const handlePRRefresh = useCallback(() => {
-        analyzePR();
+        analyzePR(null, { bypassCache: true });
     }, [analyzePR]);
 
     // Handle asking a question about the PR (switches to chat)
@@ -274,19 +298,36 @@ function AppContent() {
                                 </p>
                             </Card>
                         ) : prError ? (
-                            // Error state
+                            // Error state. A credential failure is called out as
+                            // one: it is the single failure a reviewer must never
+                            // mistake for "nothing found", and retrying it without
+                            // changing the key just fails again.
                             <Card className="p-6 text-center">
-                                <AlertCircle className="w-12 h-12 mx-auto text-red-500 mb-3" />
-                                <h3 className="text-lg font-medium text-text">Analysis Failed</h3>
+                                <AlertCircle className={`w-12 h-12 mx-auto mb-3 ${prErrorKind === 'auth' ? 'text-amber-500' : 'text-red-500'}`} />
+                                <h3 className="text-lg font-medium text-text">
+                                    {prErrorKind === 'auth' ? 'API key problem' : 'Analysis Failed'}
+                                </h3>
                                 <p className="text-sm text-textMuted mt-2">{prError}</p>
-                                <Button
-                                    onClick={handlePRRefresh}
-                                    className="mt-4"
-                                    disabled={prLoading}
-                                >
-                                    <RefreshCw className={`w-4 h-4 mr-2 ${prLoading ? 'animate-spin' : ''}`} />
-                                    Try Again
-                                </Button>
+                                {prErrorKind === 'auth' && (
+                                    <p className="text-xs text-amber-500 mt-3">
+                                        This PR was <strong>not reviewed</strong>. Nothing here says the code is clean.
+                                    </p>
+                                )}
+                                <div className="flex items-center justify-center gap-2 mt-4">
+                                    {prErrorKind === 'auth' && (
+                                        <Button onClick={() => handleTabChange('settings')}>
+                                            Open Settings
+                                        </Button>
+                                    )}
+                                    <Button
+                                        onClick={handlePRRefresh}
+                                        variant={prErrorKind === 'auth' ? 'outline' : 'default'}
+                                        disabled={prLoading}
+                                    >
+                                        <RefreshCw className={`w-4 h-4 mr-2 ${prLoading ? 'animate-spin' : ''}`} />
+                                        Try Again
+                                    </Button>
+                                </div>
                             </Card>
                         ) : !prAnalysisResult && !prLoading ? (
                             // Ready to analyze
@@ -313,6 +354,8 @@ function AppContent() {
                                 analysisResult={prAnalysisResult}
                                 staticAnalysisResult={prStaticAnalysisResult}
                                 aiSummary={prAiSummary}
+                                aiSummaryError={prAiSummaryError}
+                                onOpenSettings={() => handleTabChange('settings')}
                                 session={prSession}
                                 onRefresh={handlePRRefresh}
                                 onAskQuestion={handlePRAskQuestion}

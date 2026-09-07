@@ -13,7 +13,7 @@ import { TestGenerator } from '../utils/testGenerator.js';
 import { CacheManager } from '../utils/cacheManager.js';
 import { LanguageDetector } from '../utils/languageDetector.js';
 import { TokenManager } from '../utils/tokenManager.js';
-import { PLATFORM_PATTERNS as _PLATFORM_PATTERNS } from '../utils/constants.js';
+import { PLATFORM_PATTERNS as _PLATFORM_PATTERNS, DEFAULT_BEDROCK_REGION } from '../utils/constants.js';
 import {
     TEST_GENERATION_SYSTEM_PROMPT,
     buildEnhancedTestPrompt,
@@ -65,6 +65,7 @@ import { PRSessionManager } from '../services/PRSessionManager.js';
 import { AegisClient as _AegisClient } from '../services/AegisClient.js';
 import { FindingFollowupService } from '../services/FindingFollowupService.js';
 import { CodeGraphPipeline } from '../services/CodeGraphPipeline.js';
+import { collectGraphCallers } from '../utils/graphCallerContext.js';
 import { ReviewMetricsService } from '../services/ReviewMetricsService.js';
 import { PRComplianceChecker } from '../services/PRComplianceChecker.js';
 import { FindingCache } from '../services/FindingCache.js';
@@ -686,6 +687,27 @@ class BackgroundService {
             const codeTokens = this.tokenManager.estimateTokens(extractedCode);
             const promptOverhead = 2000; // System prompt, instructions, formatting
             const responseReserve = this.tokenManager.getOutputLimit(modelName) || 4000; // Adaptive reserve based on model output limit
+
+            // Graph callers: real call sites make generated tests use real arguments.
+            try {
+                // Same derivation the RAG block below uses. Its `repoId` is declared with
+                // `const` inside `if (useDeepContext && …)`, so it is not in scope here —
+                // hence the repeat rather than a reuse.
+                const repoIdForGraph = extractedContext?.url
+                    ? this.contextAnalyzer.extractRepoIdFromUrl(extractedContext.url, extractedContext.platform)
+                    : null;
+                const graphCallers = await collectGraphCallers({
+                    pipeline: this.codeGraphPipeline,
+                    repoId: repoIdForGraph,
+                    code: extractedCode
+                });
+                if (graphCallers.length) {
+                    enhancedContext.graphCallers = graphCallers;
+                    console.log(`🕸️  Test-gen: caller context for ${enhancedContext.graphCallers.length} symbol(s)`);
+                }
+            } catch (e) {
+                console.warn('Test-gen graph context skipped (non-fatal):', e?.message);
+            }
 
             // Get RAG context if Deep Context is enabled
             let ragContext = null;
@@ -1795,7 +1817,11 @@ Format your response in a developer-friendly way with code examples where approp
         const settings = result.aiRepoSpectorSettings || {};
 
         // Decrypt all sensitive keys
-        const sensitiveKeys = ['apiKey', 'githubToken', 'gitlabToken', 'jiraToken', 'anthropicApiKey', 'googleApiKey', 'cohereApiKey', 'mistralApiKey', 'groqApiKey', 'huggingfaceApiKey'];
+        // `bedrockSecretKey` and `bedrockSessionToken` are AWS credentials and
+        // belong here with the rest. `bedrockAccessKeyId` deliberately is NOT —
+        // it is an identifier, not a secret, and keeping it readable lets the
+        // Settings UI show which key is configured without a decrypt round-trip.
+        const sensitiveKeys = ['apiKey', 'githubToken', 'gitlabToken', 'jiraToken', 'anthropicApiKey', 'googleApiKey', 'cohereApiKey', 'mistralApiKey', 'groqApiKey', 'huggingfaceApiKey', 'bedrockSecretKey', 'bedrockSessionToken'];
 
         for (const key of sensitiveKeys) {
             if (settings[key]) {
@@ -1899,6 +1925,26 @@ Format your response in a developer-friendly way with code examples where approp
             } catch (e) {
                 console.warn('[settings] Failed to persist cleared credentials:', e?.message);
             }
+        }
+
+        // Bedrock authenticates with a signature over four values rather than a
+        // bearer token, so the LLM service cannot take them from `apiKey` like
+        // every other provider. Refreshed here — the one place settings are
+        // decrypted — so a credential change takes effect on the next call
+        // instead of at the next service-worker restart.
+        try {
+            this.llmService?.setBedrockCredentials?.(
+                settings.bedrockAccessKeyId && settings.bedrockSecretKey
+                    ? {
+                        accessKeyId: settings.bedrockAccessKeyId,
+                        secretAccessKey: settings.bedrockSecretKey,
+                        sessionToken: settings.bedrockSessionToken || null,
+                        region: settings.bedrockRegion || DEFAULT_BEDROCK_REGION,
+                    }
+                    : null
+            );
+        } catch (e) {
+            console.warn('[settings] Could not apply Bedrock credentials:', e?.message);
         }
 
         return settings;

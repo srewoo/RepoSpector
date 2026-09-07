@@ -111,6 +111,22 @@ describe('IncrementalReviewService.plan', () => {
         expect(plan.carriedFindings.map(f => f.source)).toEqual(['llm']);
     });
 
+    it('never carries graph or external findings either — every deterministic source is re-derived free every run', () => {
+        const before = [file('a.js', '+a'), file('b.js', '+b')];
+        const prev = {
+            headSha: 'sha1',
+            fileHashes: fingerprintFiles(before),
+            findings: [
+                { file: 'b.js', line: 2, title: 'lint', source: 'static' },
+                { file: 'b.js', line: 3, title: 'signature', source: 'graph' },
+                { file: 'b.js', line: 4, title: 'codeql', source: 'external' },
+                { file: 'b.js', line: 5, title: 'ai', source: 'llm' },
+            ],
+        };
+        const plan = svc.plan(prAt('sha2', [file('a.js', '+CHANGED'), file('b.js', '+b')]), prev);
+        expect(plan.carriedFindings.map(f => f.source)).toEqual(['llm']);
+    });
+
     it('escalates to a full review when every diff changed', () => {
         const prev = {
             headSha: 'sha1',

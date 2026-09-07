@@ -1,4 +1,6 @@
 import { ErrorHandler } from './errorHandler.js';
+import { BUDGET_ERROR_NAME } from './callBudget.js';
+import { isAuthError } from './authErrors.js';
 
 // Batch processor for parallel OpenAI API requests
 // Enhanced with streaming, adaptive concurrency, and result deduplication
@@ -179,6 +181,11 @@ export class BatchProcessor {
             return {
                 success: false,
                 error: errMsg,
+                // Classify BEFORE the Error is flattened to a string: the tag and
+                // any `.status` are lost here, and a caller left to re-match the
+                // message text is one provider-wording change away from treating
+                // a 401 as an ordinary failed unit.
+                isAuthError: isAuthError(error),
                 batchIndex,
                 itemIndex
             };
@@ -236,6 +243,18 @@ export class BatchProcessor {
      * Check if an error should not be retried
      */
     isNonRetryableError(error) {
+        // A budget refusal is the one "failure" with nothing transient to wait
+        // for: the ceiling will still be reached on the retry, so every remaining
+        // unit paid a retry delay to be refused a second time. (A refusal itself
+        // costs no budget — `tryConsume` declines without charging — so this is
+        // wasted wall-clock and doubled noise in the logs, not doubled spend.)
+        if (error?.name === BUDGET_ERROR_NAME) return true;
+
+        // Same reasoning for a credential failure, and it matters more: the
+        // ad-hoc patterns below catch "API key" but not a bare 401/403 or
+        // Bedrock's UnrecognizedClientException.
+        if (isAuthError(error)) return true;
+
         const nonRetryablePatterns = [
             /API key/i,
             /authentication/i,

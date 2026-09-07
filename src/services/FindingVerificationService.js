@@ -6,6 +6,7 @@ import { diffsByFile as buildDiffsByFile } from '../utils/siblingSweep.js';
 import { assessImportClaim } from '../utils/importClaimGate.js';
 import { markLowValue } from '../utils/lowValueGate.js';
 import { PRIORITY } from '../utils/callBudget.js';
+import { isDeterministicSource } from '../utils/findingSources.js';
 
 /**
  * FindingVerificationService — adversarial second pass to cut false positives.
@@ -166,7 +167,7 @@ export class FindingVerificationService {
             // remove the one output that exists to say "ask a human". The
             // question survives to be asked; it is not asserted as a defect.
             if (f.needsHumanReview) passthrough.push(tagged);
-            else if (!verifyStatic && f.source === 'static') passthrough.push(tagged);
+            else if (!verifyStatic && isDeterministicSource(f.source)) passthrough.push(tagged);
             else toVerify.push(tagged);
         });
 

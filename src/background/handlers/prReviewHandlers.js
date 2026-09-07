@@ -33,6 +33,9 @@ import { FindingVerificationService } from '../../services/FindingVerificationSe
 import { FixRecommendationService } from '../../services/FixRecommendationService.js';
 import { SuggestionScorer } from '../../services/SuggestionScorer.js';
 import { ReviewGraphContextService } from '../../services/ReviewGraphContextService.js';
+import { GraphImpactFindingsService } from '../../services/GraphImpactFindingsService.js';
+import { ImpactAnalyzer } from '../../services/ImpactAnalyzer.js';
+import { isDeterministicSource } from '../../utils/findingSources.js';
 import { MultiFinderService } from '../../services/MultiFinderService.js';
 import { ReviewReuseContextService } from '../../services/ReviewReuseContextService.js';
 import { RepoExplorerService } from '../../services/RepoExplorerService.js';
@@ -52,6 +55,7 @@ import { ConventionMiner } from '../../services/ConventionMiner.js';
 import { SymbolExtractor } from '../../services/SymbolExtractor.js';
 import { detectLanguageFromPath } from '../../utils/languageMap.js';
 import { CallBudget, PRIORITY } from '../../utils/callBudget.js';
+import { isAuthError, describeAuthError } from '../../utils/authErrors.js';
 import { PriorFindingService } from '../../services/PriorFindingService.js';
 import { resolveConfig, explainOverrides } from '../../utils/configPrecedence.js';
 import { ExternalFindingsService } from '../../services/ExternalFindingsService.js';
@@ -71,6 +75,7 @@ import {
     renderExternalSection,
     renderProvenanceNote,
     renderContextNote,
+    renderGraphSection,
 } from '../../utils/reviewProvenance.js';
 import { stripFeedbackFooter } from '../../utils/feedbackFooter.js';
 import { ReviewFileContextService } from '../../services/ReviewFileContextService.js';
@@ -997,6 +1002,7 @@ export function createPrReviewHandlers(svc) {
 
             // Generate AI summary
             let aiSummary = null;
+            let aiSummaryError = null;
             try {
                 const summaryPrompt = buildPRSummaryGenerationPrompt(
                     prData,
@@ -1016,7 +1022,8 @@ export function createPrReviewHandlers(svc) {
                 );
                 aiSummary = summaryResponse.content || summaryResponse;
             } catch (e) {
-                console.warn('Failed to generate PR summary:', e.message);
+                aiSummaryError = e?.message || 'Unknown error';
+                console.warn('Failed to generate PR summary:', aiSummaryError);
             }
 
             sendResponse({
@@ -1024,6 +1031,7 @@ export function createPrReviewHandlers(svc) {
                 data: {
                     analysis: response.content || response,
                     aiSummary,
+                    aiSummaryError,
                     staticAnalysis: {
                         findings: staticAnalysisResult.findings,
                         summary: staticAnalysisResult.summary,
@@ -2045,17 +2053,47 @@ export function createPrReviewHandlers(svc) {
             //     lens is gated on test files being IN the diff, so a PR that adds
             //     an exported function and no test had nothing looking. Emitted as
             //     `source: 'static'` because it is a fact about the diff text, not
-            //     a model judgement. Added BEFORE verification so the evidence
-            //     gates still see it like any other finding.
+            //     a model judgement.
+            //
+            //     NOT appended to verifiedFindings here — see the missing-test
+            //     re-add after the precision gate, below, for why.
+            let missingTestFindingsPending = [];
             try {
                 const { findMissingTests } = await import('../../utils/missingTestFinder.js');
                 const missing = findMissingTests(prData);
                 if (missing.length) {
-                    verifiedFindings = [...verifiedFindings, ...missing];
+                    missingTestFindingsPending = missing;
                     console.log(`🧪 Missing-test finder: ${missing.length} newly exported symbol(s) with no test in this PR`);
                 }
             } catch (e) {
                 console.warn('Missing-test finder skipped:', e?.message);
+            }
+
+            // 3a-graph) Graph-impact findings — the code graph as a reviewer.
+            //     Deterministic (`source: 'graph'`): signature changes with un-updated
+            //     callers outside the diff, high-risk symbols escalated to a human, and
+            //     untested code in the blast radius. Emitted alongside the missing-test
+            //     finder so the evidence gates and posting policy treat them identically.
+            let graphFindingsStats = null;
+            let graphFindingsPending = [];
+            if (rqCfg.graphFindings !== false && graphContextObj?.available && svc.codeGraphPipeline?.graph) {
+                try {
+                    const pipeline = svc.codeGraphPipeline;
+                    const impact = pipeline.impactAnalyzer || new ImpactAnalyzer(pipeline.graph);
+                    const gsvc = new GraphImpactFindingsService({ graph: pipeline.graph, impactAnalyzer: impact });
+                    const { findings: graphFindings, stats } = gsvc.build(prData);
+                    const rules = {};
+                    for (const f of graphFindings) rules[f.rule] = (rules[f.rule] || 0) + 1;
+                    graphFindingsStats = { stats, rules };
+                    if (graphFindings.length) {
+                        // NOT appended to verifiedFindings here — see the graph
+                        // re-add after the precision gate, below, for why.
+                        graphFindingsPending = graphFindings;
+                        console.log(`🕸️  Graph-impact findings: ${graphFindings.length} (${Object.entries(rules).map(([r, n]) => `${r.split('/')[1]}×${n}`).join(', ')})`);
+                    }
+                } catch (e) {
+                    console.warn('Graph-impact findings skipped (non-fatal):', e?.message);
+                }
             }
 
             // 3b) Self-reflection scoring — how much is each finding WORTH SAYING?
@@ -2212,6 +2250,54 @@ export function createPrReviewHandlers(svc) {
                 }
             }
 
+            // Graph-impact findings survive the precision gate unconditionally,
+            // for the same reason external findings do.
+            //
+            // The gate demands evidence for a finding a MODEL asserted. Graph
+            // findings are facts read off the call graph, not model assertions:
+            // the escalation rule is an intentional open question
+            // (`needsHumanReview: true`, rejected by the gate at
+            // `open-question`), and the untested-blast-radius rule is
+            // deliberately low severity/coverage (rejected by the gate's
+            // low-severity and non-problem-category rules). Judging either by
+            // the model-output standard would suppress the two most checkable
+            // findings in the review — exactly backwards for output that is
+            // cheaper to verify than anything an LLM produces. Re-adding them
+            // here, rather than exempting them inside the gate, keeps the
+            // gate's own logic about one kind of input, matching the external
+            // re-add above.
+            if (graphFindingsPending.length) {
+                const alreadyThere = new Set(verifiedFindings.map(findingKey));
+                const readd = graphFindingsPending.filter(f => !alreadyThere.has(findingKey(f)));
+                if (readd.length) {
+                    verifiedFindings = [...verifiedFindings, ...readd];
+                    console.log(`🕸️  Re-added ${readd.length} graph finding(s) after the precision gate`);
+                }
+            }
+
+            // Missing-test findings survive the precision gate unconditionally,
+            // for the same reason external and graph findings do.
+            //
+            // A missing-test finding is a deterministic statement about the
+            // diff's own text — it names an exported symbol the diff added and
+            // states no test in the diff mentions it — not a claim a model
+            // asserted. It is deliberately `severity: 'low'` because it is
+            // advisory (a nudge to add coverage) rather than a defect, but that
+            // is exactly the severity the gate always rejects
+            // (`non-problem-severity`), so every one of these would be dropped
+            // regardless of how sound it is. Re-adding it here, rather than
+            // exempting it inside the gate, keeps the gate's own logic about
+            // one kind of input — judging model output — matching the external
+            // and graph re-adds above.
+            if (missingTestFindingsPending.length) {
+                const alreadyThere = new Set(verifiedFindings.map(findingKey));
+                const readd = missingTestFindingsPending.filter(f => !alreadyThere.has(findingKey(f)));
+                if (readd.length) {
+                    verifiedFindings = [...verifiedFindings, ...readd];
+                    console.log(`🧪 Re-added ${readd.length} missing-test finding(s) after the precision gate`);
+                }
+            }
+
             // ── Diff scope, stated ────────────────────────────────────────────
             //
             // One named policy for which lines a finding may be reported on,
@@ -2294,6 +2380,7 @@ export function createPrReviewHandlers(svc) {
 
             // Generate AI summary
             let aiSummary = null;
+            let aiSummaryError = null;
             try {
                 const summaryPrompt = buildPRSummaryGenerationPrompt(
                     prData,
@@ -2321,14 +2408,28 @@ export function createPrReviewHandlers(svc) {
                             lightModel,
                         }),
                         budgetStage: 'summary',
-                        budgetPriority: PRIORITY.OPTIONAL,
+                        // NOT optional. The summary is the first thing the reader
+                        // sees, and it is the LAST stage of the review — nothing
+                        // essential runs after it, so there is no allowance left to
+                        // protect. As an `optional` stage it was refused below the
+                        // 15% floor, which on any PR large enough to spend ~85% of
+                        // the ceiling meant the headline artifact silently went
+                        // missing on exactly the reviews that needed it most.
+                        budgetPriority: PRIORITY.IMPORTANT,
                         stream: false,
                         context: 'PR summary'
                     }
                 );
                 aiSummary = summaryResponse.content || summaryResponse;
             } catch (e) {
-                console.warn('Failed to generate PR summary:', e.message);
+                // Reported, not swallowed. "No AI summary available" with no reason
+                // is indistinguishable from "this PR did not warrant one", so the
+                // cause travels to the UI with it.
+                aiSummaryError = LLMService.isBudgetError(e)
+                    ? 'The review used its whole LLM call budget before the summary. '
+                      + 'Raise "Max AI calls per review" in Settings, or set it to 0 for no limit.'
+                    : (e?.message || 'Unknown error');
+                console.warn('Failed to generate PR summary:', aiSummaryError);
             }
 
             // Record review metrics from the VERIFIED set — the same list the
@@ -2339,8 +2440,8 @@ export function createPrReviewHandlers(svc) {
                 await svc.reviewMetricsService.recordReview({
                     repoId,
                     prUrl,
-                    findings: verifiedFindings.filter(f => f.source !== 'static'),
-                    staticFindings: verifiedFindings.filter(f => f.source === 'static'),
+                    findings: verifiedFindings.filter(f => !isDeterministicSource(f.source)),
+                    staticFindings: verifiedFindings.filter(f => isDeterministicSource(f.source)),
                     reviewType: reviewPlan?.mode === REVIEW_MODE.INCREMENTAL ? 'multi-pass-incremental' : 'multi-pass',
                     filesReviewed: filesForEngine.length
                 });
@@ -2422,7 +2523,7 @@ export function createPrReviewHandlers(svc) {
             // finding that view exists to show. They stay distinguishable by
             // `source`/`attribution`, which is what the comment renderer uses.
             const reportableStaticFindings = verifiedFindings.filter(
-                f => f.source === 'static' || f.source === 'external'
+                f => isDeterministicSource(f.source)
             );
             const precisionRiskScore = svc.staticAnalysisService?.confidenceScorer
                 ?.calculateRiskScore?.(verifiedFindings)
@@ -2462,6 +2563,7 @@ export function createPrReviewHandlers(svc) {
                     reviewSkipped: reviewWasSkipped,
                     partial: result._orchestrated?.meta?.partial ?? null,
                     aiSummary,
+                    aiSummaryError,
                     isMultiPass: true,
                     perFileFindings: result.perFileFindings,
                     // Verified, cited, fix-annotated flat finding set (the authoritative
@@ -2480,6 +2582,7 @@ export function createPrReviewHandlers(svc) {
                         droppedFalsePositives: droppedFindings,
                         fixes: fixStats,
                         graphContextUsed: !!graphContextObj?.available,
+                        graphFindings: graphFindingsStats,
                         // What the ceiling actually cost this review: total spend,
                         // per-stage breakdown, and any stage it refused. Without the
                         // refusal list a budget-shortened review is indistinguishable
@@ -2597,7 +2700,13 @@ export function createPrReviewHandlers(svc) {
             // Cache the completed review against this head SHA. Serves the next
             // open of an unchanged PR outright, and primes the next run after a
             // push. `store` refuses SKIP/DEFER verdicts itself.
-            if (reviewSettings.reviewCache !== false && cacheableRun) {
+            //
+            // A non-empty aiSummaryError also blocks the store: a provider credit
+            // or credential failure is transient and user-fixable (e.g. topping up
+            // an account or switching providers), so caching it would make the
+            // error sticky for the full TTL with no UI escape hatch other than
+            // bypassing the cache entirely.
+            if (reviewSettings.reviewCache !== false && cacheableRun && !aiSummaryError) {
                 try {
                     await reviewCache.store(prUrl, {
                         headSha: prData.headSha,
@@ -2612,6 +2721,43 @@ export function createPrReviewHandlers(svc) {
         } catch (error) {
             try { reviewStatus.set((message.data || message.payload || {}).prUrl, 'error'); } catch { /* ignore */ }
             svc.errorHandler.logError('Multi-pass PR Review', error);
+
+            // A credential failure gets its own kind and its own wording. The
+            // raw provider text is a JSON blob naming an HTTP status; what the
+            // user needs is which credential failed and where to fix it. It is
+            // also broadcast on the progress channel so a popup that is open and
+            // watching a running review is told immediately, rather than only
+            // learning about it if it happens to still be listening for the
+            // final response.
+            if (isAuthError(error)) {
+                let provider = null;
+                try {
+                    provider = (await svc.getStoredSettings())?.provider || null;
+                } catch { /* provider is a nicety in the message, not required */ }
+                const friendly = describeAuthError(error, { provider });
+                try {
+                    chrome.runtime.sendMessage({
+                        type: 'PR_REVIEW_PROGRESS',
+                        data: {
+                            phase: 'error',
+                            errorKind: 'auth',
+                            provider,
+                            message: friendly,
+                        },
+                    }).catch(() => { /* no listener — the response below still carries it */ });
+                } catch { /* ignore */ }
+
+                sendResponse({
+                    success: false,
+                    error: friendly,
+                    errorKind: 'auth',
+                    provider,
+                    // The provider's own words, for a user who needs the detail.
+                    providerError: svc.getErrorMessage(error),
+                });
+                return;
+            }
+
             sendResponse({
                 success: false,
                 error: svc.getErrorMessage(error)
@@ -2727,12 +2873,28 @@ export function createPrReviewHandlers(svc) {
             if (options.generateFixes !== false) {
                 const needFixes = inlineFindings.filter(f => !f.suggestedFix);
                 if (needFixes.length) {
+                    // Posting is a separate action from the review, so it does not
+                    // inherit the review's budget — but it spends the same key on
+                    // the same model, so it answers to the same setting. Without
+                    // this, one click could issue up to 25 unmetered calls.
+                    const postBudget = CallBudget.fromSettings(
+                        { maxAiCalls: reviewSettings.maxAiCalls },
+                        {
+                            onRefusal: (r) => console.warn(
+                                `💸 Call budget refused stage "${r.stage}" while posting `
+                                + `(${r.remaining} left of ${postBudget.limit})`
+                            ),
+                        },
+                    );
+                    svc.llmService?.setCallBudget?.(postBudget);
                     try {
                         await svc.pullRequestService.generateFixSuggestions(
                             needFixes, svc.llmService, settings
                         );
                     } catch (e) {
                         console.warn('Fix suggestion generation failed:', e.message);
+                    } finally {
+                        svc.llmService?.clearCallBudget?.();
                     }
                 }
             }
@@ -2767,6 +2929,9 @@ export function createPrReviewHandlers(svc) {
 
             const externalSection = renderExternalSection(rq?.externalFindings);
             if (externalSection) summaryBody += `\n${externalSection}\n`;
+
+            const graphSection = renderGraphSection(rq?.graphFindings);
+            if (graphSection) summaryBody += `\n${graphSection}\n`;
 
             // What this team decided about these rules before. Rendered from the
             // findings themselves (each carries `priorFindings` after the review

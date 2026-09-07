@@ -5,6 +5,7 @@
 
 import { LLM_PROVIDERS, API_ENDPOINTS } from '../utils/constants.js';
 import { resolveModel } from '../utils/modelResolver.js';
+import { normalizeOpenAIRequest } from '../utils/openaiParams.js';
 import {
     buildAnthropicSystem,
     extractCacheUsage,
@@ -15,7 +16,9 @@ import {
     normalizeAnthropicToolCalls,
     normalizeOpenAIToolCalls,
 } from '../utils/toolProtocol.js';
-import { PRIORITY } from '../utils/callBudget.js';
+import { PRIORITY, BUDGET_ERROR_NAME } from '../utils/callBudget.js';
+import { BedrockClient } from './BedrockClient.js';
+import { isAuthError, markAuthError } from '../utils/authErrors.js';
 
 export class LLMService {
     constructor() {
@@ -29,6 +32,30 @@ export class LLMService {
          * the service, so the orchestrator sets and clears it.
          */
         this.callBudget = null;
+        /**
+         * AWS credentials for the Bedrock provider.
+         *
+         * Held on the service rather than threaded through every call because
+         * Bedrock is the one provider whose credential is not a single string:
+         * it needs an access key, a secret, an optional session token AND a
+         * region. The codebase passes `apiKey` — one string — through ~15 call
+         * sites, and widening every stage's signature for the benefit of one
+         * provider is a worse trade than one piece of explicit service state.
+         *
+         * Set from stored settings alongside the other provider tokens. Null
+         * means Bedrock is not configured, and `callBedrock` says exactly that
+         * rather than failing deep inside the signing code.
+         */
+        this.bedrockCredentials = null;
+    }
+
+    /**
+     * @param {Object|null} creds - { accessKeyId, secretAccessKey, sessionToken, region }
+     */
+    setBedrockCredentials(creds) {
+        this.bedrockCredentials = creds && creds.accessKeyId && creds.secretAccessKey
+            ? { ...creds }
+            : null;
     }
 
     /**
@@ -57,7 +84,7 @@ export class LLMService {
      * nothing transient to wait for) or reporting the model as unavailable.
      */
     static isBudgetError(error) {
-        return !!error && error.name === 'CallBudgetExceededError';
+        return !!error && error.name === BUDGET_ERROR_NAME;
     }
 
     /**
@@ -74,6 +101,19 @@ export class LLMService {
      * @returns {boolean}
      */
     static supportsTools(provider) {
+        // Bedrock is deliberately absent. Converse HAS a `toolConfig`, but this
+        // client does not build one and returns an empty `toolCalls` list, so
+        // claiming tool support would enable the repo-exploration loop and then
+        // have every turn come back with no tool call — an exploration pass that
+        // silently explores nothing. Add it here in the same change that
+        // implements toolConfig, not before.
+        //
+        // OpenRouter and NVIDIA NIM are absent for the Ollama reason, not the
+        // Bedrock one: both PASS tools through in the OpenAI format, but whether
+        // they are honoured depends entirely on which model behind the gateway
+        // was selected, and the same key can select either kind. A loop that
+        // half-works across a fleet is worse than no loop, because "the model
+        // made no tool call" is indistinguishable from "this model cannot".
         return provider === LLM_PROVIDERS.OPENAI
             || provider === LLM_PROVIDERS.ANTHROPIC
             || provider === LLM_PROVIDERS.GROQ
@@ -84,6 +124,9 @@ export class LLMService {
      * Check if an error is retryable (transient)
      */
     isRetryableError(error) {
+        // A wrong key is wrong on the second attempt too. Retrying it only
+        // multiplies the latency before the user is told what is actually wrong.
+        if (isAuthError(error)) return false;
         const msg = (error.message || '').toLowerCase();
         // Retry on rate limits, server errors, and network failures
         if (/429|rate.?limit|too many requests/i.test(msg)) return true;
@@ -228,7 +271,7 @@ export class LLMService {
                     + `— refused stage "${options.budgetStage || 'llm'}". `
                     + 'Raise "Max AI calls per review" in Settings, or set it to 0 for no limit.'
                 );
-                err.name = 'CallBudgetExceededError';
+                err.name = BUDGET_ERROR_NAME;
                 err.budget = this.callBudget.snapshot();
                 throw err;
             }
@@ -256,14 +299,35 @@ export class LLMService {
 
         // Skip retry for streaming requests (can't replay partial chunks)
         if (options.streaming) {
-            return this._dispatchToProvider(provider, normalizedRequest, apiKey, options);
+            return this._tagAuthFailures(
+                () => this._dispatchToProvider(provider, normalizedRequest, apiKey, options)
+            );
         }
 
         // Wrap non-streaming calls with retry logic
-        return this.withRetry(
+        return this._tagAuthFailures(() => this.withRetry(
             () => this._dispatchToProvider(provider, normalizedRequest, apiKey, options),
             `${provider}:${modelId}`
-        );
+        ));
+    }
+
+    /**
+     * Run `fn`, marking a credential failure so every layer above can recognise
+     * one without re-matching provider-specific error text.
+     *
+     * Tagged HERE, at the one choke point every call passes through, for the same
+     * reason the budget is enforced here: a classification each caller has to
+     * remember to apply is one that leaks the first time a pass is added — and
+     * the cost of missing it is a review that reports "clean" on code it never
+     * read.
+     */
+    async _tagAuthFailures(fn) {
+        try {
+            return await fn();
+        } catch (error) {
+            if (isAuthError(error)) markAuthError(error);
+            throw error;
+        }
     }
 
     /**
@@ -285,6 +349,15 @@ export class LLMService {
 
             case LLM_PROVIDERS.MISTRAL:
                 return this.callMistral(normalizedRequest, apiKey, options);
+
+            case LLM_PROVIDERS.OPENROUTER:
+                return this.callOpenRouter(normalizedRequest, apiKey, options);
+
+            case LLM_PROVIDERS.NVIDIA:
+                return this.callNvidia(normalizedRequest, apiKey, options);
+
+            case LLM_PROVIDERS.BEDROCK:
+                return this.callBedrock(normalizedRequest, options);
 
             case LLM_PROVIDERS.LOCAL:
                 return this.callOllama(normalizedRequest, options);
@@ -318,8 +391,23 @@ export class LLMService {
         }
 
         try {
+            // The reasoning families refuse `max_tokens` and the sampling
+            // controls, with a flat 400 that names the parameter but not the
+            // remedy. Translated at the transport so no caller has to know
+            // which dialect the model it selected speaks — and logged, because
+            // a request quietly missing the temperature it asked for should be
+            // visible when someone wonders why output varies.
+            const { request: shaped, renamed, dropped } = normalizeOpenAIRequest(requestData);
+            if (renamed.length || dropped.length) {
+                console.log('🔧 OpenAI reasoning-model params adjusted:', {
+                    model: requestData.model,
+                    renamed,
+                    dropped,
+                });
+            }
+
             const requestBody = {
-                ...requestData,
+                ...shaped,
                 stream: streaming
             };
 
@@ -496,6 +584,64 @@ export class LLMService {
                 },
             };
         } finally {
+            if (options.requestId) {
+                this.activeRequests.delete(options.requestId);
+            }
+        }
+    }
+
+    /**
+     * AWS Bedrock call, via the Converse API.
+     *
+     * Note the signature: no `apiKey`. Bedrock authenticates with a SigV4
+     * signature over IAM credentials, which live on the service (see
+     * `setBedrockCredentials`) because they are four values, not one string.
+     */
+    async callBedrock(requestData, options = {}) {
+        const { streaming = false, onChunk = null, timeout = 120000 } = options;
+
+        const creds = this.bedrockCredentials;
+        if (!creds) {
+            throw new Error(
+                'AWS Bedrock is selected but no credentials are configured. Add your '
+                + 'Access Key ID, Secret Access Key and region in Settings.'
+            );
+        }
+
+        console.log('📡 AWS Bedrock call:', {
+            model: requestData.model,
+            region: creds.region,
+            streaming,
+        });
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeout);
+        if (options.requestId) {
+            this.activeRequests.set(options.requestId, controller);
+        }
+
+        try {
+            const client = new BedrockClient(creds);
+            const callOptions = { ...options, signal: controller.signal };
+
+            const result = streaming
+                ? await client.converseStream(requestData, onChunk, callOptions)
+                : await client.converse(requestData, callOptions);
+
+            return {
+                content: result.content,
+                // Converse has no tool-call surface wired up here yet; returning
+                // an empty list keeps the response shape identical to every other
+                // provider so callers need no Bedrock-specific branch.
+                toolCalls: [],
+                stopReason: result.stopReason,
+                usage: {
+                    input: result.usage?.input ?? 0,
+                    output: result.usage?.output ?? 0,
+                },
+            };
+        } finally {
+            clearTimeout(timeoutId);
             if (options.requestId) {
                 this.activeRequests.delete(options.requestId);
             }
@@ -707,6 +853,96 @@ export class LLMService {
                 this.activeRequests.delete(options.requestId);
             }
         }
+    }
+
+    /**
+     * One implementation for the OpenAI-compatible gateways.
+     *
+     * callOpenAI/callGroq/callMistral are three copies of this same body, which
+     * is why each new gateway used to mean a fourth. New providers of this shape
+     * go here instead; the existing three are left alone deliberately — OpenAI's
+     * differs (tool-call normalisation) and rewriting the other two would churn
+     * the hot path of every current user for no behavioural gain.
+     *
+     * @param {string} provider - LLM_PROVIDERS value, used for the endpoint lookup
+     * @param {string} label - name for logs and error text
+     * @param {Object} [extraHeaders] - provider-specific headers
+     */
+    async _callOpenAICompatible(provider, label, requestData, apiKey, options = {}, extraHeaders = {}) {
+        const { streaming = false, onChunk = null, tabId = null, timeout = 120000 } = options;
+        const endpoint = API_ENDPOINTS[provider].chat;
+
+        console.log(`📡 ${label} API call:`, { model: requestData.model, streaming });
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+        if (options.requestId) {
+            this.activeRequests.set(options.requestId, controller);
+        }
+
+        try {
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiKey}`,
+                    ...extraHeaders,
+                },
+                body: JSON.stringify({ ...requestData, stream: streaming }),
+                signal: controller.signal,
+            });
+
+            clearTimeout(timeoutId);
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`${label} API error (${response.status}): ${errorText}`);
+            }
+
+            if (streaming) {
+                return this.handleStreamingResponse(response, onChunk, tabId, options);
+            }
+
+            const data = await response.json();
+            const message = data.choices?.[0]?.message || {};
+            return {
+                content: message.content || '',
+                usage: {
+                    input: data.usage?.prompt_tokens ?? 0,
+                    output: data.usage?.completion_tokens ?? 0,
+                    ...extractCacheUsage(data.usage, LLM_PROVIDERS.OPENAI),
+                },
+            };
+        } finally {
+            if (options.requestId) {
+                this.activeRequests.delete(options.requestId);
+            }
+        }
+    }
+
+    /**
+     * OpenRouter API call (OpenAI-compatible).
+     *
+     * `X-Title` is OpenRouter's app-attribution header. It is not required, but
+     * without it the user's OpenRouter activity page lists every RepoSpector
+     * review as "unknown app", which makes their own spend impossible to
+     * attribute. No user data is in it.
+     */
+    async callOpenRouter(requestData, apiKey, options = {}) {
+        return this._callOpenAICompatible(
+            LLM_PROVIDERS.OPENROUTER, 'OpenRouter', requestData, apiKey, options,
+            { 'X-Title': 'RepoSpector' },
+        );
+    }
+
+    /**
+     * NVIDIA NIM API call (OpenAI-compatible).
+     */
+    async callNvidia(requestData, apiKey, options = {}) {
+        return this._callOpenAICompatible(
+            LLM_PROVIDERS.NVIDIA, 'NVIDIA NIM', requestData, apiKey, options,
+        );
     }
 
     /**

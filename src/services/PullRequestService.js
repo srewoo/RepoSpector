@@ -5,6 +5,7 @@
  */
 
 import { detectLanguageFromPath } from '../utils/languageMap.js';
+import { PRIORITY } from '../utils/callBudget.js';
 import { formatInlineComments } from '../utils/inlineCommentFormatter.js';
 import { buildCommentableLineMap, oldLineForNewLine } from '../utils/patchLines.js';
 import { githubApiBase, gitlabApiBase, rememberGitLabHost, detectPlatform, PLATFORM } from '../utils/gitHosts.js';
@@ -1226,9 +1227,13 @@ export class PullRequestService {
             const content = await response.text();
             return { content, filePath };
         } else if (prInfo.platform === 'gitlab') {
-            const projectPath = encodeURIComponent(`${prInfo.owner}/${prInfo.repo}`);
+            const { owner, repo, projectPath: fullProjectPath } = prInfo;
+            const projectPath = encodeURIComponent(fullProjectPath || `${owner}/${repo}`);
             const encodedPath = encodeURIComponent(filePath);
             const headers = this.gitlabToken ? { 'PRIVATE-TOKEN': this.gitlabToken } : {};
+            // NOTE: the 'main' fallback returns the TARGET branch's version of the file,
+            // not the merge request's — callers should always pass an explicit ref.
+            // ReviewFileContextService already does this.
             const url = `${gitlabApiBase(prUrl)}/projects/${projectPath}/repository/files/${encodedPath}/raw${ref ? `?ref=${ref}` : '?ref=main'}`;
             const response = await fetch(url, { headers });
             if (!response.ok) throw new Error(`Failed to fetch file: ${response.status}`);
@@ -1884,7 +1889,20 @@ export class PullRequestService {
                         { role: 'system', content: 'You are a code fixer. Given a code issue, output ONLY the fixed line(s) of code. No explanation, no markdown, no code fences. Just the corrected code that should replace the problematic line.' },
                         { role: 'user', content: `File: ${locationOf(finding)}\nLine ${finding.line}: ${snippet}\n\nIssue: ${finding.message || finding.title || finding.description || ''}\n\nOutput the fixed code:` }
                     ],
-                    { provider: settings.provider, model: settings.model, apiKey: settings.apiKey, stream: false }
+                    {
+                        provider: settings.provider,
+                        model: settings.model,
+                        apiKey: settings.apiKey,
+                        stream: false,
+                        // Metered like every other pass. This loop is up to 25
+                        // sequential calls on the user's own key and carried no
+                        // budget label, so "Post to PR" could silently cost more
+                        // than the review it was posting. OPTIONAL: a suggestion
+                        // block is a convenience on top of a finding that is
+                        // already written and about to be posted.
+                        budgetStage: 'inline-fixes',
+                        budgetPriority: PRIORITY.OPTIONAL,
+                    }
                 );
 
                 const fix = (response.content || response).trim();

@@ -20,6 +20,8 @@ import { generateRepoInfo, buildExtractedDataSummary, insertAfterHeader } from '
 import { REPO_INFO_ENRICHMENT_SYSTEM_PROMPT, buildRepoInfoEnrichmentPrompt } from '../../utils/repoInfoPrompts.js';
 import { validateMermaidSyntax, sanitizeMermaidCode } from '../mermaidValidation.js';
 import { detectPlatform } from '../../utils/gitHosts.js';
+import { PRTestGenerationService } from '../../services/PRTestGenerationService.js';
+import { ReviewFileContextService } from '../../services/ReviewFileContextService.js';
 
 /**
  * Build the generator message handlers bound to a BackgroundService instance.
@@ -130,10 +132,12 @@ export function createGeneratorHandlers(svc) {
         try {
             const { repoId: providedRepoId, url: providedUrl, diagramType, query } = message.data || message.payload || {};
 
-            // Resolve repoId
+            // Resolve repoId. `svc.getRepoIdFromUrl` does not exist anywhere in
+            // this codebase — the real API is `contextAnalyzer.extractRepoIdFromUrl`,
+            // the same one chatHandlers.js and background/index.js use.
             let repoId = providedRepoId;
             if (!repoId && providedUrl) {
-                repoId = svc.getRepoIdFromUrl(providedUrl);
+                repoId = svc.contextAnalyzer?.extractRepoIdFromUrl(providedUrl, detectPlatform(providedUrl));
             }
             if (!repoId) {
                 sendResponse({ success: false, error: 'Repository ID or URL required' });
@@ -514,6 +518,50 @@ ${typeInstructions[type] || typeInstructions.sequence}
         }
     }
 
+    async function handleGeneratePRTests(message, sendResponse) {
+        try {
+            const { prUrl, files = null, symbols = null, maxFiles = 3 } = message.data || message.payload || {};
+            if (!prUrl) { sendResponse({ success: false, error: 'PR URL required' }); return; }
+
+            await svc.updatePRServiceTokens();
+            const prData = await svc.pullRequestService.fetchPullRequest(prUrl);
+            const settings = await svc.getStoredSettings();
+
+            // Graph is optional: with it, prompts show real call sites.
+            // `svc.getRepoIdFromUrl` does not exist — see the same fix in
+            // handleGenerateRepoDiagram above. Both the load AND the read are
+            // gated on a truthy repoId, matching `collectGraphCallers`: reading
+            // a resident graph with no repo check is the cross-repo
+            // contamination `graphCallerContext.js` exists to prevent.
+            let graph = null;
+            try {
+                const pipeline = svc.codeGraphPipeline;
+                const repoId = svc.contextAnalyzer?.extractRepoIdFromUrl(prUrl, detectPlatform(prUrl));
+                if (pipeline && repoId) {
+                    if (!pipeline.hasGraphFor(repoId) && await pipeline.hasGraph?.(repoId)) {
+                        await pipeline.loadGraph(repoId);
+                    }
+                    if (pipeline.hasGraphFor(repoId)) graph = pipeline.graph;
+                }
+            } catch (e) {
+                console.warn('PR test generation: graph unavailable (non-fatal):', e?.message);
+            }
+
+            const generator = new PRTestGenerationService({
+                llmService: svc.llmService,
+                fileContextService: new ReviewFileContextService({ pullRequestService: svc.pullRequestService }),
+                graph,
+            });
+            const result = await generator.generate(prUrl, prData, settings, {
+                maxFiles, onlyFiles: files, onlySymbols: symbols,
+            });
+            sendResponse({ success: true, data: result });
+        } catch (error) {
+            svc.errorHandler.logError('Generate PR Tests', error);
+            sendResponse({ success: false, error: svc.getErrorMessage(error) });
+        }
+    }
+
     return {
         GENERATE_PR_DESCRIPTION: (m, send) => handleGeneratePRDescription(m, send),
         GENERATE_MERMAID_DIAGRAM: (m, send) => handleGenerateMermaidDiagram(m, send),
@@ -522,5 +570,6 @@ ${typeInstructions[type] || typeInstructions.sequence}
         GENERATE_REPO_DIAGRAM: (m, send) => handleGenerateRepoDiagram(m, send),
         GENERATE_REPO_INFO: (m, send) => handleGenerateRepoInfo(m, send),
         GENERATE_REPO_DOCS: (m, send) => handleGenerateRepoDocs(m, send),
+        GENERATE_PR_TESTS: (m, send) => handleGeneratePRTests(m, send),
     };
 }

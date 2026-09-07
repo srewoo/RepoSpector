@@ -44,14 +44,27 @@ LLM providers, with local embeddings that keep indexing on your machine.
 ### Test generation
 - Generates Unit, Integration, E2E, or comprehensive tests with coverage
   tracking, edge-case analysis, and syntax/quality gates.
+- **PR-scoped generation** — one click writes tests for the exported symbols a
+  PR adds without coverage, appending to the repository's existing test file
+  when one exists and using real call sites from the code graph for
+  arguments. Output is gated by syntax and quality validators.
 
 ### Code knowledge graph
 - Tree-sitter parsing (also in the offscreen document), symbol extraction, a
   call graph, `TESTED_BY` coverage edges, and change-impact analysis.
+  Change-impact analysis is a review input in its own right: see [graph-impact findings](docs/core-abilities/graph-impact-findings.md).
 
 ### Multi-provider, bring-your-own-key
-- OpenAI, Anthropic, Google, Groq, Mistral, HuggingFace, and local models
-  (Ollama). Keys are stored encrypted (AES-GCM with PBKDF2 key derivation).
+- OpenAI, Anthropic, Google, Groq, Mistral, HuggingFace, **OpenRouter**,
+  **NVIDIA NIM**, **AWS Bedrock**, and local models (Ollama). Keys are stored
+  encrypted (AES-GCM with PBKDF2 key derivation).
+- **AWS Bedrock** authenticates with SigV4-signed IAM credentials rather than a
+  key, and reaches the whole catalogue through the Converse API — Anthropic,
+  Nova, Llama, Mistral, Cohere and the rest — with the model list read live from
+  your account. See [docs/core-abilities/bedrock-provider.md](docs/core-abilities/bedrock-provider.md).
+- **OpenRouter** and **NVIDIA NIM** are gateways: one key in front of models
+  from every vendor, over the OpenAI wire format, with the list read live from
+  the gateway. See [docs/core-abilities/gateway-providers.md](docs/core-abilities/gateway-providers.md).
 
 ## 🚀 Installation
 
@@ -87,7 +100,10 @@ Then load it in Chrome:
 - **Static analysis:** run it standalone or as part of a PR review; results are
   merged and confidence-scored alongside the LLM findings.
 - **Generate tests:** select code or a file and choose a test type and context
-  level (Minimal / Smart / Full).
+  level (Minimal / Smart / Full), or, on a PR review, use the **Generate
+  Tests** quick action (or, on a missing-test finding, its **Write Test**
+  button) to generate tests for the exported symbols that PR added without
+  coverage.
 
 ### Supported platforms
 

@@ -13,6 +13,7 @@
  */
 
 import { evaluateSkipRules } from './SkipRuleEngine.js';
+import { isAuthError, markAuthError } from '../utils/authErrors.js';
 import { chunkMR } from './MRChunker.js';
 import {
     buildAssignedHunks,
@@ -289,6 +290,19 @@ export class ReviewOrchestrator {
 
                 if (result.failedFiles?.length) failedChunks.push({ chunk: chunk.index, failedFiles: result.failedFiles });
             } catch (err) {
+                // A credential failure is not a per-chunk problem to note and
+                // move past — it will fail every remaining chunk too, and the
+                // report built from zero findings would read "Clean review".
+                // Abort so the user is told their key is bad instead of being
+                // handed a green verdict on an unreviewed MR.
+                if (isAuthError(err)) {
+                    onProgress?.({
+                        step: 'auth_error',
+                        chunkIndex: chunk.index,
+                        error: err.message,
+                    });
+                    throw markAuthError(err);
+                }
                 failedChunks.push({ chunk: chunk.index, error: err.message });
                 onProgress?.({
                     step: 'deep_review_error',

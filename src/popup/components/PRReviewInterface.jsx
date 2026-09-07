@@ -32,7 +32,9 @@ import { FindingCard } from './FindingCard';
 import { FindingThread } from './FindingThread';
 import { StaticAnalysisResults } from './StaticAnalysisResults';
 import { PRQuickActions } from './QuickActions';
+import { GeneratedTestsPanel } from './GeneratedTestsPanel';
 import { MarkdownRenderer } from './ui/MarkdownRenderer';
+import { symbolFromFinding } from '../../utils/prTestPrompts';
 // Lazy: keeps mermaid + react-zoom-pan-pinch out of the popup's first paint.
 const MermaidDiagram = React.lazy(() =>
     import('./ui/MermaidDiagram').then((m) => ({ default: m.MermaidDiagram }))
@@ -58,6 +60,8 @@ export function PRReviewInterface({
     analysisResult,
     staticAnalysisResult,
     aiSummary,
+    aiSummaryError = null,
+    onOpenSettings = null,
     session,
     onRefresh,
     onAskQuestion,
@@ -94,6 +98,22 @@ export function PRReviewInterface({
 
     const { analysis, staticAnalysis } = analysisResult || {};
 
+    // PR-scoped test generation (#12): local state, mirrors the generatedDescription
+    // etc. pattern from usePRReview but does not need to be shared beyond this view.
+    const [prTests, setPrTests] = useState({ loading: false, result: null, error: null });
+
+    const generatePRTests = useCallback(async (scope = {}) => {
+        if (!prUrl || prTests.loading) return;
+        setPrTests({ loading: true, result: null, error: null });
+        try {
+            const res = await chrome.runtime.sendMessage({ type: 'GENERATE_PR_TESTS', data: { prUrl, ...scope } });
+            if (!res?.success) throw new Error(res?.error || 'Test generation failed');
+            setPrTests({ loading: false, result: res.data, error: null });
+        } catch (e) {
+            setPrTests({ loading: false, result: null, error: e.message });
+        }
+    }, [prUrl, prTests.loading]);
+
     // Handle PR-level quick actions (local to this component — delegates to parent callbacks)
     const handlePRAction = useCallback((actionId) => {
         switch (actionId) {
@@ -108,8 +128,19 @@ export function PRReviewInterface({
             case 'refresh':
                 onRefresh?.();
                 break;
+            case 'generate-tests':
+                generatePRTests();
+                break;
         }
-    }, [onFocusArea, onAskQuestion, onRefresh]);
+    }, [onFocusArea, onAskQuestion, onRefresh, generatePRTests]);
+
+    // Handle finding-level "Write Test" quick action: scope generation to
+    // just that finding's file and symbol.
+    const handleFindingAction = useCallback((actionId, finding) => {
+        if (actionId !== 'write-test') return;
+        const symbol = symbolFromFinding(finding);
+        generatePRTests({ files: [finding.file], symbols: symbol ? [symbol] : null, maxFiles: 1 });
+    }, [generatePRTests]);
 
     // Handle finding-level resolve (records to adaptive learning)
     const handleResolveFinding = useCallback(async (finding) => {
@@ -454,7 +485,7 @@ export function PRReviewInterface({
                     <div className="flex items-center justify-between gap-2">
                         <PRQuickActions
                             onAction={handlePRAction}
-                            disabled={loading}
+                            disabled={loading || prTests.loading}
                         />
                         <Button
                             variant="outline"
@@ -471,6 +502,14 @@ export function PRReviewInterface({
                             {postingReview ? 'Posting...' : 'Post to PR'}
                         </Button>
                     </div>
+                    {(prTests.loading || prTests.result || prTests.error) && (
+                        <GeneratedTestsPanel
+                            loading={prTests.loading}
+                            result={prTests.result}
+                            error={prTests.error}
+                            onClose={() => setPrTests({ loading: false, result: null, error: null })}
+                        />
+                    )}
                     {postResult && (
                         <div className={cn(
                             'mt-2 px-3 py-2 rounded-lg text-xs flex items-center gap-2',
@@ -529,6 +568,29 @@ export function PRReviewInterface({
                 </div>
             )}
 
+            {/* Budget shortfall. A review whose optional passes were refused is a
+                WEAKER review, and until now that was invisible: no scoring, no fix
+                suggestions and no summary looked identical to a PR that simply
+                warranted none. The note names the stages it lost and the setting
+                that lifts the ceiling. */}
+            {!loading && analysisResult?.reviewQuality?.callBudgetNote && (
+                <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-500">
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                    <div className="space-y-1">
+                        <p>{analysisResult.reviewQuality.callBudgetNote}</p>
+                        {onOpenSettings && (
+                            <button
+                                type="button"
+                                onClick={onOpenSettings}
+                                className="underline hover:no-underline font-medium"
+                            >
+                                Open Settings
+                            </button>
+                        )}
+                    </div>
+                </div>
+            )}
+
             {/* Tab Content */}
             <LazyAnimatePresence mode="wait">
                 {activeTab === 'summary' && (
@@ -551,8 +613,27 @@ export function PRReviewInterface({
                         ) : (
                             <Card className="p-6 text-center">
                                 <p className="text-textMuted text-sm">
-                                    {loading ? 'Generating summary...' : 'No AI summary available for this PR.'}
+                                    {loading
+                                        ? 'Generating summary...'
+                                        : aiSummaryError
+                                            ? 'The summary could not be generated for this PR.'
+                                            : 'No AI summary available for this PR.'}
                                 </p>
+                                {/* The reason, verbatim. A blank empty state sent the
+                                    reader looking for a missing feature instead of the
+                                    setting or provider error that actually stopped it. */}
+                                {!loading && aiSummaryError && (
+                                    <p className="mt-2 text-xs text-amber-500">{aiSummaryError}</p>
+                                )}
+                                {!loading && (
+                                    <Button
+                                        variant="outline" size="sm" onClick={onRefresh}
+                                        className="mt-3 text-xs"
+                                    >
+                                        <RefreshCw className="w-3 h-3 mr-1" />
+                                        Re-run review
+                                    </Button>
+                                )}
                             </Card>
                         )}
 
@@ -876,6 +957,7 @@ export function PRReviewInterface({
                                         finding={finding}
                                         onDismiss={handleDismissFinding}
                                         onMarkResolved={handleResolveFinding}
+                                        onFindingAction={handleFindingAction}
                                     />
                                     <button
                                         onClick={() => handleOpenThread(finding)}

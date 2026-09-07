@@ -1,7 +1,7 @@
 # Call budget
 
 **Module:** `src/utils/callBudget.js` · **Setting:** Review Quality →
-*Max AI Calls per Review* (`reviewSettings.maxAiCalls`, default 60, `0` = no limit)
+*Max AI Calls per Review* (`reviewSettings.maxAiCalls`, default 150, `0` = no limit)
 
 ## The problem
 
@@ -31,10 +31,16 @@ that leaks the first time someone adds a pass.
 spend the last of the allowance on a re-ranking pass and then refuse the review
 unit that would have produced the findings being ranked.
 
+`summary` is `important` rather than `optional` despite being presentation: it is
+the LAST stage of the review, so there is no later allowance for a floor to
+protect, and it is the first thing the reader sees. Held below the optional floor
+it went missing on exactly the large PRs that most needed it — and said nothing
+about why.
+
 | Priority | Stages | May spend |
 |---|---|---|
 | `essential` | `per-file`, `aggregate`, `finder`, `line-question` | the whole budget |
-| `important` | `verify` | the whole budget |
+| `important` | `verify`, `summary` | the whole budget |
 | `optional` | `scoring`, `fixes`, `explore`, `docstrings` | down to a 15% floor |
 
 ## Exhaustion is not an error
@@ -83,5 +89,30 @@ budget a review may spend is a lockout, not a policy.
 ## Reported as
 
 `reviewQuality.callBudget` — `{limit, used, remaining, byStage, refusals}` — plus
-`reviewQuality.callBudgetNote`, one line naming the skipped stages, which is
-non-null only when the ceiling actually got in the way.
+`reviewQuality.callBudgetNote`, one line naming the skipped stages **and the
+setting that lifts the ceiling**, non-null only when the ceiling actually got in
+the way. The PR review view renders that note as a warning banner: a review that
+silently lost its scoring, fixes and summary is indistinguishable from a PR that
+warranted none of them.
+
+## Sizing the default
+
+The default is derived from a review at the pipeline's own upper bound — 60 files
+(`PARTIAL_MAX_FILES`, `SkipRuleEngine.js:37`) — not from a guess:
+
+| stage | typical at 60 files | note |
+|---|---|---|
+| `per-file` | ~60 | 1 per review unit; no max-units constant exists |
+| `aggregate` | ~4 | **1 per chunk** (15 files/chunk), not 1 per review |
+| `finder` | ~7 | ≤18 (9 lenses × 2 rounds), early-exits on a dry round |
+| `verify` | 0 | LLM refuter is opt-in (`llmRefutation: false`) |
+| `explore` | 0 | reasoning models only |
+| `scoring` | ~4 | `ceil(findings / 15)`, uncapped |
+| `fixes` | ~15 | `ceil(per-file findings / 6)`, ≤40 findings |
+| `summary` | 1 | fixed |
+| | **≈90** | |
+
+150 leaves headroom over that while still refusing the runaway case: a
+forced-split MR (one chunk per oversized file, `MRChunker.js:222-232`) requests
+~190. Note `HUNK_WINDOWING` is `false` by default, so windowing multiplies units
+only under the eval harness.

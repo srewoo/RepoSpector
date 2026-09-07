@@ -43,18 +43,132 @@ describe('settingsHandlers', () => {
     });
 
     describe('VALIDATE_API_KEY', () => {
-        it('reports valid when the OpenAI models endpoint returns ok', async () => {
-            global.fetch = jest.fn(async () => ({ ok: true }));
+        // Was a hardcoded GET to api.openai.com/v1/models, which reported every
+        // non-OpenAI key as invalid and proved nothing about invoke access even
+        // for OpenAI. It now sends the smallest real request the review would
+        // send, to the provider and model actually selected.
+        const chatOk = () => jest.fn(async () => ({
+            ok: true,
+            json: async () => ({ choices: [{ message: { content: 'OK' } }], usage: {} }),
+        }));
+
+        it('probes the selected provider and model, not OpenAI', async () => {
+            global.fetch = chatOk();
             const send = jest.fn();
-            await build(makeSvc()).VALIDATE_API_KEY({ data: { apiKey: 'sk-x' } }, send);
-            expect(send).toHaveBeenCalledWith({ success: true, valid: true });
+            await build(makeSvc()).VALIDATE_API_KEY(
+                { data: { provider: 'nvidia', model: 'nvidia:meta/llama-3.3-70b-instruct', apiKey: 'nvapi-x' } },
+                send,
+            );
+
+            const [url, init] = global.fetch.mock.calls[0];
+            expect(url).toBe('https://integrate.api.nvidia.com/v1/chat/completions');
+            expect(init.headers.Authorization).toBe('Bearer nvapi-x');
+            // A probe must be cheap enough that pressing the button is free.
+            expect(JSON.parse(init.body).max_tokens).toBe(16);
+
+            expect(send).toHaveBeenCalledWith(expect.objectContaining({
+                success: true, state: 'ok', keyProven: true,
+            }));
         });
 
-        it('reports invalid when the request throws', async () => {
-            global.fetch = jest.fn(async () => { throw new Error('network'); });
+        it('falls back to the stored key when the field is masked', async () => {
+            global.fetch = chatOk();
             const send = jest.fn();
-            await build(makeSvc()).VALIDATE_API_KEY({ data: { apiKey: 'sk-x' } }, send);
-            expect(send).toHaveBeenCalledWith({ success: false, valid: false, error: 'network' });
+            // The popup never gets the stored secret back, so it sends ''.
+            await build(makeSvc()).VALIDATE_API_KEY(
+                { data: { provider: 'openai', model: 'openai:gpt-4.1-mini', apiKey: '' } },
+                send,
+            );
+            expect(global.fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer sk-x');
+            expect(send).toHaveBeenCalledWith(expect.objectContaining({ keyProven: true }));
+        });
+
+        it('says a key is missing without calling the provider', async () => {
+            global.fetch = jest.fn();
+            const send = jest.fn();
+            const svc = makeSvc({ getStoredSettings: jest.fn(async () => ({})) });
+            await build(svc).VALIDATE_API_KEY(
+                { data: { provider: 'openai', model: 'openai:gpt-4.1-mini', apiKey: '' } },
+                send,
+            );
+            expect(global.fetch).not.toHaveBeenCalled();
+            expect(send).toHaveBeenCalledWith(expect.objectContaining({
+                state: 'key-invalid', keyProven: false, message: 'Enter an API key first.',
+            }));
+        });
+
+        it('reports a rejected key as a verdict, not as a failed request', async () => {
+            global.fetch = jest.fn(async () => ({
+                ok: false, status: 401, text: async () => 'invalid api key',
+            }));
+            const send = jest.fn();
+            await build(makeSvc()).VALIDATE_API_KEY(
+                { data: { provider: 'openai', model: 'openai:gpt-4.1-mini', apiKey: 'sk-bad' } },
+                send,
+            );
+            // `success: true` — the test RAN. The popup renders the verdict
+            // rather than a generic "the request failed".
+            expect(send).toHaveBeenCalledWith(expect.objectContaining({
+                success: true, state: 'key-invalid', keyProven: false, status: 401,
+            }));
+        });
+
+        it('distinguishes an out-of-credit account from a bad key', async () => {
+            global.fetch = jest.fn(async () => ({
+                ok: false, status: 402, text: async () => 'insufficient credits',
+            }));
+            const send = jest.fn();
+            await build(makeSvc()).VALIDATE_API_KEY(
+                { data: { provider: 'openrouter', model: 'openrouter:openai/gpt-4o', apiKey: 'sk-or-v1-x' } },
+                send,
+            );
+            expect(send).toHaveBeenCalledWith(expect.objectContaining({
+                state: 'billing', keyProven: true,
+            }));
+        });
+
+        it('does not retry: one press is one request', async () => {
+            global.fetch = jest.fn(async () => ({
+                ok: false, status: 503, text: async () => 'unavailable',
+            }));
+            const send = jest.fn();
+            await build(makeSvc()).VALIDATE_API_KEY(
+                { data: { provider: 'openai', model: 'openai:gpt-4.1-mini', apiKey: 'sk-x' } },
+                send,
+            );
+            // A 503 is retryable in the review path; here it would only make the
+            // user wait ~30s to be told what the first response already said.
+            expect(global.fetch).toHaveBeenCalledTimes(1);
+            expect(send).toHaveBeenCalledWith(expect.objectContaining({ state: 'unreachable' }));
+        });
+
+        it('gives a reasoning model room to answer, in the parameter it accepts', async () => {
+            global.fetch = chatOk();
+            const send = jest.fn();
+            await build(makeSvc()).VALIDATE_API_KEY(
+                { data: { provider: 'openai', model: 'openai:o4-mini', apiKey: 'sk-x' } },
+                send,
+            );
+
+            const body = JSON.parse(global.fetch.mock.calls[0][1].body);
+            // A 16-token cap is spent entirely on reasoning, so the probe would
+            // report "empty reply" for a call that worked perfectly.
+            expect(body.max_completion_tokens).toBe(256);
+            // And `max_tokens` on this family is a flat 400 — which the probe
+            // would have reported as a model problem on a working key.
+            expect(body).not.toHaveProperty('max_tokens');
+            expect(send).toHaveBeenCalledWith(expect.objectContaining({ state: 'ok' }));
+        });
+
+        it('refuses to probe when no model is selected', async () => {
+            global.fetch = jest.fn();
+            const send = jest.fn();
+            await build(makeSvc()).VALIDATE_API_KEY(
+                { data: { provider: 'openai', model: '', apiKey: 'sk-x' } },
+                send,
+            );
+            expect(global.fetch).not.toHaveBeenCalled();
+            expect(send).toHaveBeenCalledWith(expect.objectContaining({ keyProven: false }));
         });
     });
 

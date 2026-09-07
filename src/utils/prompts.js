@@ -118,6 +118,15 @@ Based on existing tests in the repository, use **${context.detectedFramework}** 
 `;
     }
 
+    // Add graph caller context if available (real call sites from the code graph)
+    if (Array.isArray(context.graphCallers) && context.graphCallers.length) {
+        prompt += `
+### How production code calls the functions under test
+Use these real call sites to pick realistic arguments and expected results:
+${context.graphCallers.map(g => g.callers.map(c => `- \`${g.symbol}\` ← \`${c.name}\` (${c.filePath}:${c.line ?? '?'})`).join('\n')).join('\n')}
+`;
+    }
+
     // Add the comprehensive test requirements (pass context for framework detection)
     prompt += buildTestRequirements(testType, isAllTypes, options, context);
 

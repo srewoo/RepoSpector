@@ -29,12 +29,35 @@
 export const UNLIMITED = 0;
 
 /**
- * Default ceiling. Sized from the worst case the caps below already permit:
- * ~24 review units (chunking × windowing) + 1 aggregation + ~8 verification
- * batches + ~4 scoring batches, with headroom. Deliberately generous — this is
- * a runaway guard, not a rationing scheme.
+ * `Error.name` carried by a refusal.
+ *
+ * Owned here rather than by `LLMService` because a refusal is a BUDGET fact that
+ * layers below the LLM client have to recognise — `batchProcessor` must not retry
+ * one, and a util importing the LLM service to ask would be a dependency the
+ * wrong way round.
  */
-export const DEFAULT_MAX_AI_CALLS = 60;
+export const BUDGET_ERROR_NAME = 'CallBudgetExceededError';
+
+/**
+ * Default ceiling, sized from what a review at the pipeline's OWN upper bound
+ * actually costs. `SkipRuleEngine` reviews at most 60 files
+ * (`PARTIAL_MAX_FILES`), and at that size a typical run spends:
+ *
+ *   ~60 per-file units + ~4 aggregations (one PER CHUNK, at 15 files/chunk)
+ *   + ~7 finder lenses + ~4 scoring batches + ~15 fix batches + 1 summary  ≈  90
+ *
+ * 150 covers that with headroom while still refusing the runaway this exists to
+ * catch: a forced-split MR (one chunk per oversized file) requests ~190.
+ *
+ * The previous 60 was sized from a model that had drifted from the code — it
+ * counted one aggregation per REVIEW rather than per chunk, assumed a ~24-unit
+ * cap that does not exist, and omitted the finder, fixes, explore and summary
+ * stages entirely (up to 64 calls, more than the whole budget). The effect was
+ * that a routine 40-file PR sat at ~58/60 and had its optional stages silently
+ * refused. Deliberately generous — this is a runaway guard, not a rationing
+ * scheme.
+ */
+export const DEFAULT_MAX_AI_CALLS = 150;
 
 /** Hard bounds on the user-supplied setting. */
 export const MIN_MAX_AI_CALLS = 5;
@@ -56,8 +79,8 @@ export const PRIORITY = Object.freeze({
 });
 
 /**
- * Fraction of the limit held back from `optional` stages. With the default 60
- * and 0.15, an optional pass is refused with fewer than 9 calls left.
+ * Fraction of the limit held back from `optional` stages. With the default 150
+ * and 0.15, an optional pass is refused with fewer than 23 calls left.
  */
 const OPTIONAL_FLOOR_RATIO = 0.15;
 
@@ -209,8 +232,12 @@ export class CallBudget {
     describeIfConstrained() {
         if (this.unlimited || !this.refusals.length) return '';
         const stages = [...new Set(this.refusals.map(r => r.stage))].join(', ');
-        return `Call budget reached (${this.used}/${this.limit}) — skipped: ${stages}.`;
+        // The remedy is part of the message. A note that only names the skipped
+        // stages tells the reader their review was cut short without telling
+        // them that the ceiling is a setting they own.
+        return `Call budget reached (${this.used}/${this.limit}) — skipped: ${stages}. `
+            + 'Raise "Max AI calls per review" in Settings, or set it to 0 for no limit.';
     }
 }
 
-export default { CallBudget, normalizeMaxAiCalls, PRIORITY, DEFAULT_MAX_AI_CALLS, UNLIMITED };
+export default { CallBudget, normalizeMaxAiCalls, PRIORITY, DEFAULT_MAX_AI_CALLS, UNLIMITED, BUDGET_ERROR_NAME };

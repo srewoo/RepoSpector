@@ -158,6 +158,7 @@ export function buildCommentBody(f) {
     const marks = [];
     if (f.source === 'llm') marks.push('AI review');
     else if (f.source === 'static') marks.push('static analysis');
+    else if (f.source === 'graph') marks.push('code graph');
     if (f.verified === true || f.verdict === 'confirmed') marks.push('verified');
     if (f.confidence != null) {
         const pct = f.confidence <= 1 ? Math.round(f.confidence * 100) : Math.round(f.confidence);

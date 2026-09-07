@@ -101,4 +101,54 @@ export function declarationLineFor(code, symbol) {
     return '';
 }
 
-export default { NOISE, DECL_PATTERNS, extractDeclaredSymbols, addedLines, declarationLineFor };
+/**
+ * Does `code` DECLARE `symbol`? Exact, and deliberately not filtered by
+ * MIN_NAME_LENGTH — unlike `extractDeclaredSymbols`, the caller here already
+ * knows the name it is asking about, so a short name is a real question.
+ *
+ * Relies on the contract stated above DECL_PATTERNS: every pattern captures the
+ * declared name as group 1.
+ */
+export function declaresSymbol(code, symbol) {
+    if (!code || !symbol) return false;
+    for (const pattern of DECL_PATTERNS) {
+        pattern.lastIndex = 0;
+        let m;
+        while ((m = pattern.exec(code)) !== null) {
+            if (m[1] === symbol) { pattern.lastIndex = 0; return true; }
+            // Zero-width match guard: these patterns are module-level and /g.
+            if (m.index === pattern.lastIndex) pattern.lastIndex++;
+        }
+        pattern.lastIndex = 0;
+    }
+    return false;
+}
+
+/**
+ * New-file line number of the first "+" line that DECLARES `symbol`.
+ * Walks hunk headers so the number is what GitHub/GitLab will accept for an
+ * inline comment. Returns null when nothing on a "+" line declares it.
+ */
+export function declarationNewLine(patch, symbol) {
+    if (!patch || !symbol) return null;
+    let newLine = 0;
+    for (const raw of patch.split('\n')) {
+        const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
+        if (hunk) { newLine = Number(hunk[1]) - 1; continue; }
+        if (raw.startsWith('-')) continue;
+        newLine++;
+        if (!raw.startsWith('+')) continue;
+        if (declaresSymbol(raw.slice(1), symbol)) return newLine;
+    }
+    return null;
+}
+
+export default {
+    NOISE,
+    DECL_PATTERNS,
+    extractDeclaredSymbols,
+    addedLines,
+    declarationLineFor,
+    declaresSymbol,
+    declarationNewLine,
+};

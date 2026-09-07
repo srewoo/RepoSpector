@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Save, Eye, EyeOff, Key, AlertCircle, CheckCircle, Cpu, Sun, Moon, Palette, Github, GitBranch, Shield, BarChart2, Trash2 } from 'lucide-react';
+import { Save, Eye, EyeOff, Key, AlertCircle, CheckCircle, Cpu, Sun, Moon, Palette, Github, GitBranch, Shield, BarChart2, Trash2, Loader2, XCircle } from 'lucide-react';
 import { Button } from './ui/Button';
 import { Card, CardHeader, CardTitle, CardContent } from './ui/Card';
 import { Collapsible } from './ui/Collapsible';
@@ -10,6 +10,14 @@ import {
     MAX_MAX_AI_CALLS,
     normalizeMaxAiCalls,
 } from '../../utils/callBudget.js';
+import { PROBE_STATE } from '../../utils/apiKeyProbe.js';
+import {
+    BEDROCK_FALLBACK_MODELS,
+    BEDROCK_REGIONS,
+    DEFAULT_BEDROCK_REGION,
+    OPENROUTER_FALLBACK_MODELS,
+    NVIDIA_FALLBACK_MODELS,
+} from '../../utils/constants.js';
 
 const LLM_PROVIDERS = {
     OPENAI: 'openai',
@@ -17,6 +25,9 @@ const LLM_PROVIDERS = {
     GOOGLE: 'google',
     GROQ: 'groq',
     MISTRAL: 'mistral',
+    OPENROUTER: 'openrouter',
+    NVIDIA: 'nvidia',
+    BEDROCK: 'bedrock',
     LOCAL: 'local'  // Ollama
 };
 
@@ -56,12 +67,66 @@ const AVAILABLE_MODELS = {
         { id: 'mistral:codestral', name: 'Codestral (Code-focused)' },
         { id: 'mistral:mistral-small', name: 'Mistral Small (Fast)' }
     ],
+    // Both gateways serve hundreds of models that change weekly, so hand-listing
+    // them here would be stale on arrival. These mirror the shared fallback
+    // constants; the live list fetched with the user's key is what users actually
+    // pick from.
+    [LLM_PROVIDERS.OPENROUTER]: OPENROUTER_FALLBACK_MODELS.map((m, i) => ({
+        id: `openrouter:${m.id}`,
+        name: m.name,
+        recommended: i === 0,
+    })),
+    [LLM_PROVIDERS.NVIDIA]: NVIDIA_FALLBACK_MODELS.map((m, i) => ({
+        id: `nvidia:${m.id}`,
+        name: m.name,
+        recommended: i === 0,
+    })),
+    // Mirrors BEDROCK_FALLBACK_MODELS so the dropdown is populated before any
+    // signed listing call has run. See constants.js for why the id prefix
+    // (global./us./eu./bare) is the part that decides whether a model works.
+    [LLM_PROVIDERS.BEDROCK]: BEDROCK_FALLBACK_MODELS.map((m, i) => ({
+        id: `bedrock:${m.id}`,
+        name: m.name,
+        recommended: i === 0,
+    })),
     [LLM_PROVIDERS.LOCAL]: [
         { id: 'local:llama3.3', name: 'Llama 3.3 (Latest)', recommended: true },
         { id: 'local:deepseek-coder-v2', name: 'DeepSeek Coder V2' },
         { id: 'local:qwen2.5-coder', name: 'Qwen 2.5 Coder (32B)' }
     ]
 };
+
+/**
+ * The verdict from "Test key".
+ *
+ * Three tones, not two, because the middle case is real and common: the key
+ * authenticated but something else stopped the call (no credits, rate limit, a
+ * model the account cannot reach). Painting that red would send the user to
+ * regenerate a working key; painting it green would promise a review that will
+ * not run. Amber says "key fine, fix this".
+ */
+function KeyTestVerdict({ result }) {
+    if (!result) return null;
+
+    const ok = result.state === PROBE_STATE.OK;
+    const tone = ok
+        ? { box: 'bg-success/10 border-success/20', text: 'text-success', Icon: CheckCircle }
+        : result.keyProven
+            ? { box: 'bg-amber-500/10 border-amber-500/20', text: 'text-amber-500', Icon: AlertCircle }
+            : { box: 'bg-red-500/10 border-red-500/20', text: 'text-red-400', Icon: XCircle };
+
+    return (
+        <div className={`flex items-start gap-2 p-3 border rounded-lg ${tone.box}`}>
+            <tone.Icon className={`w-4 h-4 mt-0.5 flex-shrink-0 ${tone.text}`} />
+            <div className={`text-xs ${tone.text}`}>
+                <p className="font-medium">
+                    {ok ? 'Key verified' : result.keyProven ? 'Key is valid, but…' : 'Test failed'}
+                </p>
+                <p className="mt-0.5 opacity-90">{result.message}</p>
+            </div>
+        </div>
+    );
+}
 
 export function Settings({ onClose }) {
     const { theme, toggleTheme } = useTheme();
@@ -86,6 +151,28 @@ export function Settings({ onClose }) {
     const [isSaved, setIsSaved] = useState(false);
     const [error, setError] = useState(null);
     const [hasExistingKey, setHasExistingKey] = useState(false);
+    // AWS Bedrock credentials. Four fields rather than one key: Bedrock signs
+    // each request with IAM credentials instead of sending a bearer token, and
+    // the region is part of both the endpoint and the signature.
+    const [bedrockAccessKeyId, setBedrockAccessKeyId] = useState('');
+    const [bedrockSecretKey, setBedrockSecretKey] = useState('');
+    const [bedrockSessionToken, setBedrockSessionToken] = useState('');
+    const [bedrockRegion, setBedrockRegion] = useState(DEFAULT_BEDROCK_REGION);
+    // True when the region is one the built-in list does not carry, so the field
+    // becomes free text. Set on load as well as by the "Other…" option — a saved
+    // region absent from the list must not be silently replaced by a listed one.
+    const [bedrockRegionCustom, setBedrockRegionCustom] = useState(false);
+    const [showBedrockSecret, setShowBedrockSecret] = useState(false);
+    // True when the model list shown is the built-in one because live listing
+    // failed. Distinguishing the two is the whole point of showing a count.
+    const [modelsAreFallback, setModelsAreFallback] = useState(false);
+
+    // Result of the last "Test key" press: null = never run.
+    // `{ state, keyProven, message }` straight from the background probe — the
+    // verdict is composed there so the popup and any other caller cannot drift
+    // into wording it differently.
+    const [keyTest, setKeyTest] = useState(null);
+    const [keyTesting, setKeyTesting] = useState(false);
 
     // Git platform tokens (for RAG indexing)
     const [githubToken, setGithubToken] = useState('');
@@ -150,6 +237,12 @@ export function Settings({ onClose }) {
                     const settings = response.data;
                     setApiKey(settings.apiKey || '');
                     setHasExistingKey(!!settings.apiKey);
+                    setBedrockAccessKeyId(settings.bedrockAccessKeyId || '');
+                    setBedrockSecretKey(settings.bedrockSecretKey || '');
+                    setBedrockSessionToken(settings.bedrockSessionToken || '');
+                    const savedRegion = settings.bedrockRegion || DEFAULT_BEDROCK_REGION;
+                    setBedrockRegion(savedRegion);
+                    setBedrockRegionCustom(!BEDROCK_REGIONS.includes(savedRegion));
                     setGithubToken(settings.githubToken || '');
                     setGitlabToken(settings.gitlabToken || '');
                     setJiraBaseUrl(settings.jiraBaseUrl || '');
@@ -239,10 +332,31 @@ export function Settings({ onClose }) {
         try {
             const resp = await chrome.runtime.sendMessage({
                 type: 'FETCH_MODELS',
-                data: { provider, apiKey }
+                data: {
+                    provider,
+                    apiKey,
+                    // Sent only for Bedrock; the background fills any field left
+                    // blank from stored settings, so a masked secret still works.
+                    ...(provider === LLM_PROVIDERS.BEDROCK
+                        ? {
+                            bedrock: {
+                                accessKeyId: bedrockAccessKeyId,
+                                secretAccessKey: bedrockSecretKey,
+                                sessionToken: bedrockSessionToken,
+                                region: bedrockRegion,
+                            },
+                        }
+                        : {}),
+                }
             });
             if (resp?.success && Array.isArray(resp.models) && resp.models.length) {
                 setDynamicModels(resp.models);
+                setModelsAreFallback(!!resp.isFallback);
+                // A fallback list is not an error, but it is not a live read
+                // either — say which one the user is looking at.
+                if (resp.isFallback && resp.fallbackReason) {
+                    setModelsError(resp.fallbackReason);
+                }
             } else {
                 setModelsError(resp?.error || 'Could not load models');
             }
@@ -253,13 +367,76 @@ export function Settings({ onClose }) {
         }
     };
 
+    /**
+     * Send one minimal request to the selected provider + model and report what
+     * came back.
+     *
+     * The verdict is more than a boolean because the failures worth telling
+     * apart are not all about the key: an out-of-credit account and a retired
+     * model id both authenticate fine, and calling either "invalid key" sends
+     * the user to regenerate a key that was never the problem. See
+     * utils/apiKeyProbe.js.
+     */
+    const testApiKey = async () => {
+        setKeyTesting(true);
+        setKeyTest(null);
+        try {
+            const resp = await chrome.runtime.sendMessage({
+                type: 'VALIDATE_API_KEY',
+                data: {
+                    provider,
+                    model,
+                    // Same contract as FETCH_MODELS: send what is typed, and the
+                    // background fills a blank field from stored settings, so a
+                    // masked key still tests.
+                    apiKey,
+                    ...(provider === LLM_PROVIDERS.BEDROCK
+                        ? {
+                            bedrock: {
+                                accessKeyId: bedrockAccessKeyId,
+                                secretAccessKey: bedrockSecretKey,
+                                sessionToken: bedrockSessionToken,
+                                region: bedrockRegion,
+                            },
+                        }
+                        : {}),
+                },
+            });
+            setKeyTest(resp?.success
+                ? resp
+                : {
+                    state: PROBE_STATE.UNKNOWN,
+                    keyProven: false,
+                    message: resp?.error || 'The test could not run.',
+                });
+        } catch (e) {
+            setKeyTest({
+                state: PROBE_STATE.UNKNOWN,
+                keyProven: false,
+                message: e?.message || 'The test could not run.',
+            });
+        } finally {
+            setKeyTesting(false);
+        }
+    };
+
+    // A verdict describes one provider + model + key. Any of the three changing
+    // makes it stale, and a stale green tick is worse than no tick — it is the
+    // one thing a user would rely on without re-checking.
+    useEffect(() => {
+        setKeyTest(null);
+    }, [provider, model, apiKey, bedrockAccessKeyId, bedrockSecretKey, bedrockRegion]);
+
     // When the provider changes, drop the previous provider's live list and try to
     // fetch the new one if we have (or stored) a key. Local (Ollama) needs no key.
     useEffect(() => {
         if (!settingsLoaded) return;
         setDynamicModels(null);
         setModelsError(null);
-        if (provider === LLM_PROVIDERS.LOCAL || apiKey || hasExistingKey) {
+        setModelsAreFallback(false);
+        if (provider === LLM_PROVIDERS.BEDROCK) {
+            if (bedrockAccessKeyId && bedrockSecretKey) refreshModels();
+        } else if (provider === LLM_PROVIDERS.LOCAL || apiKey || hasExistingKey) {
             refreshModels();
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -344,6 +521,10 @@ export function Settings({ onClose }) {
                         provider: provider,
                         embeddingProvider: embeddingProvider,
                         googleApiKey: googleApiKey,
+                        bedrockAccessKeyId: bedrockAccessKeyId.trim(),
+                        bedrockSecretKey: bedrockSecretKey.trim(),
+                        bedrockSessionToken: bedrockSessionToken.trim(),
+                        bedrockRegion: bedrockRegion,
                         githubToken: githubToken,
                         gitlabToken: gitlabToken,
                         jiraBaseUrl: jiraBaseUrl.trim().replace(/\/+$/, ''),
@@ -387,6 +568,14 @@ export function Settings({ onClose }) {
             setIsLoading(false);
             setIsSaved(true);
 
+            // The save succeeded but something will not work — currently only
+            // the Bedrock host permission. Shown instead of auto-closing, since
+            // a panel that closes itself would take the warning with it.
+            if (response.warning) {
+                setError(response.warning);
+                return;
+            }
+
             // Auto-close after success
             setTimeout(() => {
                 onClose();
@@ -407,12 +596,18 @@ export function Settings({ onClose }) {
             [LLM_PROVIDERS.GOOGLE]: 'Google AI',
             [LLM_PROVIDERS.GROQ]: 'Groq (Ultra Fast)',
             [LLM_PROVIDERS.MISTRAL]: 'Mistral AI',
+            [LLM_PROVIDERS.OPENROUTER]: 'OpenRouter',
+            [LLM_PROVIDERS.NVIDIA]: 'NVIDIA NIM',
+            [LLM_PROVIDERS.BEDROCK]: 'AWS Bedrock',
             [LLM_PROVIDERS.LOCAL]: 'Ollama (Local)'
         };
         return labels[provider] || provider;
     };
 
     const isLocalProvider = provider === LLM_PROVIDERS.LOCAL;
+    // Bedrock authenticates with an IAM signature, so it shows a credentials
+    // block instead of the single API-key field every other provider uses.
+    const isBedrock = provider === LLM_PROVIDERS.BEDROCK;
 
     const getKeyPlaceholder = () => {
         const placeholders = {
@@ -420,7 +615,9 @@ export function Settings({ onClose }) {
             [LLM_PROVIDERS.ANTHROPIC]: 'sk-ant-...',
             [LLM_PROVIDERS.GOOGLE]: 'AIza...',
             [LLM_PROVIDERS.GROQ]: 'gsk_...',
-            [LLM_PROVIDERS.MISTRAL]: 'xxx...'
+            [LLM_PROVIDERS.MISTRAL]: 'xxx...',
+            [LLM_PROVIDERS.OPENROUTER]: 'sk-or-v1-...',
+            [LLM_PROVIDERS.NVIDIA]: 'nvapi-...'
         };
         return placeholders[provider] || 'Enter API key';
     };
@@ -537,20 +734,174 @@ export function Settings({ onClose }) {
                             );
                         })()}
                         <p className="text-xs text-textMuted">
-                            {dynamicModels && dynamicModels.length
-                                ? `${dynamicModels.length} models loaded live from ${getProviderLabel(provider)}`
+                            {dynamicModels && dynamicModels.length && modelsAreFallback
+                                ? `${dynamicModels.length} models from the built-in list — live listing unavailable${modelsError ? ` (${modelsError})` : ''}`
+                                : dynamicModels && dynamicModels.length
+                                ? `${dynamicModels.length} models loaded live from ${getProviderLabel(provider)}${isBedrock ? ` · ${bedrockRegion}` : ''}`
                                 : modelsError
                                     ? `⚠️ Live list unavailable (${modelsError}) — these ${(AVAILABLE_MODELS[provider] || []).length} built-in defaults may be out of date. Your key may support newer models.`
                                     : 'Enter your key, then ↻ Refresh to list the models your key can actually use'}
                         </p>
                     </div>
 
-                    {/* API Key (not shown for Ollama) */}
-                    {!isLocalProvider ? (
+                    {/* AWS Bedrock credentials — four fields, not one key. */}
+                    {isBedrock && (
+                        <div className="space-y-3">
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium text-text">AWS Region</label>
+                                {/* A real <select>, not a <datalist>. A datalist is an
+                                    autocomplete: it FILTERS its options against whatever
+                                    is already in the field, so with the field defaulted
+                                    to us-east-1 the list showed exactly one region and
+                                    looked broken. The "Other…" entry keeps the original
+                                    goal — AWS adds regions faster than a hardcoded list
+                                    can track, so the list must never be a ceiling. */}
+                                {bedrockRegionCustom ? (
+                                    <div className="flex items-center gap-2">
+                                        <input
+                                            type="text"
+                                            value={bedrockRegion}
+                                            onChange={(e) => setBedrockRegion(e.target.value.trim())}
+                                            placeholder="e.g. ap-southeast-5"
+                                            autoFocus
+                                            className="flex-1 h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setBedrockRegionCustom(false);
+                                                if (!BEDROCK_REGIONS.includes(bedrockRegion)) {
+                                                    setBedrockRegion(DEFAULT_BEDROCK_REGION);
+                                                }
+                                            }}
+                                            className="text-xs text-primary hover:underline shrink-0"
+                                        >
+                                            Pick from list
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <select
+                                        value={bedrockRegion}
+                                        onChange={(e) => {
+                                            if (e.target.value === '__custom__') {
+                                                setBedrockRegionCustom(true);
+                                                return;
+                                            }
+                                            setBedrockRegion(e.target.value);
+                                        }}
+                                        className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+                                    >
+                                        {BEDROCK_REGIONS.map(r => (
+                                            <option key={r} value={r}>{r}</option>
+                                        ))}
+                                        <option value="__custom__">Other (type a region)…</option>
+                                    </select>
+                                )}
+                            </div>
+
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium text-text">Access Key ID</label>
+                                <input
+                                    type="text"
+                                    value={bedrockAccessKeyId}
+                                    onChange={(e) => setBedrockAccessKeyId(e.target.value)}
+                                    placeholder="AKIA… or ASIA…"
+                                    className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
+                                />
+                            </div>
+
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium text-text">Secret Access Key</label>
+                                <div className="relative">
+                                    <input
+                                        type={showBedrockSecret ? 'text' : 'password'}
+                                        value={bedrockSecretKey}
+                                        onChange={(e) => setBedrockSecretKey(e.target.value)}
+                                        onBlur={() => { if (bedrockAccessKeyId && bedrockSecretKey) refreshModels(); }}
+                                        placeholder="••••••••••••••••••••"
+                                        className="w-full h-10 px-3 pr-10 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowBedrockSecret(!showBedrockSecret)}
+                                        className="absolute right-3 top-1/2 -translate-y-1/2 text-textMuted hover:text-text transition-colors"
+                                    >
+                                        {showBedrockSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Only temporary credentials need a session token, and
+                                omitting it with an ASIA key fails with a signature
+                                error that never mentions the token — so the field
+                                announces itself exactly when it becomes required. */}
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium text-text">
+                                    Session Token
+                                    {bedrockAccessKeyId.toUpperCase().startsWith('ASIA')
+                                        ? <span className="text-amber-500"> (required for temporary credentials)</span>
+                                        : <span className="text-textMuted"> (optional)</span>}
+                                </label>
+                                <input
+                                    type="password"
+                                    value={bedrockSessionToken}
+                                    onChange={(e) => setBedrockSessionToken(e.target.value)}
+                                    placeholder="Only for ASIA… temporary credentials"
+                                    className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
+                                />
+                            </div>
+
+                            <p className="text-xs text-textMuted">
+                                Needs <code>bedrock:InvokeModel</code>,{' '}
+                                <code>bedrock:InvokeModelWithResponseStream</code>, and{' '}
+                                <code>bedrock:ListFoundationModels</code> +{' '}
+                                <code>bedrock:ListInferenceProfiles</code> to list models.{' '}
+                                <a
+                                    href="https://docs.aws.amazon.com/bedrock/latest/userguide/setting-up.html"
+                                    target="_blank" rel="noopener noreferrer"
+                                    className="text-primary hover:underline"
+                                >
+                                    AWS setup guide
+                                </a>
+                            </p>
+
+                            <div className="flex items-center justify-between">
+                                <span className="text-xs text-textMuted">
+                                    Check the credentials can actually invoke the selected model
+                                </span>
+                                <button
+                                    type="button"
+                                    onClick={testApiKey}
+                                    disabled={keyTesting}
+                                    className="flex items-center gap-1 text-xs text-primary hover:underline disabled:opacity-50 disabled:no-underline"
+                                    title="Send one tiny signed request to the selected model"
+                                >
+                                    {keyTesting && <Loader2 className="w-3 h-3 animate-spin" />}
+                                    {keyTesting ? 'Testing…' : 'Test credentials'}
+                                </button>
+                            </div>
+                            <KeyTestVerdict result={keyTest} />
+                        </div>
+                    )}
+
+                    {/* API Key (not shown for Ollama or Bedrock) */}
+                    {!isLocalProvider && !isBedrock ? (
                         <div className="space-y-2">
-                            <label className="text-sm font-medium text-text">
-                                {getProviderLabel(provider)} API Key
-                            </label>
+                            <div className="flex items-center justify-between">
+                                <label className="text-sm font-medium text-text">
+                                    {getProviderLabel(provider)} API Key
+                                </label>
+                                <button
+                                    type="button"
+                                    onClick={testApiKey}
+                                    disabled={keyTesting}
+                                    className="flex items-center gap-1 text-xs text-primary hover:underline disabled:opacity-50 disabled:no-underline"
+                                    title="Send one tiny request to the selected model to check the key really works"
+                                >
+                                    {keyTesting && <Loader2 className="w-3 h-3 animate-spin" />}
+                                    {keyTesting ? 'Testing…' : 'Test key'}
+                                </button>
+                            </div>
                             <div className="relative">
                                 <input
                                     type={showKey ? 'text' : 'password'}
@@ -595,7 +946,18 @@ export function Settings({ onClose }) {
                                         Mistral Console
                                     </a>
                                 )}
+                                {provider === LLM_PROVIDERS.OPENROUTER && (
+                                    <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                                        OpenRouter Keys
+                                    </a>
+                                )}
+                                {provider === LLM_PROVIDERS.NVIDIA && (
+                                    <a href="https://build.nvidia.com/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                                        NVIDIA Build (API Catalog)
+                                    </a>
+                                )}
                             </p>
+                            <KeyTestVerdict result={keyTest} />
                         </div>
                     ) : (
                         <div className="space-y-3">
@@ -616,6 +978,24 @@ export function Settings({ onClose }) {
                                     <li>Start: <code className="bg-surfaceHighlight px-1 py-0.5 rounded">ollama serve</code></li>
                                 </ol>
                             </div>
+                            {/* No key to validate, but the same probe answers the
+                                question that matters here: is the local server
+                                up and does it have the selected model pulled? */}
+                            <div className="flex items-center justify-between">
+                                <span className="text-xs text-textMuted">
+                                    Check the local server is running
+                                </span>
+                                <button
+                                    type="button"
+                                    onClick={testApiKey}
+                                    disabled={keyTesting}
+                                    className="flex items-center gap-1 text-xs text-primary hover:underline disabled:opacity-50 disabled:no-underline"
+                                >
+                                    {keyTesting && <Loader2 className="w-3 h-3 animate-spin" />}
+                                    {keyTesting ? 'Testing…' : 'Test connection'}
+                                </button>
+                            </div>
+                            <KeyTestVerdict result={keyTest} />
                         </div>
                     )}
 

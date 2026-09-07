@@ -54,6 +54,31 @@ describe('filterGenuineProblems', () => {
         expect(result.findings).toHaveLength(1);
     });
 
+    it('drops a missing-test finding on its own — the post-gate re-add in prReviewHandlers.js is what saves it, not an exemption here', () => {
+        // Shape produced by findMissingTests() (src/utils/missingTestFinder.js):
+        // `severity: 'low'`, `source: 'static'`, no `tool` field. Asserted
+        // directly against the gate (not through the full review pipeline) so
+        // this fails the moment someone "simplifies" prReviewHandlers.js by
+        // exempting this rule inside the gate instead of re-adding it after —
+        // the opposite fix from the one intended, and the one this test guards
+        // against alongside missingTestFindingReview.test.js's positive case.
+        const missingTestFinding = {
+            file: 'src/pricing.js',
+            line: 1,
+            severity: 'low',
+            source: 'static',
+            rule: 'static/missing-test',
+            ruleId: 'missing-test',
+            title: 'New exported `calculateWidgetPrice` is not mentioned by any test in this PR',
+            description: 'This diff adds the exported symbol `calculateWidgetPrice` in `src/pricing.js`, and no test file changed by this PR references it by name.',
+            suggestion: 'Add a test that calls `calculateWidgetPrice` directly, or note here which existing test covers it.',
+        };
+        const result = filterGenuineProblems([missingTestFinding]);
+        expect(result.findings).toHaveLength(0);
+        expect(result.dropped).toHaveLength(1);
+        expect(result.dropped[0]._precisionDrop).toBe('non-problem-severity');
+    });
+
     it('keeps only proven cross-repo breakage, not a general dependency notice', () => {
         const breaking = {
             source: 'cross-repo', severity: 'blocking', confidence: 0.8,

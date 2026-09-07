@@ -42,11 +42,17 @@
  *                 context and hunk expansion are genuinely exercised, and an A/B
  *                 over them is real.
  *
- *   ragContext    STILL ABSENT. Both need an INDEXED repository — embeddings,
- *   graphContext  BM25, a tree-sitter graph over the whole tree — and the
- *                 harness has only the changed files. Building a graph from
- *                 those alone would be a graph of 12 files presented as a graph
- *                 of the repo, which is a worse lie than the absence.
+ *   ragContext    STILL ABSENT. It needs an INDEXED repository — embeddings and
+ *                 BM25 over the whole tree — and the harness has only the
+ *                 changed files.
+ *
+ *   graph         graph FINDINGS are supplied by `eval/lib/graphContext.js`,
+ *                 which builds an in-memory, regex-extracted graph per case
+ *                 from that case's own `fileContents` and turns it into
+ *                 findings via `GraphImpactFindingsService`; graph PROMPT
+ *                 CONTEXT still is not — `graphContextChars` below gates a
+ *                 slice of an indexed repository graph that this harness does
+ *                 not build, so it stays a null diff between profiles.
  *
  * So `ragChunks`, `ragChunkChars` and `graphContextChars` still produce a null
  * diff between the profiles. Read a profile comparison as a statement about file

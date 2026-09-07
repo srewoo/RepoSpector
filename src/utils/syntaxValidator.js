@@ -39,8 +39,16 @@ const _KEYWORDS = new Set([
 const BRACKET_PAIRS = {
     '(': ')',
     '[': ']',
-    '{': '}',
-    '<': '>'
+    '{': '}'
+    // Deliberately no '<': '>' here. `<` and `>` are comparison operators and
+    // the tail of every arrow function (`=>`), not only generic/JSX
+    // delimiters — treating them as a bracket pair makes checkBracketMatching
+    // read the `>` of every `=>` as a stray closing bracket, so it rejects
+    // essentially all real-world arrow-function code (confirmed against this
+    // repo's own passing test files). TypeScript generics and JSX are already
+    // covered by the dedicated `checkTypeScriptSyntax` and `checkJSXSyntax`
+    // checks below, and `validateWithFunctionConstructor` is the real parser
+    // behind both — do not restore this entry to "fix" generics/JSX here.
 };
 
 const CLOSING_BRACKETS = new Set(Object.values(BRACKET_PAIRS));
@@ -51,6 +59,9 @@ const CLOSING_BRACKETS = new Set(Object.values(BRACKET_PAIRS));
  */
 export function validateSyntax(code, options = {}) {
     const {
+        // NOTE: named `_language` (not `language`), so any `language` option
+        // callers pass is silently ignored/inert. Not fixed here — out of
+        // scope for this change.
         _language = 'javascript',
         allowJSX = true,
         allowTypeScript = true,
@@ -470,6 +481,35 @@ function checkTypeScriptSyntax(code, result) {
 }
 
 /**
+ * Determine whether the `<` at `ltIndex` opens a TypeScript generic type
+ * argument list (e.g. `Map<string, number>`, `foo<Bar, Baz>`,
+ * `Array<Record<string, number>>`) rather than a JSX tag. A generic is
+ * only preceded by an identifier character or `)` (a JSX tag is preceded by
+ * whitespace, `(`, `=`, `return`, etc.), and everything up to its matching
+ * `>` must be type-ish: identifiers, whitespace, commas, `[]`, `|`, `&`,
+ * `.`, and nested `<>`. Unlike a JSX tag's contents, a generic's contents
+ * never contain `=`, quotes, or `/`, so those disqualify it immediately.
+ */
+function isGenericTypeArgumentList(code, ltIndex) {
+    const prevChar = code[ltIndex - 1];
+    if (!prevChar || !/[\w)]/.test(prevChar)) return false;
+
+    let depth = 0;
+    for (let i = ltIndex; i < code.length; i++) {
+        const c = code[i];
+        if (c === '<') {
+            depth++;
+        } else if (c === '>') {
+            depth--;
+            if (depth === 0) return true;
+        } else if (!/[\w\s,[\]|&.]/.test(c)) {
+            return false;
+        }
+    }
+    return false;
+}
+
+/**
  * Check JSX-specific syntax
  */
 function checkJSXSyntax(code, result) {
@@ -481,6 +521,13 @@ function checkJSXSyntax(code, result) {
 
     let match;
     while ((match = tagPattern.exec(code)) !== null) {
+        // Not a JSX tag at all — it's a generic type argument list
+        // (e.g. `Map<string, number>` or `foo<Bar, Baz>(1)`). Skip it so it
+        // isn't mistaken for an opening tag that never closes.
+        if (isGenericTypeArgumentList(code, match.index)) {
+            continue;
+        }
+
         const fullMatch = match[0];
         const tagName = match[1].toLowerCase();
 
@@ -526,13 +573,69 @@ function checkJSXSyntax(code, result) {
 }
 
 /**
+ * Find where a `:` type annotation ends, balancing `<>` and `[]` so a
+ * generic type argument list containing commas (e.g. `Map<string, number>`)
+ * is treated as one type instead of being cut off at its first comma — the
+ * root cause of the old regex `/:\s*[\w<>[\]|&]+(?=\s*[,)=])/` mangling
+ * `const m: Map<string, number> = new Map()` into `const m`.
+ * `start` is the index right after the `:`. Returns the end index of the
+ * annotation (exclusive) if one is found immediately followed by `,`, `)`
+ * or `=` (mirroring the original regex's lookahead), otherwise -1.
+ */
+function findTypeAnnotationEnd(code, start) {
+    let i = start;
+    while (i < code.length && (code[i] === ' ' || code[i] === '\t')) i++;
+    const typeStart = i;
+    let depth = 0;
+
+    while (i < code.length) {
+        const c = code[i];
+        if (c === '<' || c === '[') {
+            depth++;
+        } else if (c === '>' || c === ']') {
+            if (depth === 0) break;
+            depth--;
+        } else if (depth === 0 && !/[\w\s|&.]/.test(c)) {
+            break;
+        }
+        i++;
+    }
+
+    if (i === typeStart || depth !== 0) return -1;
+
+    let j = i;
+    while (j < code.length && /\s/.test(code[j])) j++;
+    return (code[j] === ',' || code[j] === ')' || code[j] === '=') ? i : -1;
+}
+
+/**
+ * Strip `:` type annotations from `code`, using `findTypeAnnotationEnd` to
+ * keep generic type arguments (which may contain commas) intact so the
+ * declaration's initializer survives stripping.
+ */
+function stripTypeAnnotations(code) {
+    let out = '';
+    let i = 0;
+    while (i < code.length) {
+        if (code[i] === ':') {
+            const end = findTypeAnnotationEnd(code, i + 1);
+            if (end !== -1) {
+                i = end;
+                continue;
+            }
+        }
+        out += code[i];
+        i++;
+    }
+    return out;
+}
+
+/**
  * Validate using Function constructor (catches real JS syntax errors)
  */
 function validateWithFunctionConstructor(code, result) {
     // Strip TypeScript-specific syntax for validation
-    let jsCode = code
-        // Remove type annotations
-        .replace(/:\s*[\w<>[\]|&]+(?=\s*[,)=])/g, '')
+    let jsCode = stripTypeAnnotations(code)
         // Remove interface/type declarations
         .replace(/^(interface|type)\s+\w+.*?[};]/gms, '')
         // Remove generic parameters

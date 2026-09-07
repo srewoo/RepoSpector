@@ -122,6 +122,10 @@ describe('organization enforcement', () => {
         }
     });
 
+    it('lets an org pin graphFindings', () => {
+        expect(ENFORCEABLE_KEYS).toContain('graphFindings');
+    });
+
     it('survives a malformed enforce field', () => {
         expect(() => resolveConfig({ org: { enforce: 'enablePostInlineComments' } })).not.toThrow();
         expect(resolveConfig({ org: { enforce: 'x', autofix: true } }).config.autofix).toBe(true);

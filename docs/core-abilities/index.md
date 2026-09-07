@@ -13,7 +13,11 @@ otherwise have to reverse-engineer from the source.
 | [External findings](external-findings.md) | Ingests the team's own scanners (SARIF / rdjson / check annotations) as deterministic, rule-linked evidence. |
 | [Filter mode](filter-mode.md) | A named, testable policy for which lines a finding may be reported on — and honest reporting when one is moved. |
 | [Fail level](fail-level.md) | The declared severity at which a review blocks a merge, separate from what it reports. |
+| [AWS Bedrock provider](bedrock-provider.md) | SigV4-signed access to Bedrock's whole catalogue via the Converse API, with live model listing. |
+| [OpenRouter & NVIDIA NIM providers](gateway-providers.md) | One key in front of many vendors' models over the OpenAI wire format, with live listing and vendor-pathed model ids. |
 | [Model tiering](model-tiers.md) | A cheaper model for the stages that restate rather than analyse. |
+| [Graph-impact findings](graph-impact-findings.md) | Signature changes with un-updated callers, high-risk symbols, and untested blast radius, as deterministic findings rather than prompt text. |
+| [PR-scoped test generation](pr-test-generation.md) | Writes tests for the exported symbols a PR adds without coverage, appending to the repo's existing test file and using real call sites from the code graph, gated by syntax and quality validators. |
 | [SARIF output & persistent summary](sarif-output.md) | Emits findings as SARIF for GitHub code scanning; keeps one summary comment per PR, updated in place. |
 | [PR tools](pr-tools.md) | `/labels`, `/add-docs`, `/ask-line`, `/history`. |
 

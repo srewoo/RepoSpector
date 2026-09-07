@@ -9,10 +9,113 @@ const LLM_PROVIDERS = {
     PERPLEXITY: 'perplexity',
     GROQ: 'groq',
     HUGGINGFACE: 'huggingface',
+    // Aggregators/gateways that speak the OpenAI wire format. Kept as distinct
+    // providers rather than "OpenAI with a different base URL" so the stored
+    // model identifier still names the host that will be billed and called —
+    // `openrouter:anthropic/claude-sonnet-4.5` is not `openai:...`.
+    OPENROUTER: 'openrouter',
+    NVIDIA: 'nvidia',
+    BEDROCK: 'bedrock',
     LOCAL: 'local'
 };
 
+/**
+ * AWS regions that host Bedrock runtime. Not exhaustive — AWS adds regions
+ * faster than a hardcoded list can track — but it covers the regions the model
+ * catalogue is actually reachable from, and the field accepts a free-text region
+ * for anything newer.
+ */
+const BEDROCK_REGIONS = [
+    'us-east-1', 'us-east-2', 'us-west-2',
+    'eu-west-1', 'eu-west-3', 'eu-central-1', 'eu-north-1',
+    'ap-south-1', 'ap-southeast-1', 'ap-southeast-2', 'ap-northeast-1', 'ap-northeast-2',
+    'ca-central-1', 'sa-east-1',
+];
+
+const DEFAULT_BEDROCK_REGION = 'us-east-1';
+
+/**
+ * Fallback catalogue, used ONLY when live listing cannot run — no credentials
+ * yet, or the account lacks `bedrock:ListFoundationModels`. The live list is
+ * always preferred because it reflects what this account can actually invoke;
+ * this one cannot know that and will go stale.
+ *
+ * The prefix is the important part of a Bedrock id, and the reason a wrong pick
+ * fails with an opaque 400:
+ *   `global.*` — callable from any region
+ *   `us.*` / `eu.*` — cross-region profiles, only from that geography
+ *   bare `anthropic.*` — direct id, only in the model's home region
+ */
+const BEDROCK_FALLBACK_MODELS = [
+    // Global inference profiles — work from any region.
+    { id: 'global.anthropic.claude-sonnet-4-5-20250929-v1:0', name: 'Claude Sonnet 4.5 (Global)' },
+    { id: 'global.anthropic.claude-opus-4-5-20251101-v1:0', name: 'Claude Opus 4.5 (Global)' },
+    { id: 'global.anthropic.claude-haiku-4-5-20251001-v1:0', name: 'Claude Haiku 4.5 (Global)' },
+    { id: 'global.anthropic.claude-sonnet-4-20250514-v1:0', name: 'Claude Sonnet 4 (Global)' },
+    // US cross-region profiles.
+    { id: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0', name: 'Claude Sonnet 4.5 (US)' },
+    { id: 'us.anthropic.claude-opus-4-5-20251101-v1:0', name: 'Claude Opus 4.5 (US)' },
+    { id: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', name: 'Claude Haiku 4.5 (US)' },
+    { id: 'us.anthropic.claude-3-5-sonnet-20241022-v2:0', name: 'Claude 3.5 Sonnet v2 (US)' },
+    { id: 'us.anthropic.claude-3-5-haiku-20241022-v1:0', name: 'Claude 3.5 Haiku (US)' },
+    // EU cross-region profiles.
+    { id: 'eu.anthropic.claude-3-7-sonnet-20250219-v1:0', name: 'Claude 3.7 Sonnet (EU)' },
+    { id: 'eu.anthropic.claude-3-5-sonnet-20241022-v2:0', name: 'Claude 3.5 Sonnet v2 (EU)' },
+    // Direct ids — home region only.
+    { id: 'anthropic.claude-3-5-sonnet-20241022-v2:0', name: 'Claude 3.5 Sonnet v2 (direct)' },
+    { id: 'anthropic.claude-3-5-haiku-20241022-v1:0', name: 'Claude 3.5 Haiku (direct)' },
+    // Non-Anthropic families Bedrock hosts.
+    { id: 'openai.gpt-oss-120b-1:0', name: 'GPT OSS 120B' },
+    { id: 'openai.gpt-oss-20b-1:0', name: 'GPT OSS 20B' },
+    { id: 'meta.llama3-3-70b-instruct-v1:0', name: 'Llama 3.3 70B Instruct' },
+    { id: 'mistral.mistral-large-2407-v1:0', name: 'Mistral Large (2407)' },
+    { id: 'amazon.nova-pro-v1:0', name: 'Amazon Nova Pro' },
+    { id: 'amazon.nova-lite-v1:0', name: 'Amazon Nova Lite' },
+    { id: 'cohere.command-r-plus-v1:0', name: 'Cohere Command R+' },
+];
+
+/**
+ * Fallback catalogues for the two OpenAI-compatible gateways, used ONLY when
+ * live listing cannot run (no key entered yet, or the /models call failed).
+ *
+ * Both gateways change their line-up weekly, so these lists WILL go stale — the
+ * live list from `ModelCatalogService` is the source of truth and the UI says
+ * which of the two is on screen. Entries are deliberately conservative,
+ * long-lived ids rather than whatever is newest, because a fallback that names
+ * a retired model fails with a 404 at review time instead of at listing time.
+ *
+ * Ids are the exact wire names. There is no alias table for these providers
+ * (`MODELS` carries none), so the suffix after the first colon is sent verbatim.
+ */
+const OPENROUTER_FALLBACK_MODELS = [
+    { id: 'anthropic/claude-sonnet-4.5', name: 'Claude Sonnet 4.5' },
+    { id: 'openai/gpt-4o', name: 'GPT-4o' },
+    { id: 'google/gemini-2.0-flash-001', name: 'Gemini 2.0 Flash' },
+    { id: 'deepseek/deepseek-chat', name: 'DeepSeek V3' },
+    { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B Instruct' },
+    { id: 'qwen/qwen-2.5-coder-32b-instruct', name: 'Qwen 2.5 Coder 32B' },
+];
+
+const NVIDIA_FALLBACK_MODELS = [
+    { id: 'nvidia/llama-3.3-nemotron-super-49b-v1', name: 'Llama 3.3 Nemotron Super 49B' },
+    { id: 'meta/llama-3.3-70b-instruct', name: 'Llama 3.3 70B Instruct' },
+    { id: 'deepseek-ai/deepseek-r1', name: 'DeepSeek R1' },
+    { id: 'qwen/qwen2.5-coder-32b-instruct', name: 'Qwen 2.5 Coder 32B' },
+    { id: 'mistralai/mistral-large-2-instruct', name: 'Mistral Large 2' },
+];
+
 const API_ENDPOINTS = {
+    // Bedrock is region-scoped: `{{region}}` is substituted at call time from the
+    // user's configured region. `runtime` invokes a model; `control` is the
+    // separate control-plane host that lists what the account can actually call.
+    [LLM_PROVIDERS.BEDROCK]: {
+        baseUrl: 'https://bedrock-runtime.{{region}}.amazonaws.com',
+        chat: 'https://bedrock-runtime.{{region}}.amazonaws.com/model/{{model}}/invoke',
+        stream: 'https://bedrock-runtime.{{region}}.amazonaws.com/model/{{model}}/invoke-with-response-stream',
+        control: 'https://bedrock.{{region}}.amazonaws.com',
+        models: 'https://bedrock.{{region}}.amazonaws.com/foundation-models',
+        inferenceProfiles: 'https://bedrock.{{region}}.amazonaws.com/inference-profiles',
+    },
     [LLM_PROVIDERS.OPENAI]: {
         baseUrl: 'https://api.openai.com/v1',
         chat: 'https://api.openai.com/v1/chat/completions',
@@ -47,6 +150,22 @@ const API_ENDPOINTS = {
         baseUrl: 'https://api.groq.com/openai/v1',
         chat: 'https://api.groq.com/openai/v1/chat/completions',
         models: 'https://api.groq.com/openai/v1/models'
+    },
+    // OpenRouter — one key, ~hundreds of models from every vendor. Model ids
+    // carry a vendor path (`anthropic/claude-sonnet-4.5`) and may carry a
+    // variant suffix (`deepseek/deepseek-r1:free`); only the FIRST colon in a
+    // stored identifier delimits the provider, so both survive round-tripping.
+    [LLM_PROVIDERS.OPENROUTER]: {
+        baseUrl: 'https://openrouter.ai/api/v1',
+        chat: 'https://openrouter.ai/api/v1/chat/completions',
+        models: 'https://openrouter.ai/api/v1/models'
+    },
+    // NVIDIA NIM (build.nvidia.com) — OpenAI-compatible endpoints in front of
+    // NVIDIA-hosted models. Ids are also vendor-pathed (`meta/llama-3.3-70b-instruct`).
+    [LLM_PROVIDERS.NVIDIA]: {
+        baseUrl: 'https://integrate.api.nvidia.com/v1',
+        chat: 'https://integrate.api.nvidia.com/v1/chat/completions',
+        models: 'https://integrate.api.nvidia.com/v1/models'
     },
     [LLM_PROVIDERS.HUGGINGFACE]: {
         baseUrl: 'https://api-inference.huggingface.co',
@@ -628,10 +747,11 @@ const CONVENTION_WARM_DEADLINE_MS = 15000;
  *
  * Override per-run with REPOSPECTOR_HUNK_WINDOWING=1 in the eval harness,
  * mirroring REPOSPECTOR_CONTEXT_PROFILE — which is wired the same way in
- * `eval/run.js` but, per `reviewContextBudget.js`'s header, is currently an
- * inert comparison there: the harness supplies no ragContext/graphContext/
- * fileContext for that budget to gate. Wired does not mean meaningful; see
- * that file before reading anything into a legacy-vs-default run.
+ * `eval/run.js`. Per `reviewContextBudget.js`'s header: fileContext IS
+ * supplied there, so that part of the profile comparison is real; graph
+ * FINDINGS are supplied by `eval/lib/graphContext.js`; graph PROMPT context
+ * still is not. Wired does not mean meaningful for every knob; see that file
+ * before reading anything into a legacy-vs-default run.
  */
 const HUNK_WINDOWING = false;
 
@@ -715,5 +835,10 @@ export {
     PLATFORM_PATTERNS,
     PLATFORM_CAPABILITIES,
     CONVENTION_WARM_DEADLINE_MS,
-    HUNK_WINDOWING
+    HUNK_WINDOWING,
+    BEDROCK_REGIONS,
+    DEFAULT_BEDROCK_REGION,
+    BEDROCK_FALLBACK_MODELS,
+    OPENROUTER_FALLBACK_MODELS,
+    NVIDIA_FALLBACK_MODELS
 }; 

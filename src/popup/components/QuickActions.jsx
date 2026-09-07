@@ -8,9 +8,12 @@ import {
     Zap,
     Bug,
     MessageSquare,
-    RefreshCw
+    RefreshCw,
+    FlaskConical
 } from 'lucide-react';
 import { Button } from './ui/Button';
+import { offersTestGeneration } from '@/utils/prTestPrompts';
+import { filterActionsByAllowedIds } from '@/utils/quickActionsFilter';
 
 const defaultActions = [
     {
@@ -78,13 +81,31 @@ export function QuickActions({
     disabled = false,
     showLabels = true,
     compact = false,
-    className
+    className,
+    // Filters the rendered actions to these ids. `null` (default) renders
+    // every candidate action, unchanged for existing callers. Pass this when
+    // the caller's action handler implements only a subset of ids — see
+    // `filterActionsByAllowedIds`.
+    allowedIds = null
 }) {
-    // Get actions based on finding type
-    const actions = [
+    // `toCanonicalFinding` emits `category`, never `type`; the legacy `type`
+    // fallback keeps any pre-canonical caller working.
+    const kind = finding?.category || finding?.type;
+    // Only `static/missing-test` qualifies. That finding's file and symbol are
+    // themselves the newly-exported, untested thing, which is exactly what
+    // PRTestGenerationService can act on. `graph/untested-blast-radius` is
+    // deliberately excluded even though it is category 'coverage': its
+    // untested symbols are DEPENDENTS living in files this PR does not touch,
+    // so ReviewFileContextService cannot fetch their source and generation
+    // would always skip.
+    const wantsTest = offersTestGeneration(finding);
+    const actions = filterActionsByAllowedIds([
         ...defaultActions,
-        ...(finding?.type ? contextualActions[finding.type] || [] : [])
-    ];
+        ...(kind ? contextualActions[kind] || [] : []),
+        ...(wantsTest && !contextualActions[kind]?.some(a => a.id === 'write-test')
+            ? contextualActions.bug.filter(a => a.id === 'write-test')
+            : []),
+    ], allowedIds);
 
     if (compact) {
         return (
@@ -165,6 +186,12 @@ export function PRQuickActions({
             label: 'Ask Question',
             icon: MessageSquare,
             color: 'text-blue-500'
+        },
+        {
+            id: 'generate-tests',
+            label: 'Generate Tests',
+            icon: FlaskConical,
+            color: 'text-emerald-500'
         },
         {
             id: 'refresh',

@@ -5,6 +5,7 @@
  * format introduced in Phase 7. The new format also includes a Rule: citation
  * field (#20) which is surfaced on the finding object.
  */
+import { isDeterministicSource } from '../../utils/findingSources.js';
 
 /**
  * Maps a severity string from the LLM to a canonical lowercase severity key.
@@ -268,8 +269,13 @@ export function convertVerifiedFindings(list) {
         codeSnippet: f.codeSnippet || null,
         suggestedFix: f.suggestedFix || null,
         verification: f.verification || null,
-        source: f.source === 'static' ? 'static' : 'ai',
-        tool: f.tool || (f.source === 'static' ? 'static' : undefined),
+        // A deterministic source (static, external, graph — see findingSources.js)
+        // is a fact about the code, not a model assertion, and must be labelled
+        // as such rather than collapsed into 'ai'. Previously only 'static' was
+        // preserved here, so a `source: 'graph'` finding rendered as AI output
+        // on the same panel that labels it "code graph" on the PR.
+        source: isDeterministicSource(f.source) ? f.source : 'ai',
+        tool: f.tool || (isDeterministicSource(f.source) ? f.source : undefined),
         confidence: f.confidence ?? 0.8
     }));
 }

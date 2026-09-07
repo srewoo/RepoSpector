@@ -42,7 +42,7 @@
  * docs-only or config-only PR that it lacks tests is noise.
  */
 
-import { extractDeclaredSymbols, DECL_PATTERNS } from './declaredSymbols.js';
+import { extractDeclaredSymbols, declarationNewLine } from './declaredSymbols.js';
 import { parsePatchHunks } from './patchLines.js';
 
 /** Path shapes that ARE tests, across the ecosystems reviewed here. */
@@ -75,19 +75,7 @@ function addedText(patch) {
  * number to anchor an inline comment to.
  */
 function declarationLineNumber(patch, symbol) {
-    for (const hunk of parsePatchHunks(patch)) {
-        for (const l of hunk.lines) {
-            if (l.type !== 'added' || l.number.new == null) continue;
-            for (const pattern of DECL_PATTERNS) {
-                pattern.lastIndex = 0;
-                let m;
-                while ((m = pattern.exec(l.content)) !== null) {
-                    if (m[1] === symbol) return l.number.new;
-                }
-            }
-        }
-    }
-    return null;
+    return declarationNewLine(patch, symbol) ?? 1;
 }
 
 /** All text of one patch (added + context), for "does a test mention this?". */

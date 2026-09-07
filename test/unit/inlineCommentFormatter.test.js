@@ -295,4 +295,12 @@ describe('buildCommentBody', () => {
         expect(body).toContain('**Fix:** Guard the return value');
         expect(body).not.toContain('```suggestion');
     });
+
+    it('labels graph findings as coming from the code graph', () => {
+        const body = buildCommentBody({
+            file: 'src/a.js', line: 1, source: 'graph', severity: 'high',
+            title: 'x', description: 'y',
+        });
+        expect(body).toMatch(/code graph/);
+    });
 });

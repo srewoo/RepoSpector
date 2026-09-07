@@ -22,6 +22,7 @@ import {
 import { copyToClipboard } from '../utils/clipboard';
 import { Card, CardContent } from './ui/Card';
 import { Button } from './ui/Button';
+import { QuickActions } from './QuickActions';
 
 const severityConfig = {
     critical: {
@@ -69,7 +70,7 @@ const categoryIcons = {
     quality: CheckCircle
 };
 
-export function FindingCard({ finding, onDismiss, onMarkResolved, compact = false }) {
+export function FindingCard({ finding, onDismiss, onMarkResolved, onFindingAction, compact = false }) {
     const [isExpanded, setIsExpanded] = useState(false);
     const [showGrouped, setShowGrouped] = useState(false);
     const [copied, setCopied] = useState(false);
@@ -297,6 +298,20 @@ export function FindingCard({ finding, onDismiss, onMarkResolved, compact = fals
                                         </div>
                                     )}
                                 </div>
+                            )}
+
+                            {onFindingAction && (
+                                <QuickActions
+                                    finding={finding}
+                                    showLabels={false}
+                                    className="mt-4"
+                                    onAction={(id) => onFindingAction(id, finding)}
+                                    // handleFindingAction (PRReviewInterface) only implements
+                                    // 'write-test' — Explain / How to Fix / False Positive?
+                                    // have no handler here and would otherwise render as
+                                    // dead buttons.
+                                    allowedIds={['write-test']}
+                                />
                             )}
 
                             {/* Recommended patch (recommendation only — never auto-applied) */}

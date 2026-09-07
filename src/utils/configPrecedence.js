@@ -58,6 +58,7 @@ export const ENFORCEABLE_KEYS = Object.freeze([
     'orchestratedReview',
     'enableDynamicContext',
     'graphContext',
+    'graphFindings',
     'multiFinder',
     'autofix',
     'fullFileContext',

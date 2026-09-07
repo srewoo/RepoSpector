@@ -46,6 +46,9 @@ export class CodeGraphPipeline {
         this.communityDetector = null;
         this.testCoverageBuilder = null;
         this._lastBuildStats = null;
+        // Which repo the single shared `this.graph` instance currently holds.
+        // See hasGraphFor() below for why this matters.
+        this.loadedRepoId = null;
     }
 
     /**
@@ -140,6 +143,9 @@ export class CodeGraphPipeline {
 
         // Phase 1: Extract symbols (functions, classes, methods)
         this.graph.clear();
+        // The graph is being rebuilt for `repoId`; until assembly succeeds below,
+        // no repo's data can be trusted as resident.
+        this.loadedRepoId = null;
         this.symbolExtractor.extractAll(this.graph, files, tsAdapter);
 
         const symbolStats = this.graph.getStats();
@@ -210,6 +216,9 @@ export class CodeGraphPipeline {
         }
         await this.analysisCache.set(repoId, { fileHashes, tsAnalyses: tsCacheObj });
 
+        // Build succeeded and was persisted: the shared graph now holds `repoId`.
+        this.loadedRepoId = repoId;
+
         const elapsed = Math.round(performance.now() - startTime);
         const finalStats = this.graph.getStats();
 
@@ -250,6 +259,12 @@ export class CodeGraphPipeline {
 
             // Rebuild symbol table from loaded graph
             this._rebuildSymbolTable();
+
+            // The shared graph now holds `repoId`'s data.
+            this.loadedRepoId = repoId;
+        } else {
+            // Nothing loaded for this repo; the shared graph holds no repo's data.
+            this.loadedRepoId = null;
         }
 
         return result;
@@ -267,7 +282,26 @@ export class CodeGraphPipeline {
      */
     async deleteGraph(repoId) {
         await this.analysisCache.delete(repoId).catch(() => {});
+        if (this.loadedRepoId === repoId) {
+            this.loadedRepoId = null;
+        }
         return this.graph.delete(repoId);
+    }
+
+    /**
+     * Whether the shared graph instance currently resident in memory is BOTH
+     * present AND actually the graph for `repoId`.
+     *
+     * `this.graph` is a single shared KnowledgeGraphService instance reused
+     * across repos (buildGraph/updateGraph/loadGraph all mutate it in place).
+     * So "a graph is loaded" (this.graph.nodeCount > 0) and "the right graph
+     * is loaded" are different questions — a caller that only checks node
+     * count can silently read another repository's symbols and call sites
+     * and present them as facts about the current repo. Only an identity
+     * match against `loadedRepoId` makes that safe to act on.
+     */
+    hasGraphFor(repoId) {
+        return !!repoId && repoId === this.loadedRepoId && this.graph?.nodeCount > 0;
     }
 
     /**

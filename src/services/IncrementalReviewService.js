@@ -17,6 +17,8 @@
  * pushes — which it always is.
  */
 
+import { isDeterministicSource } from '../utils/findingSources.js';
+
 const STORAGE_KEY = 'repospectorIncrementalReviewState';
 const DEFAULT_MAX_ENTRIES = 100;
 const DEFAULT_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days, matches session retention
@@ -233,12 +235,13 @@ export class IncrementalReviewService {
             // Carry forward only LLM findings on files whose diff is byte-identical.
             //
             // - A finding on a CHANGED file must be re-derived; it may already be fixed.
-            // - STATIC findings are never carried: they are deterministic and cost no
-            //   tokens, so re-deriving them every run is both cheaper to reason about
-            //   and immune to going stale. Carrying them would also double-count
-            //   against the fresh static pass, which always runs over the full PR.
+            // - DETERMINISTIC findings (static, external, graph — see findingSources.js)
+            //   are never carried: they cost no tokens, so re-deriving them every run
+            //   is both cheaper to reason about and immune to going stale. Carrying
+            //   them would also double-count against the fresh pass, which always
+            //   runs over the full PR and would re-derive the same finding.
             carriedFindings: (prevState.findings || []).filter(f => {
-                if (f?.source === 'static') return false;
+                if (isDeterministicSource(f?.source)) return false;
                 const file = f?.file || f?.filePath;
                 return file && unchangedSet.has(file);
             }),
