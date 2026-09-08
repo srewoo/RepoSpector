@@ -98,7 +98,7 @@ export function IndexingProgress({ progress, onCancel }) {
     };
 
     return (
-        <Card className="bg-surfaceHighlight/50 border-white/10">
+        <Card className="bg-surfaceHighlight/50 border-border">
             <CardContent className="p-4 space-y-4">
                 {/* Visual Stage Indicator */}
                 {!isError && (
@@ -194,7 +194,7 @@ export function IndexingProgress({ progress, onCancel }) {
                 {status !== 'complete' && status !== 'error' && onCancel && (
                     <button
                         onClick={onCancel}
-                        className="w-full px-3 py-1.5 text-xs text-textMuted hover:text-text border border-white/10 rounded-lg hover:bg-white/5 transition-colors"
+                        className="w-full px-3 py-1.5 text-xs text-textMuted hover:text-text border border-border rounded-lg hover:bg-white/5 transition-colors"
                     >
                         Cancel
                     </button>

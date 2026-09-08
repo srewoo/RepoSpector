@@ -1030,6 +1030,10 @@ pre::-webkit-scrollbar-thumb:hover {
   height: 0.125rem;
 }
 
+.h-1 {
+  height: 0.25rem;
+}
+
 .h-1\.5 {
   height: 0.375rem;
 }
@@ -1740,10 +1744,6 @@ pre::-webkit-scrollbar-thumb:hover {
   border-color: transparent;
 }
 
-.border-white\/10 {
-  border-color: rgb(255 255 255 / 0.1);
-}
-
 .border-white\/5 {
   border-color: rgb(255 255 255 / 0.05);
 }
@@ -2090,6 +2090,10 @@ pre::-webkit-scrollbar-thumb:hover {
 
 .pl-4 {
   padding-left: 1rem;
+}
+
+.pl-5 {
+  padding-left: 1.25rem;
 }
 
 .pr-10 {
@@ -2547,12 +2551,12 @@ pre::-webkit-scrollbar-thumb:hover {
   total_len: 4;
 }
 
-.placeholder\:text-white\/20::-moz-placeholder {
-  color: rgb(255 255 255 / 0.2);
+.placeholder\:text-textMuted::-moz-placeholder {
+  color: var(--color-textMuted);
 }
 
-.placeholder\:text-white\/20::placeholder {
-  color: rgb(255 255 255 / 0.2);
+.placeholder\:text-textMuted::placeholder {
+  color: var(--color-textMuted);
 }
 
 .first\:mt-0:first-child {

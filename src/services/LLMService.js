@@ -4,6 +4,15 @@
  */
 
 import { LLM_PROVIDERS, API_ENDPOINTS } from '../utils/constants.js';
+import { classifyOllamaProbe, OLLAMA_ORIGINS_VALUE } from '../utils/ollamaProbe.js';
+import {
+    CHROME_AI_AVAILABILITY,
+    probeChromeAI,
+    shapeChromeAIPrompt,
+    estimateTokens,
+    assertFitsQuota,
+    CHROME_AI_EXPECTED_OUTPUTS,
+} from '../utils/chromeAI.js';
 import { resolveModel } from '../utils/modelResolver.js';
 import { normalizeOpenAIRequest } from '../utils/openaiParams.js';
 import {
@@ -361,6 +370,9 @@ export class LLMService {
 
             case LLM_PROVIDERS.LOCAL:
                 return this.callOllama(normalizedRequest, options);
+
+            case LLM_PROVIDERS.CHROME_AI:
+                return this.callChromeAI(normalizedRequest, options);
 
             default:
                 // Never fall back to OpenAI. Doing so sent a request intended for
@@ -994,6 +1006,24 @@ export class LLMService {
                 if (response.status === 0 || errorText.includes('Failed to fetch')) {
                     throw new Error('Ollama server not running. Start it with: ollama serve');
                 }
+                // 403 from Ollama means the origin was refused, not that anything
+                // is wrong with the request: Ollama rejects any origin absent
+                // from OLLAMA_ORIGINS, and a fetch from this extension carries a
+                // chrome-extension:// Origin. The body is empty on this path, so
+                // `Ollama API error (403): ` told the user nothing and sent them
+                // looking at their model or their prompt. checkOllamaStatus
+                // already diagnoses this correctly; the call path did not, so the
+                // same failure read as two different bugs depending on where you
+                // hit it.
+                if (response.status === 403) {
+                    throw new Error(
+                        'Ollama is running but refusing requests from this extension. '
+                        + `Restart it with OLLAMA_ORIGINS set to ${OLLAMA_ORIGINS_VALUE} — `
+                        + 'on macOS as a service: '
+                        + `launchctl setenv OLLAMA_ORIGINS "${OLLAMA_ORIGINS_VALUE}" `
+                        + 'then restart Ollama. See Settings → Ollama for all three platforms.'
+                    );
+                }
                 throw new Error(`Ollama API error (${response.status}): ${errorText}`);
             }
 
@@ -1013,6 +1043,88 @@ export class LLMService {
                 this.activeRequests.delete(options.requestId);
             }
         }
+    }
+
+    /**
+     * Chrome built-in AI (Gemini Nano) via the `LanguageModel` global.
+     *
+     * No key, no endpoint, no fetch — an in-process browser API. Sessions are
+     * created and destroyed per call: they accumulate conversation state and
+     * have a hard input quota, while every caller here passes a full message
+     * array and expects statelessness.
+     */
+    async callChromeAI(requestData, options = {}) {
+        const { streaming = false, tabId = null, task = null, isFromPopup = false } = options;
+
+        const { state, reason } = await probeChromeAI();
+        if (state !== CHROME_AI_AVAILABILITY.AVAILABLE) {
+            throw new Error(this._chromeAIUnavailableMessage(state, reason));
+        }
+
+        const { system, prompt } = shapeChromeAIPrompt(requestData.messages);
+        const createOpts = { expectedOutputs: CHROME_AI_EXPECTED_OUTPUTS };
+        if (system) createOpts.initialPrompts = [{ role: 'system', content: system }];
+
+        console.log('🧠 Chrome built-in AI call:', { streaming, task });
+
+        let session = null;
+        try {
+            session = await globalThis.LanguageModel.create(createOpts);
+
+            // Prefer the session's own measurement; fall back to an estimate.
+            // The system text rides in via initialPrompts and consumes the same
+            // session quota as the prompt, so both must be counted together —
+            // otherwise a large system prompt can slip past unmeasured.
+            const promptTokens = typeof session.measureInputUsage === 'function'
+                ? await session.measureInputUsage(system ? `${system}\n${prompt}` : prompt)
+                : estimateTokens(prompt) + estimateTokens(system);
+            assertFitsQuota({ promptTokens, quota: session.inputQuota, task });
+
+            if (streaming) {
+                return await this._readChromeAIStream(
+                    session.promptStreaming(prompt), tabId, options.requestId, isFromPopup
+                );
+            }
+            return await session.prompt(prompt);
+        } finally {
+            // Not conditional on success: a leaked session bleeds context into
+            // the next call and consumes quota that nothing will release.
+            try { session?.destroy?.(); } catch { /* already gone */ }
+            if (options.requestId) this.activeRequests.delete(options.requestId);
+        }
+    }
+
+    /** Displayable copy for each non-available state. */
+    _chromeAIUnavailableMessage(state, reason) {
+        if (state === CHROME_AI_AVAILABILITY.DOWNLOADABLE) {
+            return 'Chrome built-in AI needs its model downloaded first. '
+                + 'Open Settings → Chrome built-in AI and choose Download model.';
+        }
+        if (state === CHROME_AI_AVAILABILITY.DOWNLOADING) {
+            return 'Chrome built-in AI is still downloading its model. '
+                + 'Check progress in Settings → Chrome built-in AI.';
+        }
+        return reason || 'Chrome built-in AI is not available in this browser.';
+    }
+
+    /**
+     * Drain a `promptStreaming()` ReadableStream through sendChunk.
+     *
+     * handleStreamingResponse cannot be reused: it reads `response.body` and
+     * parses SSE framing, and this stream is neither a Response nor SSE.
+     */
+    async _readChromeAIStream(stream, tabId, requestId, isFromPopup) {
+        const reader = stream.getReader();
+        let full = '';
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const chunk = value ?? '';
+            full += chunk;
+            this.sendChunk(tabId, chunk, full, requestId, false, isFromPopup);
+        }
+        this.sendChunk(tabId, '', full, requestId, true, isFromPopup);
+        return full;
     }
 
     /**
@@ -1223,25 +1335,55 @@ export class LLMService {
     }
 
     /**
-     * Check if Ollama is running
+     * Probe the local Ollama server.
+     *
+     * Runs two probes because one cannot answer the question. A blocked CORS
+     * preflight and a closed port both surface as an opaque
+     * `TypeError: Failed to fetch` — CORS hides the detail by design. A second
+     * `mode: 'no-cors'` request distinguishes them: an opaque response proves
+     * the server answered, so the origin is being refused rather than the port
+     * being shut.
+     *
+     * `running` and `models` are kept for getOllamaModels and existing callers;
+     * `verdict`, `message` and `fix` are additive.
      */
-    async checkOllamaStatus() {
-        try {
-            const response = await fetch('http://localhost:11434/api/tags', {
-                method: 'GET'
-            });
+    async checkOllamaStatus(selectedModel = null) {
+        const url = API_ENDPOINTS[LLM_PROVIDERS.LOCAL].models;
 
-            if (response.ok) {
-                const data = await response.json();
-                return {
-                    running: true,
-                    models: data.models || []
-                };
-            }
-            return { running: false, models: [] };
+        let tagsResult;
+        try {
+            const response = await fetch(url, { method: 'GET' });
+            tagsResult = response.ok
+                ? { ok: true, models: (await response.json()).models || [] }
+                : { ok: false, error: `HTTP ${response.status}` };
         } catch (error) {
-            return { running: false, models: [], error: error.message };
+            tagsResult = { ok: false, error: error.message };
         }
+
+        let opaqueReachable = null;
+        if (!tagsResult.ok) {
+            try {
+                await fetch(url, { method: 'GET', mode: 'no-cors' });
+                // An opaque response resolves without exposing status. Resolving
+                // at all means something answered on that port.
+                opaqueReachable = true;
+            } catch {
+                opaqueReachable = false;
+            }
+        }
+
+        const { verdict, message, fix } = classifyOllamaProbe({
+            tagsResult, opaqueReachable, selectedModel,
+        });
+
+        return {
+            running: Boolean(tagsResult.ok),
+            models: tagsResult.ok ? tagsResult.models : [],
+            verdict,
+            message,
+            fix,
+            error: tagsResult.ok ? undefined : tagsResult.error,
+        };
     }
 
     /**

@@ -1,9 +1,10 @@
 {
   "name": "repospector",
-  "version": "7.3",
+  "version": "7.4",
   "description": "RepoSpector \u2014 AI-powered code review Chrome extension for GitHub & GitLab. Reviews pull requests, chats with your codebase using local RAG, detects bugs and security vulnerabilities, scans dependencies (OSV), and generates unit tests.",
   "author": "AI RepoSpector Team",
   "license": "MIT",
+  "workspaces": ["packages/*", "apps/*"],
   "type": "module",
   "scripts": {
     "test": "jest",
@@ -27,6 +28,8 @@
     "eval:content": "node eval/fetch-content.js"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "fake-indexeddb": "^6.0.0",
     "@babel/core": "^7.23.0",
     "@babel/preset-env": "^7.28.5",
     "@rollup/plugin-babel": "^6.1.0",
@@ -73,7 +76,8 @@
       "/node_modules/",
       "/dist/",
       "/build/",
-      "/apps/api/"
+      "/apps/api/",
+      "/packages/mcp/"
     ],
     "collectCoverageFrom": [
       "src/**/*.js",

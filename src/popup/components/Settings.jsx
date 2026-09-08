@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Save, Eye, EyeOff, Key, AlertCircle, CheckCircle, Cpu, Sun, Moon, Palette, Github, GitBranch, Shield, BarChart2, Trash2, Loader2, XCircle } from 'lucide-react';
+import { Save, Eye, EyeOff, Key, AlertCircle, CheckCircle, Cpu, Sun, Moon, Palette, Github, GitBranch, Shield, BarChart2, Trash2, Loader2 } from 'lucide-react';
+import { KeyTestVerdict } from './settings/KeyTestVerdict.jsx';
+import { GitTokenTestButton } from './settings/GitTokenTestButton.jsx';
 import { Button } from './ui/Button';
 import { Card, CardHeader, CardTitle, CardContent } from './ui/Card';
 import { Collapsible } from './ui/Collapsible';
@@ -18,6 +20,22 @@ import {
     OPENROUTER_FALLBACK_MODELS,
     NVIDIA_FALLBACK_MODELS,
 } from '../../utils/constants.js';
+import { providerNeedsKey } from '../../utils/providerCapabilities.js';
+import { panelForProvider } from './settings/providerPanelRegistry.js';
+import { getProviderLabel } from './settings/providerLabels.js';
+
+/**
+ * First hostname from a comma/space separated free-text host field, as a URL.
+ *
+ * The host settings accept a list and people paste whole URLs into them, so the
+ * git-token test needs one canonical origin to probe. Empty returns null, which
+ * makes the API-base helpers fall back to the public instance.
+ */
+function parseFirstHost(value) {
+    const first = String(value || '').split(/[\s,;]+/).map((v) => v.trim()).filter(Boolean)[0];
+    if (!first) return null;
+    return /^https?:\/\//i.test(first) ? first : `https://${first}`;
+}
 
 const LLM_PROVIDERS = {
     OPENAI: 'openai',
@@ -28,7 +46,8 @@ const LLM_PROVIDERS = {
     OPENROUTER: 'openrouter',
     NVIDIA: 'nvidia',
     BEDROCK: 'bedrock',
-    LOCAL: 'local'  // Ollama
+    LOCAL: 'local',  // Ollama
+    CHROME_AI: 'chrome-ai'  // Chrome built-in AI (Gemini Nano), no key
 };
 
 /**
@@ -90,43 +109,17 @@ const AVAILABLE_MODELS = {
         recommended: i === 0,
     })),
     [LLM_PROVIDERS.LOCAL]: [
-        { id: 'local:llama3.3', name: 'Llama 3.3 (Latest)', recommended: true },
+        // A code model is the right default for a code-review tool, and it is
+        // also the smaller download: llama3.3 is a general chat model in the
+        // tens of GB at common quantisations.
+        { id: 'local:qwen2.5-coder', name: 'Qwen 2.5 Coder', recommended: true },
         { id: 'local:deepseek-coder-v2', name: 'DeepSeek Coder V2' },
-        { id: 'local:qwen2.5-coder', name: 'Qwen 2.5 Coder (32B)' }
+        { id: 'local:llama3.3', name: 'Llama 3.3 (general purpose)' }
+    ],
+    [LLM_PROVIDERS.CHROME_AI]: [
+        { id: 'chrome-ai:nano', name: 'Gemini Nano (on-device)', recommended: true }
     ]
 };
-
-/**
- * The verdict from "Test key".
- *
- * Three tones, not two, because the middle case is real and common: the key
- * authenticated but something else stopped the call (no credits, rate limit, a
- * model the account cannot reach). Painting that red would send the user to
- * regenerate a working key; painting it green would promise a review that will
- * not run. Amber says "key fine, fix this".
- */
-function KeyTestVerdict({ result }) {
-    if (!result) return null;
-
-    const ok = result.state === PROBE_STATE.OK;
-    const tone = ok
-        ? { box: 'bg-success/10 border-success/20', text: 'text-success', Icon: CheckCircle }
-        : result.keyProven
-            ? { box: 'bg-amber-500/10 border-amber-500/20', text: 'text-amber-500', Icon: AlertCircle }
-            : { box: 'bg-red-500/10 border-red-500/20', text: 'text-red-400', Icon: XCircle };
-
-    return (
-        <div className={`flex items-start gap-2 p-3 border rounded-lg ${tone.box}`}>
-            <tone.Icon className={`w-4 h-4 mt-0.5 flex-shrink-0 ${tone.text}`} />
-            <div className={`text-xs ${tone.text}`}>
-                <p className="font-medium">
-                    {ok ? 'Key verified' : result.keyProven ? 'Key is valid, but…' : 'Test failed'}
-                </p>
-                <p className="mt-0.5 opacity-90">{result.message}</p>
-            </div>
-        </div>
-    );
-}
 
 export function Settings({ onClose }) {
     const { theme, toggleTheme } = useTheme();
@@ -146,7 +139,6 @@ export function Settings({ onClose }) {
     const [googleApiKey, setGoogleApiKey] = useState('');
     const [showGoogleKey, setShowGoogleKey] = useState(false);
     const [settingsLoaded, setSettingsLoaded] = useState(false);
-    const [showKey, setShowKey] = useState(false);
     const [isLoading, setIsLoading] = useState(false);
     const [isSaved, setIsSaved] = useState(false);
     const [error, setError] = useState(null);
@@ -162,7 +154,6 @@ export function Settings({ onClose }) {
     // becomes free text. Set on load as well as by the "Other…" option — a saved
     // region absent from the list must not be silently replaced by a listed one.
     const [bedrockRegionCustom, setBedrockRegionCustom] = useState(false);
-    const [showBedrockSecret, setShowBedrockSecret] = useState(false);
     // True when the model list shown is the built-in one because live listing
     // failed. Distinguishing the two is the whole point of showing a count.
     const [modelsAreFallback, setModelsAreFallback] = useState(false);
@@ -173,6 +164,14 @@ export function Settings({ onClose }) {
     // into wording it differently.
     const [keyTest, setKeyTest] = useState(null);
     const [keyTesting, setKeyTesting] = useState(false);
+
+    /**
+     * Per-platform verdicts for the git token tests, keyed by platform.
+     * Separate from `keyTest` (the LLM provider probe) because both can be on
+     * screen at once and one must not overwrite the other's result.
+     */
+    const [gitTokenTest, setGitTokenTest] = useState({});
+    const [gitTokenTesting, setGitTokenTesting] = useState(null);
 
     // Git platform tokens (for RAG indexing)
     const [githubToken, setGithubToken] = useState('');
@@ -377,6 +376,49 @@ export function Settings({ onClose }) {
      * the user to regenerate a key that was never the problem. See
      * utils/apiKeyProbe.js.
      */
+    /**
+     * Test one git-platform credential against its identity endpoint.
+     *
+     * Sends what is currently typed, not what is stored, so a token can be
+     * verified before saving. The background handler owns the request because
+     * that is where the host permissions live.
+     */
+    const testGitToken = async (platform) => {
+        setGitTokenTesting(platform);
+        setGitTokenTest((prev) => ({ ...prev, [platform]: null }));
+        try {
+            const data = { platform };
+            if (platform === 'github') {
+                data.token = githubToken;
+                // First configured GHE host, so the test hits the same API the
+                // review will. Blank falls back to github.com.
+                data.baseUrl = parseFirstHost(githubEnterpriseHosts);
+            } else if (platform === 'gitlab') {
+                data.token = gitlabToken;
+                data.baseUrl = parseFirstHost(gitlabHosts);
+            } else if (platform === 'jira') {
+                data.baseUrl = jiraBaseUrl;
+                data.email = jiraEmail;
+                data.token = jiraToken;
+            }
+
+            const resp = await chrome.runtime.sendMessage({ type: 'TEST_GIT_TOKEN', data });
+            setGitTokenTest((prev) => ({
+                ...prev,
+                [platform]: resp?.success
+                    ? resp
+                    : { state: 'unreachable', keyProven: false, message: resp?.error || 'The test could not run.' },
+            }));
+        } catch (e) {
+            setGitTokenTest((prev) => ({
+                ...prev,
+                [platform]: { state: 'unreachable', keyProven: false, message: e?.message || 'The test could not run.' },
+            }));
+        } finally {
+            setGitTokenTesting(null);
+        }
+    };
+
     const testApiKey = async () => {
         setKeyTesting(true);
         setKeyTest(null);
@@ -436,7 +478,7 @@ export function Settings({ onClose }) {
         setModelsAreFallback(false);
         if (provider === LLM_PROVIDERS.BEDROCK) {
             if (bedrockAccessKeyId && bedrockSecretKey) refreshModels();
-        } else if (provider === LLM_PROVIDERS.LOCAL || apiKey || hasExistingKey) {
+        } else if (!providerNeedsKey(provider) || apiKey || hasExistingKey) {
             refreshModels();
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -506,8 +548,7 @@ export function Settings({ onClose }) {
 
         try {
             // Validate API key (not required for local/Ollama)
-            const isLocal = provider === LLM_PROVIDERS.LOCAL;
-            if (!isLocal && (!apiKey || apiKey.trim() === '')) {
+            if (providerNeedsKey(provider) && (!apiKey || apiKey.trim() === '')) {
                 throw new Error('API key is required');
             }
 
@@ -589,38 +630,9 @@ export function Settings({ onClose }) {
         }
     };
 
-    const getProviderLabel = (provider) => {
-        const labels = {
-            [LLM_PROVIDERS.OPENAI]: 'OpenAI',
-            [LLM_PROVIDERS.ANTHROPIC]: 'Anthropic',
-            [LLM_PROVIDERS.GOOGLE]: 'Google AI',
-            [LLM_PROVIDERS.GROQ]: 'Groq (Ultra Fast)',
-            [LLM_PROVIDERS.MISTRAL]: 'Mistral AI',
-            [LLM_PROVIDERS.OPENROUTER]: 'OpenRouter',
-            [LLM_PROVIDERS.NVIDIA]: 'NVIDIA NIM',
-            [LLM_PROVIDERS.BEDROCK]: 'AWS Bedrock',
-            [LLM_PROVIDERS.LOCAL]: 'Ollama (Local)'
-        };
-        return labels[provider] || provider;
-    };
-
-    const isLocalProvider = provider === LLM_PROVIDERS.LOCAL;
     // Bedrock authenticates with an IAM signature, so it shows a credentials
     // block instead of the single API-key field every other provider uses.
     const isBedrock = provider === LLM_PROVIDERS.BEDROCK;
-
-    const getKeyPlaceholder = () => {
-        const placeholders = {
-            [LLM_PROVIDERS.OPENAI]: 'sk-...',
-            [LLM_PROVIDERS.ANTHROPIC]: 'sk-ant-...',
-            [LLM_PROVIDERS.GOOGLE]: 'AIza...',
-            [LLM_PROVIDERS.GROQ]: 'gsk_...',
-            [LLM_PROVIDERS.MISTRAL]: 'xxx...',
-            [LLM_PROVIDERS.OPENROUTER]: 'sk-or-v1-...',
-            [LLM_PROVIDERS.NVIDIA]: 'nvapi-...'
-        };
-        return placeholders[provider] || 'Enter API key';
-    };
 
     return (
         <div className="space-y-4 animate-fade-in">
@@ -687,7 +699,7 @@ export function Settings({ onClose }) {
                         <select
                             value={provider}
                             onChange={(e) => setProvider(e.target.value)}
-                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+                            className="w-full h-10 px-3 text-sm bg-background border border-border rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
                         >
                             {Object.values(LLM_PROVIDERS).map(prov => (
                                 <option key={prov} value={prov}>
@@ -723,7 +735,7 @@ export function Settings({ onClose }) {
                                 <select
                                     value={model}
                                     onChange={(e) => setModel(e.target.value)}
-                                    className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+                                    className="w-full h-10 px-3 text-sm bg-background border border-border rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
                                 >
                                     {options.map(m => (
                                         <option key={m.id} value={m.id}>
@@ -744,260 +756,34 @@ export function Settings({ onClose }) {
                         </p>
                     </div>
 
-                    {/* AWS Bedrock credentials — four fields, not one key. */}
-                    {isBedrock && (
-                        <div className="space-y-3">
-                            <div className="space-y-2">
-                                <label className="text-sm font-medium text-text">AWS Region</label>
-                                {/* A real <select>, not a <datalist>. A datalist is an
-                                    autocomplete: it FILTERS its options against whatever
-                                    is already in the field, so with the field defaulted
-                                    to us-east-1 the list showed exactly one region and
-                                    looked broken. The "Other…" entry keeps the original
-                                    goal — AWS adds regions faster than a hardcoded list
-                                    can track, so the list must never be a ceiling. */}
-                                {bedrockRegionCustom ? (
-                                    <div className="flex items-center gap-2">
-                                        <input
-                                            type="text"
-                                            value={bedrockRegion}
-                                            onChange={(e) => setBedrockRegion(e.target.value.trim())}
-                                            placeholder="e.g. ap-southeast-5"
-                                            autoFocus
-                                            className="flex-1 h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
-                                        />
-                                        <button
-                                            type="button"
-                                            onClick={() => {
-                                                setBedrockRegionCustom(false);
-                                                if (!BEDROCK_REGIONS.includes(bedrockRegion)) {
-                                                    setBedrockRegion(DEFAULT_BEDROCK_REGION);
-                                                }
-                                            }}
-                                            className="text-xs text-primary hover:underline shrink-0"
-                                        >
-                                            Pick from list
-                                        </button>
-                                    </div>
-                                ) : (
-                                    <select
-                                        value={bedrockRegion}
-                                        onChange={(e) => {
-                                            if (e.target.value === '__custom__') {
-                                                setBedrockRegionCustom(true);
-                                                return;
-                                            }
-                                            setBedrockRegion(e.target.value);
-                                        }}
-                                        className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
-                                    >
-                                        {BEDROCK_REGIONS.map(r => (
-                                            <option key={r} value={r}>{r}</option>
-                                        ))}
-                                        <option value="__custom__">Other (type a region)…</option>
-                                    </select>
-                                )}
-                            </div>
-
-                            <div className="space-y-2">
-                                <label className="text-sm font-medium text-text">Access Key ID</label>
-                                <input
-                                    type="text"
-                                    value={bedrockAccessKeyId}
-                                    onChange={(e) => setBedrockAccessKeyId(e.target.value)}
-                                    placeholder="AKIA… or ASIA…"
-                                    className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
-                                />
-                            </div>
-
-                            <div className="space-y-2">
-                                <label className="text-sm font-medium text-text">Secret Access Key</label>
-                                <div className="relative">
-                                    <input
-                                        type={showBedrockSecret ? 'text' : 'password'}
-                                        value={bedrockSecretKey}
-                                        onChange={(e) => setBedrockSecretKey(e.target.value)}
-                                        onBlur={() => { if (bedrockAccessKeyId && bedrockSecretKey) refreshModels(); }}
-                                        placeholder="••••••••••••••••••••"
-                                        className="w-full h-10 px-3 pr-10 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
-                                    />
-                                    <button
-                                        type="button"
-                                        onClick={() => setShowBedrockSecret(!showBedrockSecret)}
-                                        className="absolute right-3 top-1/2 -translate-y-1/2 text-textMuted hover:text-text transition-colors"
-                                    >
-                                        {showBedrockSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                                    </button>
-                                </div>
-                            </div>
-
-                            {/* Only temporary credentials need a session token, and
-                                omitting it with an ASIA key fails with a signature
-                                error that never mentions the token — so the field
-                                announces itself exactly when it becomes required. */}
-                            <div className="space-y-2">
-                                <label className="text-sm font-medium text-text">
-                                    Session Token
-                                    {bedrockAccessKeyId.toUpperCase().startsWith('ASIA')
-                                        ? <span className="text-amber-500"> (required for temporary credentials)</span>
-                                        : <span className="text-textMuted"> (optional)</span>}
-                                </label>
-                                <input
-                                    type="password"
-                                    value={bedrockSessionToken}
-                                    onChange={(e) => setBedrockSessionToken(e.target.value)}
-                                    placeholder="Only for ASIA… temporary credentials"
-                                    className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
-                                />
-                            </div>
-
-                            <p className="text-xs text-textMuted">
-                                Needs <code>bedrock:InvokeModel</code>,{' '}
-                                <code>bedrock:InvokeModelWithResponseStream</code>, and{' '}
-                                <code>bedrock:ListFoundationModels</code> +{' '}
-                                <code>bedrock:ListInferenceProfiles</code> to list models.{' '}
-                                <a
-                                    href="https://docs.aws.amazon.com/bedrock/latest/userguide/setting-up.html"
-                                    target="_blank" rel="noopener noreferrer"
-                                    className="text-primary hover:underline"
-                                >
-                                    AWS setup guide
-                                </a>
-                            </p>
-
-                            <div className="flex items-center justify-between">
-                                <span className="text-xs text-textMuted">
-                                    Check the credentials can actually invoke the selected model
-                                </span>
-                                <button
-                                    type="button"
-                                    onClick={testApiKey}
-                                    disabled={keyTesting}
-                                    className="flex items-center gap-1 text-xs text-primary hover:underline disabled:opacity-50 disabled:no-underline"
-                                    title="Send one tiny signed request to the selected model"
-                                >
-                                    {keyTesting && <Loader2 className="w-3 h-3 animate-spin" />}
-                                    {keyTesting ? 'Testing…' : 'Test credentials'}
-                                </button>
-                            </div>
-                            <KeyTestVerdict result={keyTest} />
-                        </div>
-                    )}
-
-                    {/* API Key (not shown for Ollama or Bedrock) */}
-                    {!isLocalProvider && !isBedrock ? (
-                        <div className="space-y-2">
-                            <div className="flex items-center justify-between">
-                                <label className="text-sm font-medium text-text">
-                                    {getProviderLabel(provider)} API Key
-                                </label>
-                                <button
-                                    type="button"
-                                    onClick={testApiKey}
-                                    disabled={keyTesting}
-                                    className="flex items-center gap-1 text-xs text-primary hover:underline disabled:opacity-50 disabled:no-underline"
-                                    title="Send one tiny request to the selected model to check the key really works"
-                                >
-                                    {keyTesting && <Loader2 className="w-3 h-3 animate-spin" />}
-                                    {keyTesting ? 'Testing…' : 'Test key'}
-                                </button>
-                            </div>
-                            <div className="relative">
-                                <input
-                                    type={showKey ? 'text' : 'password'}
-                                    value={apiKey}
-                                    onChange={(e) => setApiKey(e.target.value)}
-                                    onBlur={() => { if (apiKey && apiKey.trim().length > 10) refreshModels(); }}
-                                    placeholder={getKeyPlaceholder()}
-                                    className="w-full h-10 px-3 pr-10 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
-                                />
-                                <button
-                                    type="button"
-                                    onClick={() => setShowKey(!showKey)}
-                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-textMuted hover:text-text transition-colors"
-                                >
-                                    {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                                </button>
-                            </div>
-                            <p className="text-xs text-textMuted">
-                                Get your key from:{' '}
-                                {provider === LLM_PROVIDERS.OPENAI && (
-                                    <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                                        OpenAI Platform
-                                    </a>
-                                )}
-                                {provider === LLM_PROVIDERS.ANTHROPIC && (
-                                    <a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                                        Anthropic Console
-                                    </a>
-                                )}
-                                {provider === LLM_PROVIDERS.GOOGLE && (
-                                    <a href="https://makersuite.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                                        Google AI Studio
-                                    </a>
-                                )}
-                                {provider === LLM_PROVIDERS.GROQ && (
-                                    <a href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                                        Groq Console
-                                    </a>
-                                )}
-                                {provider === LLM_PROVIDERS.MISTRAL && (
-                                    <a href="https://console.mistral.ai/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                                        Mistral Console
-                                    </a>
-                                )}
-                                {provider === LLM_PROVIDERS.OPENROUTER && (
-                                    <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                                        OpenRouter Keys
-                                    </a>
-                                )}
-                                {provider === LLM_PROVIDERS.NVIDIA && (
-                                    <a href="https://build.nvidia.com/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                                        NVIDIA Build (API Catalog)
-                                    </a>
-                                )}
-                            </p>
-                            <KeyTestVerdict result={keyTest} />
-                        </div>
-                    ) : (
-                        <div className="space-y-3">
-                            <div className="flex items-start gap-2 p-3 bg-success/10 border border-success/20 rounded-lg">
-                                <CheckCircle className="w-4 h-4 text-success mt-0.5" />
-                                <div className="text-sm text-success">
-                                    <p className="font-medium">No API key required!</p>
-                                    <p className="text-xs text-success/80 mt-1">
-                                        Ollama runs locally for 100% privacy.
-                                    </p>
-                                </div>
-                            </div>
-                            <div className="text-xs text-textMuted space-y-2">
-                                <p className="font-medium">Quick setup:</p>
-                                <ol className="list-decimal list-inside space-y-1 ml-2">
-                                    <li>Install from <a href="https://ollama.ai" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">ollama.ai</a></li>
-                                    <li>Run: <code className="bg-surfaceHighlight px-1 py-0.5 rounded">ollama pull llama3.3</code></li>
-                                    <li>Start: <code className="bg-surfaceHighlight px-1 py-0.5 rounded">ollama serve</code></li>
-                                </ol>
-                            </div>
-                            {/* No key to validate, but the same probe answers the
-                                question that matters here: is the local server
-                                up and does it have the selected model pulled? */}
-                            <div className="flex items-center justify-between">
-                                <span className="text-xs text-textMuted">
-                                    Check the local server is running
-                                </span>
-                                <button
-                                    type="button"
-                                    onClick={testApiKey}
-                                    disabled={keyTesting}
-                                    className="flex items-center gap-1 text-xs text-primary hover:underline disabled:opacity-50 disabled:no-underline"
-                                >
-                                    {keyTesting && <Loader2 className="w-3 h-3 animate-spin" />}
-                                    {keyTesting ? 'Testing…' : 'Test connection'}
-                                </button>
-                            </div>
-                            <KeyTestVerdict result={keyTest} />
-                        </div>
-                    )}
+                    {(() => {
+                        const Panel = panelForProvider(provider);
+                        return (
+                            <Panel
+                                provider={provider}
+                                apiKey={apiKey}
+                                setApiKey={setApiKey}
+                                hasExistingKey={hasExistingKey}
+                                keyTest={keyTest}
+                                keyTesting={keyTesting}
+                                testApiKey={testApiKey}
+                                refreshModels={refreshModels}
+                                model={model}
+                                bedrock={{
+                                    accessKeyId: bedrockAccessKeyId,
+                                    setAccessKeyId: setBedrockAccessKeyId,
+                                    secretKey: bedrockSecretKey,
+                                    setSecretKey: setBedrockSecretKey,
+                                    sessionToken: bedrockSessionToken,
+                                    setSessionToken: setBedrockSessionToken,
+                                    region: bedrockRegion,
+                                    setRegion: setBedrockRegion,
+                                    regionCustom: bedrockRegionCustom,
+                                    setRegionCustom: setBedrockRegionCustom,
+                                }}
+                            />
+                        );
+                    })()}
 
                     {/* Embedding Provider — used for repository indexing / RAG (separate from the chat model) */}
                     <div className="space-y-2 pt-4 border-t border-border">
@@ -1005,7 +791,7 @@ export function Settings({ onClose }) {
                         <select
                             value={embeddingProvider}
                             onChange={(e) => setEmbeddingProvider(e.target.value)}
-                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+                            className="w-full h-10 px-3 text-sm bg-background border border-border rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
                         >
                             <option value="local">Local — Transformers.js (Free &amp; Private) ⭐</option>
                             <option value="openai">OpenAI (text-embedding-3-small)</option>
@@ -1041,7 +827,7 @@ export function Settings({ onClose }) {
                                                 value={googleApiKey}
                                                 onChange={(e) => setGoogleApiKey(e.target.value)}
                                                 placeholder="AIza..."
-                                                className="w-full h-10 px-3 pr-10 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
+                                                className="w-full h-10 px-3 pr-10 text-sm bg-background border border-border rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-textMuted"
                                             />
                                             <button
                                                 type="button"
@@ -1087,6 +873,7 @@ export function Settings({ onClose }) {
                             <span className="text-[10px] text-textMuted bg-surfaceHighlight px-1.5 py-0.5 rounded">
                                 Private repos + higher rate limits
                             </span>
+                            <GitTokenTestButton platform="github" testing={gitTokenTesting} onTest={testGitToken} />
                         </div>
                         <div className="relative">
                             <input
@@ -1094,7 +881,7 @@ export function Settings({ onClose }) {
                                 value={githubToken}
                                 onChange={(e) => setGithubToken(e.target.value)}
                                 placeholder="ghp_..."
-                                className="w-full h-10 px-3 pr-10 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
+                                className="w-full h-10 px-3 pr-10 text-sm bg-background border border-border rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-textMuted"
                             />
                             <button
                                 type="button"
@@ -1111,6 +898,7 @@ export function Settings({ onClose }) {
                             </a>
                             {' '}- Use "repo" scope
                         </p>
+                        <KeyTestVerdict result={gitTokenTest.github} />
                     </div>
 
                     {/* GitLab Token */}
@@ -1120,6 +908,7 @@ export function Settings({ onClose }) {
                             <span className="text-[10px] text-textMuted bg-surfaceHighlight px-1.5 py-0.5 rounded">
                                 Private repos
                             </span>
+                            <GitTokenTestButton platform="gitlab" testing={gitTokenTesting} onTest={testGitToken} />
                         </div>
                         <div className="relative">
                             <input
@@ -1127,7 +916,7 @@ export function Settings({ onClose }) {
                                 value={gitlabToken}
                                 onChange={(e) => setGitlabToken(e.target.value)}
                                 placeholder="glpat-..."
-                                className="w-full h-10 px-3 pr-10 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
+                                className="w-full h-10 px-3 pr-10 text-sm bg-background border border-border rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-textMuted"
                             />
                             <button
                                 type="button"
@@ -1144,6 +933,7 @@ export function Settings({ onClose }) {
                             </a>
                             {' '}- Use "read_api" scope
                         </p>
+                        <KeyTestVerdict result={gitTokenTest.gitlab} />
                     </div>
 
                     {/* Jira — optional; unlocks acceptance-criteria checking */}
@@ -1153,6 +943,7 @@ export function Settings({ onClose }) {
                             <span className="text-[10px] text-textMuted bg-surfaceHighlight px-1.5 py-0.5 rounded">
                                 Optional
                             </span>
+                            <GitTokenTestButton platform="jira" testing={gitTokenTesting} onTest={testGitToken} />
                         </div>
                         <p className="text-xs text-textMuted">
                             When a PR title or branch names a Jira issue, the reviewer reads its
@@ -1163,14 +954,14 @@ export function Settings({ onClose }) {
                             value={jiraBaseUrl}
                             onChange={(e) => setJiraBaseUrl(e.target.value)}
                             placeholder="https://your-team.atlassian.net"
-                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
+                            className="w-full h-10 px-3 text-sm bg-background border border-border rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-textMuted"
                         />
                         <input
                             type="email"
                             value={jiraEmail}
                             onChange={(e) => setJiraEmail(e.target.value)}
                             placeholder="you@company.com"
-                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
+                            className="w-full h-10 px-3 text-sm bg-background border border-border rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-textMuted"
                         />
                         <div className="relative">
                             <input
@@ -1178,7 +969,7 @@ export function Settings({ onClose }) {
                                 value={jiraToken}
                                 onChange={(e) => setJiraToken(e.target.value)}
                                 placeholder="Jira API token"
-                                className="w-full h-10 px-3 pr-10 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
+                                className="w-full h-10 px-3 pr-10 text-sm bg-background border border-border rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-textMuted"
                             />
                             <button
                                 type="button"
@@ -1195,6 +986,7 @@ export function Settings({ onClose }) {
                             </a>
                             {' '}- all three fields are required
                         </p>
+                        <KeyTestVerdict result={gitTokenTest.jira} />
                     </div>
 
                     {/* Self-hosted GitLab. Without this, a URL on an internal
@@ -1211,7 +1003,7 @@ export function Settings({ onClose }) {
                             value={gitlabHosts}
                             onChange={(e) => setGitlabHosts(e.target.value)}
                             placeholder="gitlab.mycompany.com"
-                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
+                            className="w-full h-10 px-3 text-sm bg-background border border-border rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-textMuted"
                         />
                         <p className="text-xs text-textMuted">
                             Hostname only, or several separated by commas. gitlab.com always works.
@@ -1234,7 +1026,7 @@ export function Settings({ onClose }) {
                             value={githubEnterpriseHosts}
                             onChange={(e) => setGithubEnterpriseHosts(e.target.value)}
                             placeholder="github.acme.com"
-                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-white/20"
+                            className="w-full h-10 px-3 text-sm bg-background border border-border rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all placeholder:text-textMuted"
                         />
                         <p className="text-xs text-textMuted">
                             GitHub Enterprise hostnames, comma-separated (e.g. github.acme.com).
@@ -1259,7 +1051,7 @@ export function Settings({ onClose }) {
                         <select
                             value={severityThreshold}
                             onChange={(e) => setSeverityThreshold(e.target.value)}
-                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+                            className="w-full h-10 px-3 text-sm bg-background border border-border rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
                         >
                             <option value="all">Show All Findings</option>
                             <option value="low">Low and above</option>
@@ -1286,7 +1078,7 @@ export function Settings({ onClose }) {
                             onChange={(e) => setMaxAiCalls(e.target.value)}
                             onBlur={() => setMaxAiCalls(String(normalizeMaxAiCalls(maxAiCalls)))}
                             placeholder={String(DEFAULT_MAX_AI_CALLS)}
-                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+                            className="w-full h-10 px-3 text-sm bg-background border border-border rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
                         />
                         <p className="text-xs text-textMuted">
                             A hard ceiling on how many model calls one review may make. A large PR is
@@ -1329,7 +1121,7 @@ export function Settings({ onClose }) {
                             id="filter-mode"
                             value={filterMode}
                             onChange={(e) => setFilterMode(e.target.value)}
-                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+                            className="w-full h-10 px-3 text-sm bg-background border border-border rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
                         >
                             <option value="added">Lines this PR added (strictest)</option>
                             <option value="diff_context">Added lines and their diff context</option>
@@ -1352,7 +1144,7 @@ export function Settings({ onClose }) {
                             id="fail-level"
                             value={failLevel}
                             onChange={(e) => setFailLevel(e.target.value)}
-                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+                            className="w-full h-10 px-3 text-sm bg-background border border-border rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
                         >
                             <option value="none">Never — always comment, never request changes</option>
                             <option value="critical">Critical findings only</option>
@@ -1402,7 +1194,7 @@ export function Settings({ onClose }) {
                             value={lightModel}
                             onChange={(e) => setLightModel(e.target.value)}
                             placeholder="e.g. openai:gpt-4.1-mini — leave empty to use one model everywhere"
-                            className="w-full h-10 px-3 text-sm bg-background border border-white/10 rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
+                            className="w-full h-10 px-3 text-sm bg-background border border-border rounded-lg focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all"
                         />
                         <p className="text-xs text-textMuted">
                             A cheaper model for the stages that restate rather than analyse — summary,

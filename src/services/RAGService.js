@@ -6,6 +6,7 @@ import { IndexManifest, ManifestStore, hashContent } from './IndexManifest.js';
 import { RelevanceScorer } from './RelevanceScorer.js';
 import { expandQuery } from '../utils/queryExpander.js';
 import { assignChunkStartLines } from '../utils/chunkLines.js';
+import { resolveChunkFilePath } from '../utils/chunkId.js';
 import {
     GeminiEmbeddingService,
     GEMINI_EMBEDDING_MODEL,
@@ -41,8 +42,20 @@ export class RAGService {
         this.apiKey = options.apiKey; // Needed for OpenAI and Gemini
         this.baseUrl = 'https://api.openai.com/v1';
 
+        // Injected embedding service, if any.
+        //
+        // Mirrors the parser injection CodeGraphPipeline already accepts
+        // (CodeGraphPipeline.js:41). Exists so this pipeline can run outside
+        // the extension, where OffscreenEmbeddingService's offscreen document
+        // does not exist. Checked before the provider branches so an override
+        // holds for every provider — an override that silently stopped applying
+        // when the provider changed would be worse than no override.
+        this.embeddingService = options.embeddingService || null;
+
         // Initialize embedding service based on provider
-        if (this.provider === 'local') {
+        if (this.embeddingService) {
+            // Injected: nothing to construct.
+        } else if (this.provider === 'local') {
             this.embeddingService = new OffscreenEmbeddingService();
             console.log('✅ Using local embeddings (free, 100% private)');
         } else if (this.provider === 'gemini') {
@@ -173,7 +186,11 @@ export class RAGService {
                     metadata: {
                         tokens: chunk.tokens,
                         type: chunk.type,
-                        language: manifest.detectLanguage(file.path)
+                        language: manifest.detectLanguage(file.path),
+                        // BM25 is indexed with this object alone. Without the
+                        // path here, fused hybrid results lose it entirely.
+                        filePath: file.path,
+                        startLine: chunk.startLine ?? null
                     }
                 });
             });
@@ -366,7 +383,11 @@ export class RAGService {
                     metadata: {
                         tokens: chunk.tokens,
                         type: chunk.type,
-                        language: manifest.detectLanguage(file.path)
+                        language: manifest.detectLanguage(file.path),
+                        // BM25 is indexed with this object alone. Without the
+                        // path here, fused hybrid results lose it entirely.
+                        filePath: file.path,
+                        startLine: chunk.startLine ?? null
                     }
                 });
             });
@@ -417,7 +438,10 @@ export class RAGService {
                         metadata: {
                             tokens: chunk.tokens,
                             type: chunk.type,
-                            language: manifest.detectLanguage(file.path)
+                            language: manifest.detectLanguage(file.path),
+                            // See above: BM25 only ever sees `metadata`.
+                            filePath: file.path,
+                            startLine: chunk.startLine ?? null
                         }
                     });
                 }
@@ -579,7 +603,11 @@ export class RAGService {
                     ...r,
                     id: r.docId,
                     score: r.score || r.relevanceScore || 0,
-                    filePath: r.metadata?.filePath || r.filePath
+                    // The keyword half of the fusion carries no path, and
+                    // indexes built before `metadata.filePath` existed have
+                    // none either — the chunk id is the reliable source.
+                    filePath: resolveChunkFilePath(r, repoId),
+                    startLine: r.startLine ?? r.metadata?.startLine ?? null
                 }));
 
                 console.log(`🔍 RAG Hybrid: Retrieved ${results.length} chunks`);

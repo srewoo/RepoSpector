@@ -785,7 +785,7 @@ export function PRReviewInterface({
                                                 <p className="text-xs font-medium text-text">
                                                     {d.filename}:{d.insertAtLine} — <code>{d.name}</code>
                                                 </p>
-                                                <pre className="text-[11px] bg-background border border-white/10 rounded-lg p-2 overflow-x-auto whitespace-pre">
+                                                <pre className="text-[11px] bg-background border border-border rounded-lg p-2 overflow-x-auto whitespace-pre">
                                                     {d.docstring}
                                                 </pre>
                                             </div>

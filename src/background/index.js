@@ -14,6 +14,7 @@ import { CacheManager } from '../utils/cacheManager.js';
 import { LanguageDetector } from '../utils/languageDetector.js';
 import { TokenManager } from '../utils/tokenManager.js';
 import { PLATFORM_PATTERNS as _PLATFORM_PATTERNS, DEFAULT_BEDROCK_REGION } from '../utils/constants.js';
+import { providerNeedsKey } from '../utils/providerCapabilities.js';
 import {
     TEST_GENERATION_SYSTEM_PROMPT,
     buildEnhancedTestPrompt,
@@ -619,9 +620,10 @@ class BackgroundService {
                 apiKeyPreview: settings.apiKey ? `${settings.apiKey.substring(0, 7)}...` : 'NONE'
             });
 
-            if (!settings.apiKey) {
+            // See chatHandlers: keyless providers have no apiKey by design.
+            if (providerNeedsKey(settings.provider) && !settings.apiKey) {
                 console.error('❌ No API key found in settings!');
-                throw new Error('OpenAI API key not configured');
+                throw new Error(`No API key configured for ${settings.provider || 'this provider'}. Add one in Settings, or switch to a keyless provider — Ollama or Chrome built-in AI.`);
             }
 
             // Detect programming language and framework

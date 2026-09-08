@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "RepoSpector — AI Code Review for GitHub & GitLab",
-    "version": "7.3",
+    "version": "7.4",
     "description": "AI code review for GitHub & GitLab pull requests. Chat with your codebase, find bugs & security issues, and generate unit tests.",
     "permissions": [
         "activeTab",
@@ -38,6 +38,7 @@
         "https://integrate.api.nvidia.com/*",
         "https://huggingface.co/*",
         "https://*.huggingface.co/*",
+        "https://*.atlassian.net/*",
         "https://api.osv.dev/*",
         "https://endoflife.date/*",
         "http://localhost/*"

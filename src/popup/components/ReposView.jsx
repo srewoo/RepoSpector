@@ -12,6 +12,7 @@ import {
     CheckCircle,
     Plus
 } from 'lucide-react';
+import { indexingKeyRequirement } from '../../utils/embeddingKeyRequirement.js';
 import { Button } from './ui/Button';
 import { Card, CardContent } from './ui/Card';
 import { IndexingProgress } from './IndexingProgress';
@@ -135,7 +136,14 @@ export function ReposView() {
     const [isIndexing, setIsIndexing] = useState(false);
     const [indexProgress, setIndexProgress] = useState(null);
     const [error, setError] = useState(null);
-    const [hasApiKey, setHasApiKey] = useState(false);
+    /**
+     * Whether indexing is blocked for want of a key, and why.
+     *
+     * Was `hasApiKey` from `settings.apiKey` — the CHAT provider's key, which
+     * indexing never reads. That blocked every user on the bundled local
+     * embedder, which needs no key at all.
+     */
+    const [keyRequirement, setKeyRequirement] = useState({ needsKey: false, title: '', message: '' });
 
     // Load data on mount
     useEffect(() => {
@@ -178,12 +186,12 @@ export function ReposView() {
                 setError(reposResponse?.error || 'Could not load indexed repositories');
             }
 
-            // Check if API key is set
+            // Does the selected EMBEDDING provider need a key? The chat key is irrelevant here.
             const settingsResponse = await chrome.runtime.sendMessage({
                 type: 'GET_SETTINGS'
             });
             if (settingsResponse.success) {
-                setHasApiKey(!!settingsResponse.data?.apiKey);
+                setKeyRequirement(indexingKeyRequirement(settingsResponse.data || {}));
             }
         } catch (err) {
             console.error('Failed to load data:', err);
@@ -224,8 +232,8 @@ export function ReposView() {
     };
 
     const handleIndex = async (repo = null) => {
-        if (!hasApiKey) {
-            setError('Please set your API key in Settings before indexing.');
+        if (keyRequirement.needsKey) {
+            setError(keyRequirement.message);
             return;
         }
 
@@ -329,14 +337,14 @@ export function ReposView() {
                 </div>
             )}
 
-            {/* API Key Warning */}
-            {!hasApiKey && (
+            {/* Shown only when the EMBEDDING provider needs a key it does not have. */}
+            {keyRequirement.needsKey && (
                 <div className="flex items-start gap-2 p-3 bg-warning/10 border border-warning/20 rounded-lg">
                     <AlertCircle className="w-4 h-4 text-warning mt-0.5 shrink-0" />
                     <div className="text-sm text-warning">
-                        <p className="font-medium">API Key Required</p>
+                        <p className="font-medium">{keyRequirement.title}</p>
                         <p className="text-xs text-warning/80 mt-1">
-                            Set your API key in Settings to enable repository indexing.
+                            {keyRequirement.message}
                         </p>
                     </div>
                 </div>
@@ -379,7 +387,7 @@ export function ReposView() {
                             ) : (
                                 <Button
                                     onClick={() => handleIndex()}
-                                    disabled={!hasApiKey}
+                                    disabled={keyRequirement.needsKey}
                                     className="w-full"
                                 >
                                     <Plus className="w-4 h-4 mr-2" />

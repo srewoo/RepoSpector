@@ -39,7 +39,132 @@ describe('settingsHandlers', () => {
 
     it('exposes the expected message types', () => {
         expect(Object.keys(build(makeSvc())).sort()).toEqual(
-            ['EXPLAIN_FINDING', 'FETCH_MODELS', 'GET_SETTINGS', 'SAVE_SETTINGS', 'SUGGEST_FIX', 'VALIDATE_API_KEY']);
+            ['EXPLAIN_FINDING', 'FETCH_MODELS', 'GET_SETTINGS', 'PROBE_OLLAMA', 'SAVE_SETTINGS', 'SUGGEST_FIX', 'TEST_GIT_TOKEN', 'VALIDATE_API_KEY']);
+    });
+
+    describe('PROBE_OLLAMA', () => {
+        it('answers "is Ollama reachable" without a model selected, unlike VALIDATE_API_KEY', async () => {
+            global.fetch = jest.fn(async () => ({
+                ok: true,
+                json: async () => ({ models: [{ name: 'qwen2.5-coder:7b' }] }),
+            }));
+            const send = jest.fn();
+            await build(makeSvc()).PROBE_OLLAMA({ data: {} }, send);
+
+            expect(global.fetch).toHaveBeenCalledWith(
+                'http://localhost:11434/api/tags',
+                expect.objectContaining({ method: 'GET' }),
+            );
+            const response = send.mock.calls[0][0];
+            expect(response.success).toBe(true);
+            expect(response.verdict).toBe('ok');
+        });
+
+        it('reports not_running without throwing when nothing answers', async () => {
+            global.fetch = jest.fn(async () => { throw new Error('ECONNREFUSED'); });
+            const send = jest.fn();
+            await build(makeSvc()).PROBE_OLLAMA({ data: {} }, send);
+
+            const response = send.mock.calls[0][0];
+            expect(response.success).toBe(true);
+            expect(response.verdict).toBe('not_running');
+        });
+    });
+
+
+    describe('TEST_GIT_TOKEN', () => {
+        const call = async (data, fetchImpl) => {
+            global.fetch = fetchImpl;
+            const send = jest.fn();
+            await build(makeSvc()).TEST_GIT_TOKEN({ data }, send);
+            return send.mock.calls[0][0];
+        };
+
+        const okResponse = (body = {}, headers = {}) => jest.fn(async () => ({
+            ok: true,
+            status: 200,
+            headers: { get: (h) => headers[h.toLowerCase()] ?? null },
+            json: async () => body,
+        }));
+
+        it('tests what is typed rather than what is stored, so a token can be checked before saving', async () => {
+            const fetchImpl = okResponse({ login: 'octocat' }, { 'x-oauth-scopes': 'repo, gist' });
+            const res = await call({ platform: 'github', token: 'ghp_typed' }, fetchImpl);
+
+            const [url, init] = fetchImpl.mock.calls[0];
+            expect(url).toBe('https://api.github.com/user');
+            expect(init.headers.Authorization).toBe('Bearer ghp_typed');
+            expect(res.success).toBe(true);
+            expect(res.state).toBe('ok');
+            expect(res.message).toContain('octocat');
+        });
+
+        it('reports a GitHub token missing "repo" scope as valid-but-limited, not as working', async () => {
+            const res = await call(
+                { platform: 'github', token: 'ghp_x' },
+                okResponse({ login: 'octocat' }, { 'x-oauth-scopes': 'gist, read:org' }),
+            );
+            expect(res.state).toBe('scope-insufficient');
+            expect(res.keyProven).toBe(true);
+        });
+
+        it('sends the GitLab token in the PRIVATE-TOKEN header, not as a bearer', async () => {
+            const fetchImpl = okResponse({ username: 'sharaj' });
+            const res = await call({ platform: 'gitlab', token: 'glpat_x' }, fetchImpl);
+
+            const [url, init] = fetchImpl.mock.calls[0];
+            expect(url).toBe('https://gitlab.com/api/v4/user');
+            expect(init.headers['PRIVATE-TOKEN']).toBe('glpat_x');
+            expect(init.headers.Authorization).toBeUndefined();
+            expect(res.message).toContain('sharaj');
+        });
+
+        it('uses Basic auth over email:token for Jira and strips a trailing slash from the site', async () => {
+            const fetchImpl = okResponse({ displayName: 'Sharaj R' });
+            const res = await call(
+                { platform: 'jira', baseUrl: 'https://team.atlassian.net/', email: 'a@b.com', token: 'jt' },
+                fetchImpl,
+            );
+
+            const [url, init] = fetchImpl.mock.calls[0];
+            expect(url).toBe('https://team.atlassian.net/rest/api/3/myself');
+            expect(init.headers.Authorization).toBe(`Basic ${btoa('a@b.com:jt')}`);
+            expect(res.state).toBe('ok');
+            expect(res.message).toContain('Sharaj R');
+        });
+
+        it('refuses Jira without all three fields instead of firing a doomed request', async () => {
+            const fetchImpl = okResponse();
+            const res = await call({ platform: 'jira', baseUrl: 'https://team.atlassian.net' }, fetchImpl);
+            expect(fetchImpl).not.toHaveBeenCalled();
+            expect(res.success).toBe(true);
+            expect(res.message).toMatch(/all three/i);
+        });
+
+        it('honours a GitHub Enterprise host so the test hits the API the review would', async () => {
+            const fetchImpl = okResponse({ login: 'ghe-user' });
+            await call({ platform: 'github', token: 't', baseUrl: 'https://github.acme.com' }, fetchImpl);
+            expect(fetchImpl.mock.calls[0][0]).toBe('https://github.acme.com/api/v3/user');
+        });
+
+        it('reports a thrown request as unreachable, never as an invalid token', async () => {
+            const res = await call(
+                { platform: 'github', token: 't' },
+                jest.fn(async () => { throw new Error('Failed to fetch'); }),
+            );
+            expect(res.state).toBe('unreachable');
+            expect(res.keyProven).toBe(false);
+        });
+
+        it('still reports success when the body cannot be parsed', async () => {
+            const res = await call({ platform: 'gitlab', token: 't' }, jest.fn(async () => ({
+                ok: true,
+                status: 200,
+                headers: { get: () => null },
+                json: async () => { throw new Error('not json'); },
+            })));
+            expect(res.state).toBe('ok');
+        });
     });
 
     describe('VALIDATE_API_KEY', () => {
@@ -224,7 +349,34 @@ describe('settingsHandlers', () => {
             const svc = makeSvc({ getStoredSettings: jest.fn(async () => ({})) });
             const send = jest.fn();
             await build(svc).EXPLAIN_FINDING({ data: { finding: { id: 1 } } }, send);
-            expect(send).toHaveBeenCalledWith({ success: false, error: 'LLM API key not configured' });
+            expect(send).toHaveBeenCalledWith({
+                success: false,
+                error: expect.stringContaining('No API key configured'),
+            });
+        });
+
+        // A keyless provider has no apiKey by design, and callOllama /
+        // callChromeAI ignore the argument entirely. Gating on the key alone
+        // made follow-ups unreachable for exactly the users the keyless work
+        // was for, so these two pin that the gate is provider-aware.
+        it.each(['local', 'chrome-ai'])(
+            'does NOT require an API key for the keyless provider %s',
+            async (provider) => {
+                const svc = makeSvc({ getStoredSettings: jest.fn(async () => ({ provider })) });
+                const send = jest.fn();
+                await build(svc).EXPLAIN_FINDING({ data: { finding: { id: 1 } } }, send);
+                expect(send).toHaveBeenCalledWith({ success: true, data: { kind: 'explain' } });
+            },
+        );
+
+        it('still requires an API key for a keyed provider', async () => {
+            const svc = makeSvc({ getStoredSettings: jest.fn(async () => ({ provider: 'openai' })) });
+            const send = jest.fn();
+            await build(svc).EXPLAIN_FINDING({ data: { finding: { id: 1 } } }, send);
+            expect(send).toHaveBeenCalledWith({
+                success: false,
+                error: expect.stringContaining('No API key configured'),
+            });
         });
     });
 });

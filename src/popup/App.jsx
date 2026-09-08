@@ -10,8 +10,19 @@ import { ToastProvider } from './components/ui/Toast';
 import { Button } from './components/ui/Button';
 import { Card, CardContent } from './components/ui/Card';
 import { PRReviewInterface } from './components/PRReviewInterface';
-import { Sparkles, Code2, FileCode, GitPullRequest, RefreshCw, AlertCircle, Github, ExternalLink } from 'lucide-react';
+import { Sparkles, Code2, FileCode, GitPullRequest, RefreshCw, AlertCircle, Github, ExternalLink, BookOpen } from 'lucide-react';
+
+/**
+ * The published handbook: features, setup paths and symptom-keyed
+ * troubleshooting. Linked from the welcome panel because the panel's job is
+ * getting someone to a first result, and the two failures that most often
+ * stop that (Ollama refusing the extension's origin, and picking the wrong
+ * key for indexing) both have a named fix there.
+ */
+const HANDBOOK_URL = 'https://claude.ai/code/artifact/0f39a03d-875a-4345-b3c5-eb348dfeb00e';
 import { buildAnalyzePROptions } from './prReviewRequestOptions';
+import { probeChromeAI } from '../utils/chromeAI.js';
+import { rankKeylessRoutes } from './utils/keylessRoutes.js';
 
 // Shape the MULTI_PASS_PR_REVIEW response into the analysisResult the UI consumes.
 // Used by both a live run and by picking up a cached background/auto review.
@@ -59,6 +70,12 @@ function AppContent() {
     const [isOnPRPage, setIsOnPRPage] = useState(false);
     const [isOnGitPage, setIsOnGitPage] = useState(null); // null = loading, true/false = detected
 
+    // Welcome-panel keyless routes (#task8). `hasExistingKey` mirrors the same
+    // `!!settings.apiKey` check Settings.jsx does after GET_SETTINGS — App.jsx
+    // otherwise has no notion of whether a key is configured.
+    const [hasExistingKey, setHasExistingKey] = useState(false);
+    const [keylessRoutes, setKeylessRoutes] = useState(null);
+
     // Load indexed repo count on mount
     useEffect(() => {
         const loadRepoCount = async () => {
@@ -86,6 +103,53 @@ function AppContent() {
         chrome.runtime.onMessage.addListener(listener);
         return () => chrome.runtime.onMessage.removeListener(listener);
     }, []);
+
+    // Whether an API key is already configured, for the welcome panel below.
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                const response = await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' });
+                if (!cancelled && response?.success && response.data) {
+                    setHasExistingKey(!!response.data.apiKey);
+                }
+            } catch (error) {
+                console.error('Failed to load settings:', error);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, []);
+
+    // Rank the keyless welcome-panel routes (#task8). Probed on mount: Chrome's
+    // on-device availability client-side (globalThis.LanguageModel exists in
+    // extension pages) and Ollama's reachability via the background service
+    // worker, which owns provider I/O. PROBE_OLLAMA is deliberately a
+    // dedicated message rather than VALIDATE_API_KEY — the latter resolves a
+    // model first and throws when none is selected, which is exactly the
+    // fresh-install case this panel serves.
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            const [chromeAIResult, ollamaResponse] = await Promise.all([
+                probeChromeAI(),
+                chrome.runtime.sendMessage({ type: 'PROBE_OLLAMA' }).catch((error) => ({
+                    success: false,
+                    error: error?.message,
+                })),
+            ]);
+            if (cancelled) return;
+            setKeylessRoutes(rankKeylessRoutes({
+                chromeAI: chromeAIResult.state,
+                chromeAIReason: chromeAIResult.reason,
+                ollama: ollamaResponse?.success ? ollamaResponse.verdict : undefined,
+                hasKey: hasExistingKey,
+                // Flip to true when @repospector/mcp is published — see
+                // docs/superpowers/specs/2026-09-08-repospector-mcp-server-design.md
+                mcpPublished: false,
+            }));
+        })();
+        return () => { cancelled = true; };
+    }, [hasExistingKey]);
 
     // Listen for multi-pass PR review progress. Streaming findings from the
     // orchestrator arrive as `step === 'chunk_findings'` events with a
@@ -424,9 +488,47 @@ function AppContent() {
                                 How to use:
                             </h3>
                             <ol className="space-y-2 text-xs text-textMuted">
-                                <li className="flex gap-2">
-                                    <span className="text-primary font-semibold shrink-0">1.</span>
-                                    <span><span className="text-text font-medium">Set up:</span> Add your API key and select a model in Settings</span>
+                                <li className="flex flex-col gap-1.5">
+                                    <span className="flex gap-2">
+                                        <span className="text-primary font-semibold shrink-0">1.</span>
+                                        <span className="text-text font-medium">Set up: pick the fastest way to a first result</span>
+                                    </span>
+                                    {keylessRoutes === null ? (
+                                        <span className="pl-5 text-textMuted">Checking what's available…</span>
+                                    ) : (
+                                        <ul className="pl-5 space-y-1.5">
+                                            {keylessRoutes.map((route) => (
+                                                <li
+                                                    key={route.id}
+                                                    className="flex items-center justify-between gap-2 rounded-lg border border-border/60 bg-surfaceHighlight/40 px-2 py-1.5"
+                                                >
+                                                    <span className="min-w-0">
+                                                        <span className="block text-text font-medium truncate">{route.label}</span>
+                                                        <span className="block text-textMuted">
+                                                            <span className={route.tier === 'Ready now' ? 'text-primary font-medium' : ''}>{route.tier}</span>
+                                                            {route.detail ? ` — ${route.detail}` : ''}
+                                                        </span>
+                                                    </span>
+                                                    {route.enabled && route.action ? (
+                                                        // A real button, not styled text. This read as a
+                                                        // button and did nothing, which is worse than
+                                                        // omitting it: the panel's whole job is getting
+                                                        // someone to a first result, and it was leaving
+                                                        // them to find Settings themselves. Every route's
+                                                        // next step lives in Settings, so that is where
+                                                        // each one goes.
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setActiveTab('settings')}
+                                                            className="shrink-0 text-primary font-medium whitespace-nowrap hover:underline focus:outline-none focus:ring-1 focus:ring-primary rounded px-1"
+                                                        >
+                                                            {route.action}
+                                                        </button>
+                                                    ) : null}
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    )}
                                 </li>
                                 <li className="flex gap-2">
                                     <span className="text-secondary font-semibold shrink-0">2.</span>
@@ -439,9 +541,28 @@ function AppContent() {
                             </ol>
                         </div>
 
-                        <div className="text-center pt-2">
+                        <div className="text-center pt-2 space-y-1.5">
                             <p className="text-xs text-textMuted">
-                                Use the <span className="text-primary font-medium">Chat tab</span> for general questions
+                                Use the{' '}
+                                <button
+                                    type="button"
+                                    onClick={() => setActiveTab('chat')}
+                                    className="text-primary font-medium hover:underline focus:outline-none focus:ring-1 focus:ring-primary rounded"
+                                >
+                                    Chat tab
+                                </button>
+                                {' '}for general questions
+                            </p>
+                            <p className="text-xs text-textMuted">
+                                <a
+                                    href={HANDBOOK_URL}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1 text-primary font-medium hover:underline"
+                                >
+                                    <BookOpen className="w-3 h-3" />
+                                    Handbook — features, setup and troubleshooting
+                                </a>
                             </p>
                         </div>
                     </div>

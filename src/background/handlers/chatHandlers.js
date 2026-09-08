@@ -8,6 +8,7 @@
  * BackgroundService instance and returns the handler map for the router.
  */
 
+import { providerNeedsKey } from '../../utils/providerCapabilities.js';
 import { ImportGraphService } from '../../services/ImportGraphService.js';
 import { generateRepoInfo } from '../../utils/repoInfoGenerator.js';
 
@@ -105,8 +106,11 @@ export function createChatHandlers(svc) {
 
             // Get settings
             const settings = await svc.getStoredSettings();
-            if (!settings.apiKey) {
-                throw new Error('OpenAI API key not configured. Please add your API key in settings.');
+            // Keyless providers (Ollama, Chrome built-in AI) carry no apiKey by
+            // design, and both callOllama and callChromeAI ignore the argument
+            // entirely. Gating on the key alone made chat unreachable for them.
+            if (providerNeedsKey(settings.provider) && !settings.apiKey) {
+                throw new Error(`No API key configured for ${settings.provider || 'this provider'}. Add one in Settings, or switch to a keyless provider — Ollama or Chrome built-in AI.`);
             }
 
             // Detect language (may be unknown if no code on page)

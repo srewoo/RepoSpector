@@ -25,7 +25,7 @@ export function CodePreview({ code, language = 'javascript' }) {
     };
 
     return (
-        <Card className="w-full overflow-hidden border-white/10 bg-[#1e1e1e]">
+        <Card className="w-full overflow-hidden border-border bg-[#1e1e1e]">
             <CardHeader className="flex flex-row items-center justify-between py-2 px-4 bg-white/5 border-b border-white/5">
                 <CardTitle className="text-xs font-mono text-textMuted uppercase">{formatLanguageLabel(language)}</CardTitle>
                 <Button variant="ghost" size="icon" onClick={handleCopy} className="h-6 w-6">

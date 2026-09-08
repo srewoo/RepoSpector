@@ -8,7 +8,7 @@ export function Modal({ isOpen, onClose, title, children, footer }) {
 
     return createPortal(
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fade-in">
-            <div className="w-full max-w-md bg-surface border border-white/10 rounded-xl shadow-2xl m-4 animate-scale-in">
+            <div className="w-full max-w-md bg-surface border border-border rounded-xl shadow-2xl m-4 animate-scale-in">
                 <div className="flex items-center justify-between p-4 border-b border-white/5">
                     <h3 className="text-lg font-semibold text-text">{title}</h3>
                     <button

@@ -1561,7 +1561,7 @@ export function ChatInterface({ autoGenerateType = null, onBack = null, instance
                         value={apiKeyInput}
                         onChange={(e) => setApiKeyInput(e.target.value)}
                         placeholder="sk-..."
-                        className="w-full bg-surfaceHighlight border border-white/10 rounded-lg p-2 text-text focus:outline-none focus:border-primary transition-colors"
+                        className="w-full bg-surfaceHighlight border border-border rounded-lg p-2 text-text focus:outline-none focus:border-primary transition-colors"
                     />
                 </div>
             </Modal>

@@ -16,7 +16,12 @@ const LLM_PROVIDERS = {
     OPENROUTER: 'openrouter',
     NVIDIA: 'nvidia',
     BEDROCK: 'bedrock',
-    LOCAL: 'local'
+    LOCAL: 'local',
+    // Chrome's built-in on-device model (Gemini Nano), reached through the
+    // `LanguageModel` global. Deliberately absent from API_ENDPOINTS: it is an
+    // in-process browser API, not an HTTP endpoint, so it has no URL, needs no
+    // host_permissions entry and no CSP change. Do not "fix" the omission.
+    CHROME_AI: 'chrome-ai'
 };
 
 /**

@@ -17,16 +17,18 @@
  */
 import { ModelCatalogService } from '../../services/ModelCatalogService.js';
 import { LLMService } from '../../services/LLMService.js';
-import { DEFAULT_BEDROCK_REGION } from '../../utils/constants.js';
+import { DEFAULT_BEDROCK_REGION, LLM_PROVIDERS } from '../../utils/constants.js';
 import { resolveModel } from '../../utils/modelResolver.js';
 import { isReasoningModel } from '../../utils/modelCapabilities.js';
+import { providerNeedsKey } from '../../utils/providerCapabilities.js';
 import {
     PROBE_STATE,
     keyProven,
     classifyProbeFailure,
     describeProbeSuccess,
 } from '../../utils/apiKeyProbe.js';
-import { setGitLabHosts, setGitHubHosts, hostOf } from '../../utils/gitHosts.js';
+import { setGitLabHosts, setGitHubHosts, hostOf, githubApiBase, gitlabApiBase } from '../../utils/gitHosts.js';
+import { GIT_PLATFORM, classifyGitTokenProbe } from '../../utils/gitTokenProbe.js';
 
 /**
  * Split a user-entered host setting into a list.
@@ -180,7 +182,10 @@ export function createSettingsHandlers({ svc, FindingFollowupService }) {
             };
         }
         if (apiKey && apiKey.trim()) return apiKey;
-        if (provider === 'local') return '';
+        // Any keyless provider (Ollama, Chrome built-in AI) has no credential
+        // to resolve — checking the general predicate rather than hardcoding
+        // 'local' is what makes this correct for chrome-ai too.
+        if (!providerNeedsKey(provider)) return '';
 
         const stored = await svc.getStoredSettings();
         const field = {
@@ -222,7 +227,7 @@ export function createSettingsHandlers({ svc, FindingFollowupService }) {
             const credential = await resolveCredential(provider, { apiKey, bedrock });
             const hasCredential = provider === 'bedrock'
                 ? !!(credential.accessKeyId && credential.secretAccessKey)
-                : provider === 'local' || !!String(credential || '').trim();
+                : !providerNeedsKey(provider) || !!String(credential || '').trim();
             if (!hasCredential) {
                 sendResponse({
                     success: true,
@@ -241,6 +246,23 @@ export function createSettingsHandlers({ svc, FindingFollowupService }) {
             // already knew on the first response, and a rejected key is not a
             // transient condition worth replaying.
             probe.maxRetries = 0;
+
+            if (provider === LLM_PROVIDERS.LOCAL) {
+                // Ollama has no key to validate. The diagnostic that matters is
+                // whether the local server is reachable and has the selected
+                // model pulled — checkOllamaStatus answers both in one probe.
+                // Pass the raw `local:`-prefixed model id: matchesOllamaModel
+                // (inside the probe) strips the prefix itself.
+                const status = await probe.checkOllamaStatus(model);
+                sendResponse({
+                    success: true,
+                    verdict: status.verdict,
+                    message: status.message,
+                    fix: status.fix,
+                });
+                return;
+            }
+
             if (provider === 'bedrock') {
                 const access = await ensureBedrockHostAccess(credential.region);
                 if (!access.granted) {
@@ -302,6 +324,33 @@ export function createSettingsHandlers({ svc, FindingFollowupService }) {
                 status: verdict.status,
                 message: verdict.message,
             });
+        }
+    }
+
+    /**
+     * Onboarding probe: "is Ollama reachable at all", asked before any model
+     * has been selected. Deliberately does NOT call resolveModel — a fresh
+     * install has no model chosen, and resolveModel throws on that, which
+     * would make the welcome panel report Ollama unavailable when it is
+     * running fine. Passing `model || null` through to checkOllamaStatus is
+     * already well-defined: classifyOllamaProbe skips the model-presence
+     * check when selectedModel is null and answers only "did the server
+     * respond".
+     */
+    async function handleProbeOllama(message, sendResponse) {
+        try {
+            const { model } = message.data || {};
+            const probe = new LLMService();
+            probe.maxRetries = 0;
+            const status = await probe.checkOllamaStatus(model || null);
+            sendResponse({
+                success: true,
+                verdict: status.verdict,
+                message: status.message,
+                fix: status.fix,
+            });
+        } catch (error) {
+            sendResponse({ success: false, error: svc.getErrorMessage(error) });
         }
     }
 
@@ -488,8 +537,14 @@ export function createSettingsHandlers({ svc, FindingFollowupService }) {
                 return;
             }
             const settings = await svc.getStoredSettings();
-            if (!settings?.apiKey) {
-                sendResponse({ success: false, error: 'LLM API key not configured' });
+            // See chatHandlers: keyless providers have no apiKey by design.
+            if (providerNeedsKey(settings?.provider) && !settings?.apiKey) {
+                sendResponse({
+                    success: false,
+                    error: `No API key configured for ${settings?.provider || 'this provider'}. `
+                        + 'Add one in Settings, or switch to a keyless provider — Ollama or '
+                        + 'Chrome built-in AI.',
+                });
                 return;
             }
             if (!svc.findingFollowupService) {
@@ -515,9 +570,122 @@ export function createSettingsHandlers({ svc, FindingFollowupService }) {
         }
     }
 
+    /**
+     * Test a git-platform token by making the smallest authenticated call that
+     * platform offers, then classifying the outcome.
+     *
+     * Runs here rather than in the popup for the same reason every other
+     * provider call does: the service worker holds the host permissions and
+     * keeps credential-bearing requests out of the page.
+     *
+     * Deliberately does NOT reach for stored settings — it tests exactly what
+     * is typed into the form, so a user can verify a token before saving it.
+     */
+    async function handleTestGitToken(message, sendResponse) {
+        const { platform, token, baseUrl, email } = message.data || {};
+        try {
+            if (!platform) throw new Error('No platform specified.');
+
+            const request = buildGitTokenRequest({ platform, token, baseUrl, email });
+            if (request.error) {
+                sendResponse({
+                    success: true,
+                    state: PROBE_STATE.KEY_INVALID,
+                    keyProven: false,
+                    message: request.error,
+                });
+                return;
+            }
+
+            let status = null;
+            let networkError = null;
+            let identity = null;
+            let scopeHeader = null;
+            let rateLimitRemaining = null;
+
+            try {
+                const response = await fetch(request.url, { method: 'GET', headers: request.headers });
+                status = response.status;
+                scopeHeader = response.headers.get('x-oauth-scopes');
+                rateLimitRemaining = response.headers.get('x-ratelimit-remaining');
+                if (response.ok) {
+                    // Best-effort: a verdict must not depend on the body parsing,
+                    // so a malformed success still reports the token as working.
+                    try {
+                        const body = await response.json();
+                        identity = body?.login || body?.username || body?.displayName
+                            || body?.name || body?.emailAddress || null;
+                    } catch {
+                        identity = null;
+                    }
+                }
+            } catch (error) {
+                networkError = error?.message || String(error);
+            }
+
+            const verdict = classifyGitTokenProbe({
+                platform, status, networkError, identity, scopeHeader, rateLimitRemaining,
+            });
+            sendResponse({ success: true, ...verdict });
+        } catch (error) {
+            sendResponse({ success: false, error: svc.getErrorMessage(error) });
+        }
+    }
+
+    /**
+     * URL and headers for one platform's identity endpoint.
+     *
+     * Returns `{ error }` instead of throwing for a missing field, because a
+     * blank token is a form problem the user should read in the verdict box,
+     * not an exception.
+     */
+    function buildGitTokenRequest({ platform, token, baseUrl, email }) {
+        const trimmedToken = String(token || '').trim();
+
+        if (platform === GIT_PLATFORM.GITHUB) {
+            if (!trimmedToken) return { error: 'Enter a GitHub token first.' };
+            // Honours a GitHub Enterprise host when one is configured, so the
+            // test hits the same API the review would.
+            return {
+                url: `${githubApiBase(baseUrl)}/user`,
+                headers: {
+                    Authorization: `Bearer ${trimmedToken}`,
+                    Accept: 'application/vnd.github+json',
+                },
+            };
+        }
+
+        if (platform === GIT_PLATFORM.GITLAB) {
+            if (!trimmedToken) return { error: 'Enter a GitLab token first.' };
+            return {
+                url: `${gitlabApiBase(baseUrl)}/user`,
+                headers: { 'PRIVATE-TOKEN': trimmedToken },
+            };
+        }
+
+        if (platform === GIT_PLATFORM.JIRA) {
+            const site = String(baseUrl || '').trim().replace(/\/+$/, '');
+            const account = String(email || '').trim();
+            if (!site || !account || !trimmedToken) {
+                return { error: 'Jira needs all three: site URL, email, and API token.' };
+            }
+            return {
+                url: `${site}/rest/api/3/myself`,
+                headers: {
+                    Authorization: `Basic ${btoa(`${account}:${trimmedToken}`)}`,
+                    Accept: 'application/json',
+                },
+            };
+        }
+
+        return { error: `Unknown platform "${platform}".` };
+    }
+
     return {
         VALIDATE_API_KEY: handleValidateApiKey,
         FETCH_MODELS: handleFetchModels,
+        PROBE_OLLAMA: handleProbeOllama,
+        TEST_GIT_TOKEN: handleTestGitToken,
         SAVE_SETTINGS: handleSaveSettings,
         GET_SETTINGS: handleGetSettings,
         EXPLAIN_FINDING: (m, send) => handleFindingFollowup(m, send, 'explain'),
