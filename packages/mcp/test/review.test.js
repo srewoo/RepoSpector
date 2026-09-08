@@ -156,11 +156,17 @@ test('no single similar_code chunk crowds out the others', { timeout: TIMEOUT },
     const { dir, git } = await makeTempRepo();
 
     // One deliberately huge file plus several small ones, all plausibly similar.
-    await fs.writeFile(path.join(dir, 'huge.js'), `// ${'padding text about sessions and passwords. '.repeat(900)}\nexport function huge() { return 'session password'; }\n`);
+    //
+    // The retrieval query is built from the CHANGED SYMBOLS and paths, not from
+    // the rendered hunks, so these files have to be similar to the symbol under
+    // change (`check` in `target.js`) for the fixture to retrieve anything at
+    // all. Padding about unrelated sessions and passwords made this test inert
+    // the moment the query stopped being the bundle's own prose.
+    await fs.writeFile(path.join(dir, 'huge.js'), `// ${'padding about check and target validation. '.repeat(900)}\nexport function checkTarget(password) { return password.length > 0; }\n`);
     for (const n of ['a', 'b', 'c']) {
         await fs.writeFile(
             path.join(dir, `${n}.js`),
-            `export function ${n}Session(password) {\n    return password.length > 0;\n}\n`,
+            `export function ${n}Check(password) {\n    return password.length > 0;\n}\n`,
         );
     }
     await fs.writeFile(path.join(dir, 'target.js'), 'export function check(p) {\n    return p;\n}\n');

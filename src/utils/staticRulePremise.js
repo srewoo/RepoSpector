@@ -51,6 +51,12 @@ function stripNoise(text) {
  * joined — needed for constructs that legitimately span lines (an object literal,
  * a `catch` whose brace is on the next line). `before` is the window ABOVE the
  * cited line only, for rules whose premise is ordered.
+ *
+ * All three have string bodies and comments blanked, so a rule cannot match its
+ * own name in prose. `rawWindow` is the same window UNBLANKED, for the rules
+ * whose evidence legitimately lives inside a literal — a SQL statement is a
+ * string, and checking `SELECT` against a blanked window refutes every real
+ * finding the rule has.
  */
 const PREMISE = {
     /**
@@ -73,6 +79,23 @@ const PREMISE = {
 
     // Needs an actual catch/except clause.
     'no-empty-catch': ({ window }) => /\b(catch|except|rescue)\b/.test(window),
+
+    /**
+     * The three rules below produced the noise on a measured review and had no
+     * predicate here, so the gate could not touch them: `no-sql-injection`
+     * reported ELEVEN criticals in a repository with no SQL.
+     *
+     * A SQL-injection finding needs both halves of its own claim near the line —
+     * something that runs a query, and a SQL verb. Either alone is a string.
+     */
+    'no-sql-injection': ({ rawWindow }) => /\b(query|execute|exec|raw|prepare|createQuery|sql)\b/i.test(rawWindow)
+        && /\b(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|FROM|WHERE)\b/i.test(rawWindow),
+
+    /** An SSRF needs something that actually performs a request. */
+    ssrf: ({ window }) => /\b(fetch|axios|request|got|http|https|urllib|requests|HttpClient|open)\b/.test(window),
+
+    /** A swallowed failure needs a catch clause to swallow it in. */
+    'logging-failures': ({ window }) => /\b(catch|except|rescue|onError|errback)\b/.test(window),
 
     // Needs a loose equality operator. `===` and `!==` must not count.
     eqeqeq: ({ line }) => /(^|[^=!<>])[=!]=(?!=)/.test(line),
@@ -160,6 +183,7 @@ export function checkStaticPremise(finding, patch) {
     const context = {
         line: stripNoise(cited),
         window: stripNoise(windowText.join('\n')),
+        rawWindow: windowText.join('\n'),
         // Strictly above the cited line — required by any rule whose premise is
         // ordered, like unreachability.
         before: stripNoise(beforeText.join('\n')),

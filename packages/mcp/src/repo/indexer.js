@@ -1,5 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { register } from 'node:module';
@@ -38,6 +40,8 @@ const loaderUrl = new URL('../adapters/esmInterop.loader.js', import.meta.url);
 if (existsSync(fileURLToPath(loaderUrl))) {
     register('../adapters/esmInterop.loader.js', import.meta.url);
 }
+
+const execFileAsync = promisify(execFile);
 
 const { RAGService } = await import('../../../../src/services/RAGService.js');
 const { CodeGraphPipeline } = await import('../../../../src/services/CodeGraphPipeline.js');
@@ -153,6 +157,43 @@ export function createIndexer(config) {
         }
     }
 
+    /**
+     * Which commit the persisted index was built from.
+     *
+     * Recorded beside the parser mode, and for the same reason: on a warm start
+     * nothing is read from the repository, so what the graph describes cannot
+     * be re-derived from this process. Without it a caller lookup can be
+     * answered from an index far away from the change under review with nothing
+     * to say so — `provenance.index.behindReviewedBase` is computed from this.
+     *
+     * Absent for a repository with no commits, and for any index built before
+     * this was tracked. Both report null: a wrong commit would be read as a
+     * measurement.
+     */
+    const indexedCommitFile = path.join(dir, 'indexed-commit.txt');
+
+    async function recordIndexedCommit() {
+        try {
+            const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
+                cwd: config.repo,
+            });
+            await fs.mkdir(dir, { recursive: true });
+            await fs.writeFile(indexedCommitFile, stdout.trim(), 'utf8');
+        } catch {
+            // An unborn HEAD (no commits yet) is not an error worth failing an
+            // index over; it just leaves the commit unrecorded.
+        }
+    }
+
+    async function indexedCommit() {
+        try {
+            const sha = (await fs.readFile(indexedCommitFile, 'utf8')).trim();
+            return /^[0-9a-f]{7,40}$/i.test(sha) ? sha : null;
+        } catch {
+            return null;
+        }
+    }
+
     async function ensureIndexed({ force = false, maxFiles = config.maxFiles, onProgress } = {}) {
         if (ready && !force) return ready;
 
@@ -180,6 +221,7 @@ export function createIndexer(config) {
             // Read AFTER buildGraph: preloadFromFiles runs during the build.
             builtParserMode = parser.available ? 'tree-sitter' : 'regex-fallback';
             await recordParserMode(builtParserMode);
+            await recordIndexedCommit();
             await recordRepoPath(dir, config.repo);
 
             lastBuild = {
@@ -208,6 +250,7 @@ export function createIndexer(config) {
         stats: () => pipeline.getStats(),
         parserMode: () => builtParserMode
             || (parser.available ? 'tree-sitter' : 'unknown'),
+        indexedCommit,
     };
 }
 

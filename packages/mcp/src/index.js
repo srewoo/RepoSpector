@@ -1,7 +1,15 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { parseConfig } from './config.js';
+import { parseConfig, wantsHelp, helpText } from './config.js';
 import { createServer } from './server.js';
+
+// Before anything else, and before the transport exists: printing usage and
+// then speaking MCP on the same stdout would hand a client a stream whose
+// first bytes are not a protocol message.
+if (wantsHelp(process.argv.slice(2))) {
+    process.stdout.write(helpText());
+    process.exit(0);
+}
 
 const config = parseConfig(process.argv.slice(2), process.env);
 const server = createServer(config);

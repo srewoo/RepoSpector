@@ -27,6 +27,52 @@ const exec = promisify(execFile);
  * Filtering reuses src/utils/codeFileFilter.js so the MCP index and the
  * extension index agree about what is indexable in the same repository.
  */
+/**
+ * Read specific paths as they exist AT A REVISION, not in the working tree.
+ *
+ * `readRepoFiles` reads whatever is checked out. That is right for indexing and
+ * wrong for reviewing: a review targets a revision range or a pull request, and
+ * the worktree is under no obligation to be either of them. Linting the
+ * worktree while the hunks come from a range produced findings on code the
+ * change deletes — on a real review, against a worktree 537 commits behind the
+ * range's own base. Two sections of one bundle described different code.
+ *
+ * A path absent from the revision (the change deleted it, or it was renamed) is
+ * returned in `missing` rather than skipped silently, because "no findings for
+ * this file" and "this file was never analysed" are different facts.
+ *
+ * @param {string} repoDir
+ * @param {string} rev Anything `git show` accepts: a sha, branch, or tag.
+ * @param {string[]} paths Repo-relative paths.
+ * @returns {Promise<{files: Array<{path: string, content: string}>, missing: string[], skipped: Array<{path: string, reason: string}>}>}
+ */
+export async function readFilesAtRev(repoDir, rev, paths = []) {
+    const files = [];
+    const missing = [];
+    const skipped = [];
+
+    for (const rel of paths) {
+        try {
+            // `--` guards a path that could be read as a revision.
+            const { stdout } = await exec('git', ['show', `${rev}:${rel}`], {
+                cwd: repoDir,
+                maxBuffer: 64 * 1024 * 1024,
+            });
+            if (stdout.length > MAX_FILE_SIZE) {
+                skipped.push({ path: rel, reason: `larger than ${MAX_FILE_SIZE} bytes` });
+                continue;
+            }
+            files.push({ path: rel, content: stdout });
+        } catch {
+            // `git show` fails for a path that does not exist at this revision,
+            // which for a diff's file list is the ordinary case of a deletion.
+            missing.push(rel);
+        }
+    }
+
+    return { files, missing, skipped };
+}
+
 export async function readRepoFiles(repoDir, { maxFiles = 5000 } = {}) {
     let listed;
     try {

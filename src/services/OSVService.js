@@ -10,6 +10,17 @@ export class OSVService {
         this.baseUrl = 'https://api.osv.dev/v1';
         this.cacheTTL = options.cacheTTL || 86400000; // 24 hours
         this.cache = new Map();
+        /**
+         * Where the vulnerability cache persists.
+         *
+         * `{save(data), load()}`. Defaults to `chrome.storage.local`, which is
+         * the only Chrome dependency in this service — everything else is HTTP
+         * against api.osv.dev. Because the calls were inlined, no non-extension
+         * caller could use OSVService at all: the MCP server shipped a
+         * file-backed cache adapter it had no way to hand over, and reported
+         * its dependency section as unavailable on every review.
+         */
+        this.persistentCache = options.cache || null;
         this.ecosystemMap = {
             npm: 'npm',
             pip: 'PyPI',
@@ -249,7 +260,11 @@ export class OSVService {
                     cacheData[key] = value;
                 }
             }
-            await chrome.storage.local.set({ osv_vuln_cache: cacheData });
+            if (this.persistentCache) {
+                this.persistentCache.save(cacheData);
+            } else {
+                await chrome.storage.local.set({ osv_vuln_cache: cacheData });
+            }
         } catch (e) {
             console.warn('Failed to persist OSV cache:', e.message);
         }
@@ -260,7 +275,9 @@ export class OSVService {
      */
     async loadCache() {
         try {
-            const result = await chrome.storage.local.get('osv_vuln_cache');
+            const result = this.persistentCache
+                ? { osv_vuln_cache: this.persistentCache.load() }
+                : await chrome.storage.local.get('osv_vuln_cache');
             if (result.osv_vuln_cache) {
                 for (const [key, value] of Object.entries(result.osv_vuln_cache)) {
                     if (Date.now() - value.queriedAt < this.cacheTTL) {

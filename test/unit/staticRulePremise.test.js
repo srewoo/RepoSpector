@@ -107,3 +107,51 @@ describe('does NOT refute — the expensive direction', () => {
         expect(CHECKED_RULES).toEqual(expect.arrayContaining(['no-dupe-keys', 'no-unreachable', 'eqeqeq']));
     });
 });
+
+/**
+ * Predicates for the rules that actually fired on a real review.
+ *
+ * The gate covered 19 rules and none of the three that produced the noise:
+ * `no-sql-injection` (11 criticals in a repo with no SQL), `ssrf`, and
+ * `logging-failures`. A gate is only as good as its coverage, and the rules it
+ * did not know about sailed through exactly as before it existed.
+ */
+describe('covers the rules seen firing in production reviews', () => {
+    it('refutes no-sql-injection where no query call is anywhere near', () => {
+        const p = patch(['+const auth = "Bearer " + token;', '+return auth;']);
+        const out = checkStaticPremise({ ruleId: 'no-sql-injection', line: 1 }, p);
+        expect(out.ok).toBe(false);
+        expect(out.reason).toMatch(/mis-mapped/);
+    });
+
+    it('keeps no-sql-injection where a query call and a SQL verb are present', () => {
+        const p = patch(['+db.query("SELECT * FROM users WHERE id = " + id);']);
+        expect(checkStaticPremise({ ruleId: 'no-sql-injection', line: 1 }, p).ok).toBe(true);
+    });
+
+    it('refutes ssrf where nothing performs a request', () => {
+        const p = patch(['+const url = base + "/api";', '+return url;']);
+        expect(checkStaticPremise({ ruleId: 'ssrf', line: 1 }, p).ok).toBe(false);
+    });
+
+    it('keeps ssrf where a request is made from a variable', () => {
+        const p = patch(['+const res = await fetch(target.url);']);
+        expect(checkStaticPremise({ ruleId: 'ssrf', line: 1 }, p).ok).toBe(true);
+    });
+
+    it('refutes logging-failures where there is no catch clause', () => {
+        const p = patch(['+const x = compute();', '+logger.warn("done");']);
+        expect(checkStaticPremise({ ruleId: 'logging-failures', line: 1 }, p).ok).toBe(false);
+    });
+
+    it('keeps logging-failures inside a catch that swallows', () => {
+        const p = patch(['+try { go(); } catch (e) {', '+  return null;', '+}']);
+        expect(checkStaticPremise({ ruleId: 'logging-failures', line: 1 }, p).ok).toBe(true);
+    });
+
+    it('names all three among the checked rules', () => {
+        for (const rule of ['no-sql-injection', 'ssrf', 'logging-failures']) {
+            expect(CHECKED_RULES).toContain(rule);
+        }
+    });
+});

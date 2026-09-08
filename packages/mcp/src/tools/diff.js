@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import { windowFile } from '../../../../src/services/HunkWindower.js';
 import { getIndexer } from '../repo/indexer.js';
 import { resolveRepo, REPO_ARG } from '../repo/resolveRepo.js';
-import { capList } from './cap.js';
+import { capText, estimateTokens, allocateTokens } from './cap.js';
 import { parseUnifiedDiff } from './unifiedDiff.js';
 
 export { parseUnifiedDiff };
@@ -27,9 +27,38 @@ export function parseDiffTarget(args = {}) {
     };
 }
 
+/**
+ * The git arguments for a range, and which comparison they express.
+ *
+ * `git diff a..b` compares the two endpoints. When `a` has advanced since `b`
+ * was cut, that reports `a`'s own commits INVERTED — as though the change under
+ * review deleted them. A review asks "what did this branch do", which is the
+ * three-dot form: `git diff a...b` diffs against the merge base. So a two-dot
+ * range is normalised, and the mode is reported rather than assumed.
+ *
+ * A single revision is left exactly as given: `git diff HEAD` means "the
+ * working tree against HEAD", which is a legitimate thing to review and is not
+ * a range at all.
+ */
+export function diffRangeArgs(range) {
+    const spec = String(range ?? '').trim();
+    if (spec.includes('...')) {
+        return { args: ['diff', '--unified=3', spec], mode: 'merge-base' };
+    }
+    if (spec.includes('..')) {
+        const [base, head] = spec.split('..');
+        return {
+            args: ['diff', '--unified=3', `${base.trim()}...${(head || '').trim() || 'HEAD'}`],
+            mode: 'merge-base',
+        };
+    }
+    return { args: ['diff', '--unified=3', spec], mode: 'worktree' };
+}
+
 /** Local diff via git, so the common case needs no network and no token. */
 async function localDiff(repo, range) {
-    const { stdout } = await exec('git', ['diff', '--unified=3', range], {
+    const { args } = diffRangeArgs(range);
+    const { stdout } = await exec('git', args, {
         cwd: repo,
         maxBuffer: 64 * 1024 * 1024,
     });
@@ -98,14 +127,31 @@ export function graphAnnotationForFile(indexer, filename) {
  * @returns {Promise<Array<{filename: string, patch: string, [key: string]: any}>>}
  */
 export async function collectDiffFiles(args, ctx) {
+    const { files } = await collectDiffWithMeta(args, ctx);
+    return files;
+}
+
+/**
+ * The changed files AND the revision they live at, when there is one.
+ *
+ * `collectDiffFiles` kept only `files` and discarded the rest of the pull
+ * request, so the head sha — the revision whose file contents a reviewer
+ * actually wants linted — was thrown away. Every `pr_url` review therefore
+ * fell back to reading the patch's added lines even when the head had been
+ * fetched and was sitting in the local repository. `headSha` is reported here;
+ * whether it exists locally is `resolveReviewRev`'s question to answer.
+ *
+ * @returns {Promise<{files: Array<object>, headSha: string|null}>}
+ */
+export async function collectDiffWithMeta(args, ctx) {
     const target = parseDiffTarget(args);
     if (target.error) throw new Error(target.error);
 
     if (target.kind === 'diff') {
-        return parseUnifiedDiff(target.diff);
+        return { files: parseUnifiedDiff(target.diff), headSha: null };
     }
     if (target.kind === 'range') {
-        return localDiff(resolveRepo(ctx, args), target.range);
+        return { files: await localDiff(resolveRepo(ctx, args), target.range), headSha: null };
     }
 
     // Imported lazily: the PR services reach the network, and a local-range
@@ -118,7 +164,7 @@ export async function collectDiffFiles(args, ctx) {
         gitlabToken: ctx.config.gitlabToken,
     });
     const pr = await svc.fetchPullRequest(target.url);
-    return pr?.files || [];
+    return { files: pr?.files || [], headSha: pr?.headSha || null };
 }
 
 /**
@@ -143,16 +189,94 @@ export function renderDiffFiles(files, indexer, maxToolTokens) {
     for (const file of files) {
         for (const w of windowFile(file) || []) windows.push({ file, window: w });
     }
+    const items = windows.length
+        ? windows
+        : files.map((f) => ({ file: f, window: null }));
 
-    return capList(
-        windows.length ? windows : files.map((f) => ({ file: f, window: null })),
-        ({ file, window }) => {
-            const neighbours = graphAnnotationForFile(indexer, file.filename);
-            const patch = window?.patch || file.patch || '';
-            return `--- ${file.filename}\n${patch}${neighbours}`;
-        },
-        maxToolTokens,
-    );
+    // Review value decides order, not git's alphabetical file order. A stable
+    // sort keeps the original order within a tier, so hunks of one file stay
+    // together and in sequence.
+    const ordered = items
+        .map((item, i) => ({ item, i, rank: reviewPriority(item.file.filename) }))
+        .sort((a, b) => (a.rank - b.rank) || (a.i - b.i))
+        .map(({ item }) => item);
+
+    const render = ({ file, window }) => {
+        const neighbours = graphAnnotationForFile(indexer, file.filename);
+        const patch = window?.patch || file.patch || '';
+        return `--- ${file.filename}\n${patch}${neighbours}`;
+    };
+
+    const bodies = ordered.map(render);
+    const desired = bodies.map((b) => estimateTokens(b));
+    const wanted = desired.reduce((a, b) => a + b, 0);
+
+    if (wanted <= maxToolTokens) {
+        return {
+            text: bodies.join('\n\n'),
+            shown: bodies.length,
+            total: bodies.length,
+            truncated: false,
+        };
+    }
+
+    // Water-fill across windows instead of rendering greedily until the budget
+    // runs out. Greedy-in-order let one 5KB prose line consume the whole grant
+    // and drop the remaining 25 windows of a 22-file review; every changed file
+    // trimmed beats one file whole and the rest invisible.
+    //
+    // A floor per window keeps a small share for every file even when one is
+    // enormous, since "this file changed and here is a little of it" is still
+    // the fact a reviewer needs.
+    const floor = Math.max(1, Math.floor(maxToolTokens / (bodies.length * 4)));
+    const granted = allocateTokens(desired, maxToolTokens, {
+        floors: bodies.map(() => floor),
+    });
+
+    let trimmed = 0;
+    const parts = bodies.map((body, i) => {
+        const capped = capText(body, granted[i]);
+        if (!capped.truncated) return capped.text;
+        trimmed += 1;
+        const header = `--- ${ordered[i].file.filename}`;
+        return capped.text.startsWith(header)
+            ? `${capped.text}\n[trimmed to fit the token limit — raise --max-tool-tokens for the full hunk]`
+            : `${header}\n[trimmed to fit the token limit — raise --max-tool-tokens for the full hunk]`;
+    });
+
+    const header = `Showing all ${bodies.length} windows, ${trimmed} trimmed to fit `
+        + '(token limit) — raise --max-tool-tokens for untrimmed hunks.\n\n';
+
+    return {
+        text: header + parts.join('\n\n'),
+        shown: bodies.length,
+        total: bodies.length,
+        truncated: trimmed > 0,
+    };
+}
+
+/**
+ * Review value of a path, lowest first. Ordering only — nothing is excluded.
+ *
+ * A review bundle that must trim should trim the least consequential thing.
+ * Generated output and lockfiles are last because a reviewer reads a diff of
+ * them as a fact about a dependency change, not as code to judge; docs sit
+ * between because prose is worth seeing but never at the cost of the source it
+ * describes. The tiers are coarse on purpose: any finer judgement about which
+ * source file matters most belongs to the reader, not to a sort key.
+ *
+ * `EXCLUDE_PATH_RE` in `src/utils/codeFileFilter.js` covers the same
+ * generated/lockfile ground for indexing but is not exported, so the patterns
+ * are restated here rather than reaching into that module's internals.
+ */
+export function reviewPriority(filename) {
+    const name = String(filename || '');
+    if (/(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|composer\.lock|Gemfile\.lock|go\.sum)$/i.test(name)) {
+        return 3;
+    }
+    if (/(\.min\.(js|css)|\.map|\.snap)$/i.test(name)) return 3;
+    if (/\.(md|markdown|mdx|txt|rst|adoc|asciidoc|org)$/i.test(name)) return 2;
+    return 1;
 }
 
 export const GET_DIFF_CONTEXT_TOOL = {

@@ -351,3 +351,19 @@ export default {
     isIndexableCodeFile,
     filterIndexableFiles,
 };
+
+/**
+ * Does this path hold source CODE — as opposed to documentation, data or config?
+ *
+ * Narrower than `isIndexableCodeFile`, which deliberately accepts `.md` because
+ * documentation is worth retrieving. This answers a different question: whether
+ * a graph node in this file can be a CALLER. The graph builds CALLS edges from
+ * everything it indexes, so without this a review reported `findAppKnowledge`
+ * as "called by AI-README.md, SETUP.md, ADR-007-….md" — three prose mentions
+ * presented as live call sites, on a change whose whole risk was which call
+ * sites survived.
+ */
+export function isCodeSourcePath(path) {
+    return /\.(js|jsx|mjs|cjs|ts|tsx|py|go|java|rb|rs|php|cs|kt|kts|swift|scala|sh|bash|zsh|c|h|cc|cpp|hpp|m|mm|ex|exs|erl|clj|dart|lua|pl|pm|r|jl|hs|ml|vue|svelte)$/i
+        .test(String(path || ''));
+}

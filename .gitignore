@@ -175,3 +175,5 @@ eval/corpus/
 eval/results/
 !eval/results/.gitkeep
 .playwright-mcp/
+.superpowers/
+docs/superpowers/

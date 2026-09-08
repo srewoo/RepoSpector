@@ -111,3 +111,47 @@ describe('regex findings say they came from a regex', () => {
         expect(hits[0].engine).toBe('regex');
     });
 });
+
+describe('no-dupe-keys does not read key-like text inside strings', () => {
+    /**
+     * The second false-positive mechanism in this rule, found by re-reviewing
+     * the same merge request after the anchoring fix: a *string value* that
+     * contains `word:` looks like a key. In
+     * `apps/mcp-server/src/tools/tool-handlers.ts` the JSON-schema property
+     *
+     *     type: { type: 'string', description: 'Filter by case type: functional | ...' }
+     *
+     * matched because `type:` occurs inside the description text. The rule is
+     * about object keys; text inside a literal is not one.
+     */
+    it('a description string containing "type:" is not a duplicate key', () => {
+        const code = `const schema = {
+  type: {
+    type: 'string',
+    description: 'Filter by case type: functional | security | ui',
+  },
+};`;
+        expect(dupeKeys(code)).toEqual([]);
+    });
+
+    it('a template literal containing a key-like span is not a duplicate key', () => {
+        const code = 'const o = { name: `pick a name: any name` , other: 1 };';
+        expect(dupeKeys(code)).toEqual([]);
+    });
+
+    it('a real duplicate is still found when strings are present', () => {
+        const code = `const o = {
+  host: 'example.com: not a key',
+  port: 1,
+  host: 'other',
+};`;
+        expect(dupeKeys(code)).toHaveLength(1);
+    });
+
+    it('reports the line of the real code, not of a blanked string', () => {
+        const code = `const a = 1;\nconst o = { k: 'x: y', k: 2 };`;
+        const hits = dupeKeys(code);
+        expect(hits).toHaveLength(1);
+        expect(hits[0].line).toBe(2);
+    });
+});

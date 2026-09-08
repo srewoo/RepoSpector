@@ -69,7 +69,14 @@ export const ESLINT_RULES = {
         severity: 'critical',
         category: 'security',
         message: 'Potential SQL injection - use parameterized queries',
-        pattern: /(?:query|execute|exec)\s*\(\s*['"`](?:SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER)\s+.*?\$\{|['"`]\s*\+\s*\w+/gi,
+        // The old pattern ended in `['"`]\s*\+\s*\w+`, which matches ANY string
+        // concatenation — `'Bearer ' + token`, `'run-' + issueKey`, a log
+        // message. It reported eleven CRITICAL findings in a repository with no
+        // SQL. A critical severity that fires on concatenation is the loudest
+        // thing in the section and almost always wrong, so both alternatives now
+        // require a query call AND a SQL verb: interpolation into one, or
+        // concatenation onto one.
+        pattern: /(?:query|execute|exec|raw|prepare)\s*\(\s*(?:['"`][^'"`]*\b(?:SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER)\b[^'"`]*(?:\$\{|['"`]\s*\+\s*\w)|`[^`]*\b(?:SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER)\b[^`]*\$\{)/gi,
         cwe: 'CWE-89',
         owasp: 'A03:2021-Injection'
     },
@@ -113,7 +120,21 @@ export const ESLINT_RULES = {
         severity: 'medium',
         category: 'bug',
         message: 'Duplicate keys in object literal',
-        pattern: /\{[^}]*(['"`]?\w+['"`]?)\s*:[^}]*\1\s*:/g,
+        // Both occurrences are anchored to a key POSITION — `{` or `,`, then an
+        // optional quote, then the whole key. Without that anchor on the
+        // backreference the group matched a key's SUFFIX: `testCases:` captured
+        // `s`, which then "repeated" as the `s:` ending `existingCaseIds:`. That
+        // fired on three separate zod schemas of distinct keys in one real
+        // review. The same key in two sibling objects is not a duplicate.
+        // The REPEAT must follow a comma, not `{`: a second key in the same
+        // literal always does, while `{` let a key of a NESTED object count as a
+        // duplicate of its parent's — `type: { type: 'string' }` fired on a real
+        // review. `[^{}]*` keeps the span inside one literal.
+        pattern: /[{,]\s*['"`]?([\w$-]+)['"`]?\s*:[^{}]*,\s*['"`]?\1['"`]?\s*:/g,
+        // A key is code, never text inside a literal. `'Filter by case type:
+        // functional'` read as a second `type` key on a real review — the rule's
+        // second false-positive mechanism after the anchoring one.
+        ignoreStrings: true,
         cwe: 'CWE-561'
     },
     'use-isnan': {

@@ -21,6 +21,7 @@
  */
 
 import { resolveBudget } from '../utils/reviewContextBudget.js';
+import { isCodeSourcePath } from '../utils/codeFileFilter.js';
 import { CallerSourceService } from './CallerSourceService.js';
 // Shared with ReviewReuseContextService — the declaration patterns are the same
 // question ("what does this diff define?") asked for two different purposes, and
@@ -266,7 +267,10 @@ export class ReviewGraphContextService {
                     if (rel.type !== 'CALLS') continue;
                     const caller = this.pipeline.graph.getNode(rel.sourceId);
                     const file = caller?.properties?.filePath;
-                    if (file) impactedFiles.add(file);
+                    // Documentation is not a call site. The graph indexes prose
+                    // too, so without this a symbol read as "called by
+                    // AI-README.md" — a mention presented as a consumer.
+                    if (file && isCodeSourcePath(file)) impactedFiles.add(file);
                 }
             }
         } catch { /* optional signal */ }

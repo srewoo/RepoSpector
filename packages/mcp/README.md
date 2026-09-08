@@ -80,9 +80,25 @@ Every tool accepts an optional `repo` argument (an absolute path; `~` is expande
 
 - `--repo <path>` — default repository for calls that do not name one. Defaults to the working directory.
 - `--max-files <n>` — cap on how many files are read during indexing (default 5000).
-- `--max-tool-tokens <n>` — cap on any single tool response, in estimated tokens (default 4096). Raise it
-  for `review_pr` on a large diff. The bundle divides this budget across its sections rather than
-  truncating from the end, so no section can crowd out the others.
+- `--max-tool-tokens <n>` — cap on any single tool response, in estimated tokens (**default: 12000**).
+  Raise it for `review_pr` on a large diff; lower it if your client's context is tight. The bundle divides
+  this budget across its sections rather than truncating from the end, so no section can crowd out the
+  others: `hunks` holds a reserved share and every changed file stays represented — trimmed if need be —
+  with source ordered ahead of docs and lockfiles, and each JSON section sheds detail (saying what it
+  dropped) instead of being cut mid-structure. 4096 was the old default and was measurably too small: on a
+  22-file merge request it returned every section but only 15 of 26 hunk windows and an emptied symbol
+  list. Run `repospector-mcp --help` for every flag and its default.
+
+  Flags go in `args` in your client config:
+
+  ```json
+  "mcpServers": {
+    "repospector": {
+      "command": "npx",
+      "args": ["-y", "repospector-mcp", "--max-tool-tokens", "24000"]
+    }
+  }
+  ```
 - `GITHUB_TOKEN` / `GITLAB_TOKEN` — read from the **environment only, never from a flag**, since anything
   in `args` is visible to any process that can list the process table. Needed only when this server
   fetches a private diff *itself*; passing `diff` avoids them entirely. These are **git-host credentials,
@@ -124,19 +140,36 @@ Requires Node 20 or newer.
 
 ## `review_pr` returns material, not a review
 
-`review_pr` returns **material for a review** — the diff hunks, a rubric, graph context for the touched
-symbols, comparable code from the repository, covering tests, prior findings, and deterministic
-static-analysis output (linters, tree-sitter, secret scan) — rather than generated prose. This package has
-no LLM client, so it cannot write review commentary itself; it hands the connected assistant everything
-needed to write that review with the client's own model.
+`review_pr` returns **material for a review** — the diff hunks, a rubric, callers and callees of the
+touched symbols, comparable code from the repository, coverage of the change, prior findings, deterministic
+static-analysis output, and a `provenance` block — rather than generated prose. This package has no LLM
+client, so it cannot write review commentary itself; it hands the connected assistant everything needed to
+write that review with the client's own model.
+
+Every section says what it describes, because sections that quietly described different code was this
+tool's worst failure: it once linted the working tree while the hunks came from a revision range, and
+reported findings on code the change deleted. So:
+
+- `provenance` names the reviewed base and head, the worktree, the commit the index was built from, and how
+  far that index is from the reviewed base. When `index.stale` is true, the graph and retrieval sections
+  describe other code and should be weighed accordingly.
+- `static_analysis` reads whole files **at the reviewed revision**, falling back to the patch's own added
+  lines — never to the working tree — when no revision resolves locally; `source` says which. It reports
+  the `engines` that ran (`regex` is a pattern matcher, not a parser) and lists in `premiseRefuted` any
+  finding withheld because the rule's own construct was absent where it fired.
+- `graph_context` and `covering_tests` are scoped to the change, including symbols it removes with the
+  callers they still have, and test files it deletes. Repo-wide totals are kept as background only.
+- A `range` is compared against the **merge base**, so a base branch's own commits are never reported as
+  part of the change under review.
 
 That is a deliberate constraint. Generating findings inside the server would need a model, and both ways to
 supply one cost more than they return: MCP sampling has uneven support across clients, so the tool would
 simply fail in some of them, and an environment-variable API key would put a model client back inside a
 package whose entire point is that it has none.
 
-One section of the bundle, `dependencies` (OSV vulnerability lookups), reports itself as unavailable: that
-analysis depends on Chrome extension storage and has no seam yet for a filesystem cache. It is named in the
+The `dependencies` section (OSV vulnerability lookups) runs only when the change actually touches a
+dependency manifest, and says `applicable: false` when it does not — a real answer rather than a missing
+one. Its cache is file-backed beside the index. A section that genuinely cannot run is still named in the
 output rather than silently omitted, so a reader cannot mistake a missing check for a passing one.
 
 ## Releasing an update

@@ -107,14 +107,45 @@ export function capList(items, renderFn, maxTokens) {
  * still over the line. Small sections are never truncated to make room for a
  * large one, and a large one is capped rather than dropped.
  *
+ * ## Floors
+ *
+ * Equal shares are the right default for sections of equal standing, and wrong
+ * when one section IS the evidence. `hunks` received the same 1/8 as seven
+ * summaries, and on a 22-file review that left room for one window — of a
+ * prose file. A floor reserves a share up front (never more than the section
+ * actually wants) and the remainder water-fills as before, so a floor cannot
+ * starve the other sections to zero.
+ *
  * @param {number[]} desired Tokens each section would use uncapped.
  * @param {number} total Tokens available across all of them.
+ * @param {{floors?: number[]}} [opts] Per-section minimum grants.
  * @returns {number[]} Tokens granted per section, aligned with `desired`.
  */
-export function allocateTokens(desired, total) {
+export function allocateTokens(desired, total, opts = {}) {
     const n = desired.length;
     const granted = new Array(n).fill(0);
     if (n === 0 || !(total > 0)) return granted;
+
+    const floors = Array.isArray(opts.floors) ? opts.floors : null;
+    if (floors) {
+        // Reserve the floors, then water-fill the remainder over what is left
+        // of each section's appetite. Reserving more than `total` is not
+        // possible: the floors are scaled down together if they would.
+        const reserved = desired.map((d, i) => Math.max(0, Math.min(d, floors[i] || 0)));
+        const reservedTotal = reserved.reduce((a, b) => a + b, 0);
+        // Leave at least a quarter of the budget for everything else, so a
+        // large floor cannot silently delete the other sections.
+        const cap = Math.floor(total * 0.75);
+        const scale = reservedTotal > cap && reservedTotal > 0 ? cap / reservedTotal : 1;
+        const floorGrant = reserved.map((r) => Math.floor(r * scale));
+        const spent = floorGrant.reduce((a, b) => a + b, 0);
+
+        const rest = allocateTokens(
+            desired.map((d, i) => Math.max(0, d - floorGrant[i])),
+            total - spent,
+        );
+        return floorGrant.map((f, i) => f + rest[i]);
+    }
 
     let remaining = total;
     let open = desired.map((_, i) => i);
@@ -137,4 +168,56 @@ export function allocateTokens(desired, total) {
     }
 
     return granted;
+}
+
+/**
+ * Render an object whose bulk is one or more lists, shedding list tails until
+ * it fits — never slicing the JSON mid-structure.
+ *
+ * The third instance of one bug. `static_analysis` overran and `capText` cut it
+ * at a line boundary: 8494 of 9995 lines gone and the remainder unparseable.
+ * `graph_context` then did the same once its symbol cap scaled with the budget.
+ * Both have the same shape — a small head of facts that must always survive,
+ * plus long lists — so shedding is expressible once here rather than bespoke
+ * per section.
+ *
+ * Lists shed from the LAST one first: they are given in priority order, so a
+ * section can keep `removed` while dropping `symbols`, or keep deleted test
+ * files while dropping repo-wide background.
+ *
+ * @param {object} head Fields that always survive.
+ * @param {Array<{key: string, items: Array}>} lists In priority order.
+ * @param {number} maxTokens
+ */
+export function renderJsonSection(head, lists = [], maxTokens) {
+    const kept = lists.map((l) => (Array.isArray(l.items) ? l.items.length : 0));
+
+    const build = () => {
+        const out = { ...head };
+        lists.forEach((list, i) => {
+            const items = Array.isArray(list.items) ? list.items : [];
+            out[list.key] = items.slice(0, kept[i]);
+            const dropped = items.length - kept[i];
+            if (dropped > 0) {
+                out[`${list.key}Note`] = `${dropped} of ${items.length} not shown, to fit the `
+                    + 'token limit — raise --max-tool-tokens for all of them';
+            }
+        });
+        return JSON.stringify(out, null, 2);
+    };
+
+    let text = build();
+    // Halve the longest remaining list, last-first, until it fits. The head is
+    // never touched: a section that cannot state its own basis is worse than a
+    // short one.
+    for (let guard = 0; guard < 200 && estimateTokens(text) > maxTokens; guard += 1) {
+        let target = -1;
+        for (let i = kept.length - 1; i >= 0; i -= 1) {
+            if (kept[i] > 0) { target = i; break; }
+        }
+        if (target < 0) break;
+        kept[target] = Math.floor(kept[target] / 2);
+        text = build();
+    }
+    return text;
 }

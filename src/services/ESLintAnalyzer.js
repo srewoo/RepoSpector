@@ -88,6 +88,7 @@ export class ESLintAnalyzer {
 
         return {
             tool: 'eslint',
+            engine: 'regex',
             filePath,
             language,
             findings,
@@ -129,16 +130,37 @@ export class ESLintAnalyzer {
     }
 
     /**
+     * Replace the BODY of every string literal with same-length filler.
+     *
+     * Offsets and line breaks are preserved exactly, so a finding's reported
+     * line and column still point at the real source. Only rules that opt in
+     * (`ignoreStrings`) see this: a rule about object keys or dead code must
+     * not read text inside a literal, while `no-hardcoded-secret` and
+     * `no-implied-eval` exist precisely to read it.
+     */
+    static blankStringBodies(code) {
+        return String(code).replace(
+            /(['"`])(?:\\.|(?!\1)[\s\S])*?\1/g,
+            (match, quote) => quote
+                + match.slice(1, -1).replace(/[^\n]/g, 'x')
+                + quote,
+        );
+    }
+
+    /**
      * Run a single rule against the code
      */
     runRule(rule, code, lines, filePath) {
         const findings = [];
         const pattern = new RegExp(rule.pattern.source, rule.pattern.flags);
+        const haystack = rule.ignoreStrings
+            ? ESLintAnalyzer.blankStringBodies(code)
+            : code;
 
         let match;
-        while ((match = pattern.exec(code)) !== null) {
+        while ((match = pattern.exec(haystack)) !== null) {
             // Find line number and column
-            const position = this.getPosition(code, match.index);
+            const position = this.getPosition(haystack, match.index);
 
             // Get code snippet context
             const lineContent = lines[position.line - 1] || '';
@@ -146,6 +168,11 @@ export class ESLintAnalyzer {
 
             // Calculate confidence based on context
             const confidence = this.calculateRuleConfidence(rule, match, lineContent, code);
+            // `matchedText` comes from the real source at the same offsets, so a
+            // reader is never shown the blanked filler.
+            const matchedText = rule.ignoreStrings
+                ? code.slice(match.index, match.index + match[0].length)
+                : match[0];
 
             findings.push({
                 ruleId: rule.id,
@@ -157,12 +184,18 @@ export class ESLintAnalyzer {
                 endLine: position.line,
                 endColumn: position.column + match[0].length,
                 codeSnippet,
-                matchedText: match[0],
+                matchedText,
                 confidence,
                 cwe: rule.cwe || null,
                 owasp: rule.owasp || null,
                 filePath,
-                tool: 'eslint'
+                tool: 'eslint',
+                // Which engine actually produced this. The AST path reports
+                // `acorn-ast`; without the counterpart here a pattern match is
+                // indistinguishable from a parsed one, and a consumer that
+                // presents static output as ground truth (the `review_pr`
+                // bundle says "facts about the code") has no way to qualify it.
+                engine: 'regex'
             });
         }
 

@@ -8,14 +8,11 @@ import path from 'node:path';
  * only persistence: `chrome.storage.local.set` (OSVService.js:252) and `.get`
  * (:263). Everything else in it is plain HTTP against api.osv.dev.
  *
- * NOTE (Task 8): OSVService.persistCache()/loadCache() call `chrome.storage
- * .local` directly with no injectable seam — there is no options hook to hand
- * this cache to. Adding one would mean editing src/services/OSVService.js,
- * which is outside this plan's src/ budget (Task 4's single RAGService change
- * is the only src/ edit this plan makes). So this adapter exists and is ready
- * to be wired in the moment OSVService grows a seam, but `review_pr` does not
- * call OSVService today; it names the dependency section as unavailable
- * instead. See src/tools/review.js and the Task 8 report for the decision.
+ * WIRED. `OSVService` takes `options.cache` and uses it in place of
+ * `chrome.storage.local` when given, so `review_pr` hands this over instead of
+ * reporting its dependency section as unavailable — which is what it did for
+ * as long as this adapter sat unwired. The cache file lives beside the index
+ * snapshot; see the `dependencies` section in src/tools/review.js.
  */
 export function createFileOsvCache(dir) {
     const file = path.join(dir, 'osv-vuln-cache.json');
