@@ -8,6 +8,8 @@
  * UI, verdict, cache, metrics, and posting.
  */
 
+import { BLOCKING_SEVERITIES } from './findingsFlatten.js';
+
 const NON_PROBLEM_CATEGORIES = new Set([
     'style',
     'lint',
@@ -33,6 +35,14 @@ const NON_PROBLEM_TEXT = [
 
 const LOW_SEVERITIES = new Set(['low', 'info', 'nit', 'nitpick']);
 const AUTHORITATIVE_TOOLS = new Set(['secrets', 'dependency', 'osv', 'eol']);
+
+// The blocking equivalence class, imported rather than re-declared so this
+// gate cannot drift from the vocabulary the rest of the pipeline uses.
+// `blocker` and `error` arrive from some provider paths (findingsFlatten.js:99);
+// omitting them here deleted byte-identical defects that happened to be
+// labelled `error` instead of `high` on the scoring-outage path.
+// Module scope, not inside the loop — this is allocated once per module load.
+const HIGH_SEVERITIES = BLOCKING_SEVERITIES;
 
 function normalizedConfidence(finding) {
     const n = Number(finding?.confidence);
@@ -152,7 +162,33 @@ export function filterGenuineProblems(findings = [], options = {}) {
         }
 
         const score = normalizedScore(finding);
-        if (score == null || score < minScore || finding.scoreSource === 'default') {
+        if (finding.scoreSource !== 'model') {
+            // No genuine model score is attached — scoreSource is 'default' (the
+            // scorer ran but degraded), null/undefined (the scorer threw and was
+            // caught, or scoring was turned off entirely — a config flag must not
+            // silently empty a review), or any other non-'model' tag. Absence of a
+            // score is an outage, not a verdict. SuggestionScorer's contract is
+            // "degrade ordering, never delete" (SuggestionScorer.js:17-20): the gate
+            // may still reject this finding for being unproven or low-value, but
+            // never merely because nobody scored it. Everything above this line —
+            // needsHumanReview, _lowValue, severity, category, changed-code
+            // evidence, confidence — has already run, so a high-severity finding
+            // reaching here is evidence-backed and confidence-cleared; it is kept
+            // and tagged `_scoreUnavailable` so the posting policy can tell a
+            // stamped neutral 5 from a genuine model 5 and exempt it from the
+            // configured score floor (reviewPostingPolicy.js). Ranking is a
+            // separate, incidental effect: an unscored finding sorts as a neutral
+            // 5 — either because SuggestionScorer stamped `score: 5` or because
+            // `scoreOf`'s non-finite fallback is 5 — so it lands among the
+            // mid-scored findings, NOT strictly after every scored one.
+            if (!HIGH_SEVERITIES.has(severity)) {
+                reject(finding, 'reviewer-value');
+                continue;
+            }
+            kept.push({ ...finding, _scoreUnavailable: true });
+            continue;
+        }
+        if (score == null || score < minScore) {
             reject(finding, 'reviewer-value');
             continue;
         }
@@ -160,8 +196,13 @@ export function filterGenuineProblems(findings = [], options = {}) {
         kept.push(finding);
     }
 
+    // Passing this gate IS the pipeline's mark that a finding may block. Before
+    // this flag existed, `failLevel.findingBlocks` required it and nothing set
+    // it, so an LLM critical could never produce REQUEST_CHANGES.
+    const marked = kept.map(f => (f.blocking === true ? f : { ...f, blocking: true }));
+
     return {
-        findings: kept,
+        findings: marked,
         dropped,
         stats: {
             input: (findings || []).length,
@@ -199,7 +240,10 @@ export function buildPrecisionAnalysis(findings = [], options = {}) {
     if (findings.length === 0) {
         return '## Clean review\n\nNo genuine problems were found in the changed code.';
     }
-    return `## ${findings.length} genuine problem${findings.length === 1 ? '' : 's'} found\n\nOnly evidence-backed defects that passed the confidence and reviewer-value gates are reported.`;
+    // Deliberately does NOT claim every finding cleared the reviewer-value
+    // gate: when scoring was unavailable, a high-severity finding is kept
+    // without a score precisely so an outage cannot empty the review.
+    return `## ${findings.length} genuine problem${findings.length === 1 ? '' : 's'} found\n\nOnly evidence-backed defects that cleared the confidence gate are reported. Each one either cleared the reviewer-value score floor or was too severe to drop while scoring was unavailable.`;
 }
 
 export default { filterGenuineProblems, summarizeGenuineProblems, buildPrecisionAnalysis };

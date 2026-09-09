@@ -31,7 +31,6 @@ describe('filterGenuineProblems', () => {
         ['missing tests', realBug({ type: 'testing', title: 'No test for this function' })],
         ['low confidence', realBug({ confidence: 0.61 })],
         ['low reviewer value', realBug({ score: 5 })],
-        ['default score after scorer failure', realBug({ score: 5, scoreSource: 'default' })],
         ['no changed-code evidence', realBug({ evidence: null, _evidence: null })],
         ['open question', realBug({ needsHumanReview: true })],
         ['nitpick severity', realBug({ severity: 'low' })],
@@ -86,7 +85,59 @@ describe('filterGenuineProblems', () => {
         };
         const advisory = { ...breaking, severity: 'suggestion', confidence: 0.5 };
         const result = filterGenuineProblems([breaking, advisory]);
-        expect(result.findings).toEqual([breaking]);
+        expect(result.findings).toEqual([{ ...breaking, blocking: true }]);
+    });
+});
+
+describe('scorer outage', () => {
+    it('keeps a blocking finding whose score is the outage default, tagged', () => {
+        const result = filterGenuineProblems([realBug({ score: 5, scoreSource: 'default', severity: 'high' })]);
+        expect(result.findings).toHaveLength(1);
+        expect(result.findings[0]._scoreUnavailable).toBe(true);
+    });
+
+    it('still drops a medium finding whose score is the outage default', () => {
+        const result = filterGenuineProblems([realBug({ score: 5, scoreSource: 'default', severity: 'medium' })]);
+        expect(result.findings).toHaveLength(0);
+        expect(result.dropped[0]._precisionDrop).toBe('reviewer-value');
+    });
+
+    it('still drops a model-scored finding below minScore', () => {
+        const result = filterGenuineProblems([realBug({ score: 5, scoreSource: 'model' })]);
+        expect(result.findings).toHaveLength(0);
+    });
+
+    it('keeps a high-severity finding whose scorer never ran (scoreSource null, no score)', () => {
+        const result = filterGenuineProblems([realBug({ score: null, scoreSource: null, severity: 'high' })]);
+        expect(result.findings).toHaveLength(1);
+        expect(result.findings[0]._scoreUnavailable).toBe(true);
+    });
+
+    it('keeps a high-severity finding built without a scoreSource field at all', () => {
+        const finding = realBug({ score: null, severity: 'high' });
+        delete finding.scoreSource;
+        const result = filterGenuineProblems([finding]);
+        expect(result.findings).toHaveLength(1);
+        expect(result.findings[0]._scoreUnavailable).toBe(true);
+    });
+
+    it('still rejects a medium-severity finding with no score at all as reviewer-value', () => {
+        const result = filterGenuineProblems([realBug({ score: null, scoreSource: null, severity: 'medium' })]);
+        expect(result.findings).toHaveLength(0);
+        expect(result.dropped[0]._precisionDrop).toBe('reviewer-value');
+    });
+
+    it('keeps a model-scored finding at or above minScore and does not tag it unavailable', () => {
+        const result = filterGenuineProblems([realBug({ score: 7, scoreSource: 'model' })]);
+        expect(result.findings).toHaveLength(1);
+        expect(result.findings[0]._scoreUnavailable).toBeUndefined();
+    });
+});
+
+describe('survivors are marked blocking', () => {
+    it('sets blocking=true on every kept finding', () => {
+        const result = filterGenuineProblems([realBug()]);
+        expect(result.findings[0].blocking).toBe(true);
     });
 });
 
@@ -110,5 +161,48 @@ describe('precision result rendering', () => {
             bySeverity: { high: 1, critical: 1 },
             byCategory: { security: 1, bug: 1 },
         });
+    });
+});
+
+/**
+ * The scoring-outage path (a scorer throw, one failed batch of fifteen, or
+ * `scoreFindings: false`) is exactly the path this branch exists to protect.
+ * Its severity allowlist has to be the WHOLE blocking equivalence class —
+ * `blocker` and `error` arrive from some provider paths (findingsFlatten.js)
+ * — or a byte-identical defect is deleted purely because of its label.
+ */
+describe('unscored findings: the blocking severity class is complete', () => {
+    const { BLOCKING_SEVERITIES } = require('../../src/utils/findingsFlatten.js');
+
+    it.each([...BLOCKING_SEVERITIES])('keeps an unscored %s finding', (severity) => {
+        const result = filterGenuineProblems(
+            [realBug({ severity, score: 5, scoreSource: 'default' })],
+            { minConfidence: 0.8, minScore: 7 },
+        );
+        expect(result.findings).toHaveLength(1);
+        expect(result.findings[0]._scoreUnavailable).toBe(true);
+    });
+
+    it('an unscored low-value severity is still rejected as reviewer-value', () => {
+        const result = filterGenuineProblems(
+            [realBug({ severity: 'medium', score: 5, scoreSource: 'default' })],
+            { minConfidence: 0.8, minScore: 7 },
+        );
+        expect(result.findings).toHaveLength(0);
+        expect(result.stats.byReason['reviewer-value']).toBe(1);
+    });
+
+    it('the gate and findingsFlatten share one definition of "blocking"', () => {
+        expect([...BLOCKING_SEVERITIES].sort())
+            .toEqual(['blocker', 'blocking', 'critical', 'error', 'high']);
+    });
+});
+
+describe('buildPrecisionAnalysis is exact about which gates ran', () => {
+    it('does not claim every reported finding cleared the reviewer-value gate', () => {
+        const text = buildPrecisionAnalysis([realBug()]);
+        expect(text).not.toMatch(/passed the confidence and reviewer-value gates/);
+        expect(text).toMatch(/cleared the confidence gate/);
+        expect(text).toMatch(/scoring was unavailable/);
     });
 });

@@ -52,7 +52,12 @@ export class HybridSearcher {
 
         // BM25 persistence
         this.bm25Store = new BM25Store();
-        this.bm25LoadedRepos = new Set(); // Track which repos have been loaded from storage
+        this.bm25RepoId = null; // Which repo the in-memory bm25Index currently belongs to
+        // Whether the in-memory index is the AUTHORITATIVE one for bm25RepoId,
+        // i.e. it either came from storage or was declared fresh by clear(repoId).
+        // Deliberately independent of document count: an authoritative index can
+        // legitimately hold zero documents (see ensureBM25For).
+        this.bm25Owned = false;
     }
 
     /**
@@ -93,10 +98,8 @@ export class HybridSearcher {
             queryEmbedding = null  // Pre-computed embedding vector for semantic search
         } = options;
 
-        // Auto-load persisted BM25 index if current index is empty
-        if (useKeywordSearch && repoId && this.bm25Index.getStats().totalDocuments === 0 && !this.bm25LoadedRepos.has(repoId)) {
-            await this.loadBM25FromStorage(repoId);
-        }
+        // Auto-load persisted BM25 index if it's not already the resident one
+        if (useKeywordSearch && repoId) await this.ensureBM25For(repoId);
 
         // Check cache
         const cacheKey = this.getCacheKey(query, repoId, options);
@@ -419,12 +422,72 @@ export class HybridSearcher {
     }
 
     /**
+     * Make the in-memory BM25 index the one for `repoId`, loading it from
+     * storage first when needed. Without this, an incremental run after a
+     * service-worker restart (empty in-memory index) or a repo switch
+     * (another repo's docs resident) would add its delta on top of the
+     * WRONG base and then persist that as the repo's whole keyword index —
+     * silently truncating retrieval to the last delta, or leaking another
+     * repo's chunks into this repo's results.
+     *
+     * Short-circuit condition: same repo AND `bm25Owned`. Ownership is
+     * DECLARED, never inferred from document count. Inferring it from
+     * `totalDocuments > 0` was wrong in both directions:
+     *
+     *  - The count is *already* stale during the window that matters.
+     *    indexRepository calls clear(repoId) to declare the fresh EMPTY index
+     *    authoritative and then fills it batch by batch. Before the first
+     *    batch lands the count is 0, so a concurrent search() (reachable in
+     *    production: autoIndexOwnRepo's non-blocking mode runs a review while
+     *    indexing) reloaded the PRE-INDEX snapshot from storage; the remaining
+     *    batches then added into that stale index and the unconditional
+     *    saveBM25ToStorage persisted stale ∪ new.
+     *  - A legitimately empty repo failed the check on every call, re-hitting
+     *    storage and calling clearCache() each time.
+     *
+     * KNOWN LIMITATION, unchanged by the flag: there is only ONE resident
+     * index, so a concurrent search for a DIFFERENT repo still replaces it
+     * mid-re-index, and the rest of that run lands in the other repo's index.
+     * Closing that needs a per-repo index map or an indexing lock, not a
+     * boolean. The flag closes the same-repo case, which is the one the
+     * non-blocking autoIndexOwnRepo path actually produces.
+     *
+     * The flag cannot itself go stale because it has exactly two writers:
+     * clear() (sets it when a repoId is declared, clears it otherwise) and
+     * this method after a non-errored load. Both write bm25RepoId in the same
+     * step, so the pair is never half-updated.
+     *
+     * @returns {{loaded: boolean, errored: boolean}} status of the underlying
+     *   storage load, so callers (e.g. the incremental indexer) can decide
+     *   whether it is safe to persist over it. `bm25RepoId` is deliberately
+     *   NOT updated when the load errored — a transient storage failure must
+     *   not mark an incomplete index as authoritative for repoId, or a
+     *   later save would overwrite the complete stored index with a
+     *   truncated one (the exact bug this method exists to close).
+     */
+    async ensureBM25For(repoId) {
+        if (!repoId) return { loaded: false, errored: false };
+        if (this.bm25RepoId === repoId && this.bm25Owned) {
+            return { loaded: false, errored: false };
+        }
+        this.bm25Index = new BM25Index();
+        this.bm25Owned = false;
+        this.clearCache();
+        const status = await this.loadBM25FromStorage(repoId);
+        if (!status.errored) {
+            this.bm25RepoId = repoId;
+            this.bm25Owned = true;
+        }
+        return status;
+    }
+
+    /**
      * Persist BM25 index for a repo to IndexedDB
      */
     async saveBM25ToStorage(repoId) {
         try {
             await this.bm25Store.save(repoId, this.bm25Index);
-            this.bm25LoadedRepos.add(repoId);
+            this.bm25RepoId = repoId;
             console.log(`BM25 index saved for ${repoId} (${this.bm25Index.getStats().totalDocuments} docs)`);
         } catch (e) {
             console.warn('Failed to persist BM25 index:', e);
@@ -432,31 +495,50 @@ export class HybridSearcher {
     }
 
     /**
-     * Load BM25 index from IndexedDB if available
-     * @returns {boolean} true if loaded from storage
+     * Load BM25 index from IndexedDB if available. Reports three distinct
+     * outcomes rather than collapsing "no stored index yet" (a legitimate
+     * first-ever index for this repo — saving afterwards is correct) and
+     * "storage read failed" (a transient error — saving afterwards would
+     * silently truncate the stored index) into a single `false`.
+     *
+     * @returns {{loaded: boolean, errored: boolean}}
      */
     async loadBM25FromStorage(repoId) {
         try {
             const stored = await this.bm25Store.load(repoId);
             if (stored) {
                 this.bm25Index = stored;
-                this.bm25LoadedRepos.add(repoId);
                 console.log(`BM25 index loaded from storage for ${repoId} (${stored.getStats().totalDocuments} docs)`);
-                return true;
+                return { loaded: true, errored: false };
             }
+            return { loaded: false, errored: false };
         } catch (e) {
             console.warn('Failed to load BM25 index from storage:', e);
+            return { loaded: false, errored: true };
         }
-        this.bm25LoadedRepos.add(repoId); // Mark as attempted even if failed
-        return false;
     }
 
     /**
-     * Clear all indices
+     * Clear all indices. When `repoId` is supplied (the full-reindex path),
+     * the fresh empty index is marked authoritative for that repo so a
+     * later ensureBM25For(repoId) doesn't reload the pre-index snapshot
+     * from storage over what indexRepository is about to rebuild — including
+     * while it still holds zero documents.
+     *
+     * Without a repoId the caller is throwing the index away without saying
+     * what it now represents, so ownership is DROPPED: the next
+     * ensureBM25For(...) must reload from storage rather than treat an
+     * emptied index as the repo's real keyword index.
      */
-    clear() {
+    clear(repoId = null) {
         this.bm25Index.clear();
         this.clearCache();
+        if (repoId) {
+            this.bm25RepoId = repoId;
+            this.bm25Owned = true;
+        } else {
+            this.bm25Owned = false;
+        }
     }
 }
 

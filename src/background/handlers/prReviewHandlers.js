@@ -2505,11 +2505,22 @@ export function createPrReviewHandlers(svc) {
             const reviewWasSkipped = !!gateOutcome
                 && !gateOutcome.partialOnly
                 && gateOutcome.gateVerdict !== 'APPROVE';
+            // A review unit whose per-file JSON never parsed (truncated output,
+            // or the model answering in prose) contributed NOTHING. It is
+            // functionally an unreviewed file, so it must get the same
+            // treatment as one the orchestrator skipped: until now the count
+            // was recorded in `reviewQuality` and read by nobody, and a
+            // truncated file was reported inside a "Clean review".
+            const parseFailures = Number(result?.stats?.parseFailures) || 0;
+            const reviewWasPartial = !!gateOutcome?.partialOnly || parseFailures > 0;
             result.analysis = buildPrecisionAnalysis(verifiedFindings, {
                 skipped: reviewWasSkipped,
-                partial: !!gateOutcome?.partialOnly,
+                partial: reviewWasPartial,
                 reason: gateOutcome?.reason,
             });
+            if (parseFailures > 0) {
+                result.analysis += `\n\n> ⚠️ ${parseFailures} review unit${parseFailures === 1 ? '' : 's'} produced output that could not be parsed (truncated or non-JSON response), so ${parseFailures === 1 ? 'its file was' : 'those files were'} not actually reviewed. ${parseFailures === 1 ? 'It is' : 'They are'} not considered clean.`;
+            }
             if (indexStatus === 'index-failed' || indexStatus === 'indexing-started') {
                 const contextCaveat = indexStatus === 'index-failed'
                     ? `Reviewed without repository context because indexing failed${indexError ? `: ${indexError}` : ''}; this result is based on the diff and changed-file context only.`
@@ -2561,7 +2572,9 @@ export function createPrReviewHandlers(svc) {
                     // real files and may legitimately request changes on them, so it is
                     // not "skipped" — it is reported via `partial` instead.
                     reviewSkipped: reviewWasSkipped,
-                    partial: result._orchestrated?.meta?.partial ?? null,
+                    // Also true when a review unit's output never parsed — that
+                    // file was not reviewed, whatever the orchestrator reported.
+                    partial: result._orchestrated?.meta?.partial ?? (parseFailures > 0 ? true : null),
                     aiSummary,
                     aiSummaryError,
                     isMultiPass: true,
@@ -2571,6 +2584,11 @@ export function createPrReviewHandlers(svc) {
                     // per-file findings.
                     verifiedFindings,
                     reviewQuality: {
+                        // Files whose per-file JSON never parsed (truncated
+                        // output, or the model returning prose) — surfaced so
+                        // the UI can say "N files could not be read" instead
+                        // of silently reporting them as clean.
+                        parseFailures,
                         citation: citationStats,
                         scoring: scoringStats,
                         minScore,

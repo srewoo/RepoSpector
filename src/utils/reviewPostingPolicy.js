@@ -112,9 +112,12 @@ function normalizedConfidence(f) {
  * @param {string|null} [options.severityThreshold] - critical|high|medium|low|info|'all'
  * @param {number|null} [options.minConfidence] - 0..1; findings below are dropped
  * @param {number|null} [options.minScore] - 1..10 self-reflection score floor. 0 or
- *        absent disables the gate. A finding with NO score is never dropped by
- *        it — an unscored finding means the scorer did not run or did not
- *        answer, which is not evidence against the finding.
+ *        absent disables the gate. A finding with NO GENUINE MODEL score is
+ *        never dropped by it — an unscored finding means the scorer did not run
+ *        or did not answer, which is not evidence against the finding. Only
+ *        `scoreSource === 'model'` (and not `_scoreUnavailable`) counts as
+ *        genuine; SuggestionScorer's stamped `score: 5, scoreSource: 'default'`
+ *        placeholder is finite but is not a verdict, so it is exempt too.
  * @param {boolean} [options.blockingOnlyInline=true] - the default policy. Set
  *        false to restore the old "post everything" behaviour.
  * @param {number} [options.maxInline=15] - hard cap on inline comments
@@ -199,7 +202,19 @@ export function partitionForPosting(findings, options = {}) {
 
         // Same rule as confidence: an ABSENT score never drops a finding,
         // because "the scorer did not answer" is not evidence of worthlessness.
-        if (scoreFloor != null && Number.isFinite(Number(f?.score)) && Number(f.score) < scoreFloor) {
+        //
+        // "Absent" includes a STAMPED neutral. SuggestionScorer writes
+        // `score: 5, scoreSource: 'default'` onto any finding a batch did not
+        // return (SuggestionScorer.js:88), so the number is finite but carries
+        // no verdict. Without this exemption a repo-configured minScore of 7
+        // deleted the comment for a finding the precision gate had
+        // deliberately kept (tagging it `_scoreUnavailable`) and that
+        // decideFailure had already turned into REQUEST_CHANGES — a blocking
+        // verdict with nothing explaining it. Only a genuine model score
+        // (`scoreSource === 'model'`) may trip the floor.
+        const hasModelScore = !f?._scoreUnavailable && f?.scoreSource === 'model';
+        if (scoreFloor != null && hasModelScore
+            && Number.isFinite(Number(f?.score)) && Number(f.score) < scoreFloor) {
             stats.droppedByScore++;
             continue;
         }

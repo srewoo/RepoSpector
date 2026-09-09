@@ -1,6 +1,7 @@
 import { FINDER_LENSES, buildLensFinderPrompt, activeLenses } from '../utils/finderLensPrompts.js';
 import { freshFindings } from '../utils/findingDedup.js';
 import { PRIORITY } from '../utils/callBudget.js';
+import { tokenManager } from '../utils/tokenManager.js';
 
 /**
  * MultiFinderService — recall booster.
@@ -56,7 +57,9 @@ export class MultiFinderService {
             maxRounds = 2,
             onProgress = null,
             // 'default' (precision-biased) | 'recall' — see finderLensPrompts RULES.
-            promptMode = 'default'
+            promptMode = 'default',
+            // Override the derived per-model budget (mainly for tests/eval).
+            diffBudgetChars = null,
         } = opts;
 
         /** Lenses that errored or timed out this run — reported, never swallowed. */
@@ -66,7 +69,7 @@ export class MultiFinderService {
             return { findings: [], stats: { rounds: 0, added: 0, byLens: {} }, usage: { input: 0, output: 0 } };
         }
 
-        const diffText = this._buildDiffText(prData);
+        const diffText = this._buildDiffText(prData, diffBudgetChars ?? this.diffBudgetFor(settings));
         if (!diffText.trim()) {
             return { findings: [], stats: { rounds: 0, added: 0, byLens: {} }, usage: { input: 0, output: 0 } };
         }
@@ -162,6 +165,20 @@ export class MultiFinderService {
             stats: { rounds, added: added.length, byLens, failedLenses },
             usage,
         };
+    }
+
+    /**
+     * Characters of diff a lens may see. A quarter of the window (~4 chars/token) —
+     * the rest is system prompt, existing-findings list, graph/reuse context, and
+     * output, and this is one of up to nine lenses per round. Floored at the old
+     * fixed 12 000 so an 8192-token model like `gpt-4` is no worse off than before;
+     * capped at 120 000 so a million-token model doesn't mean a megabyte prompt per
+     * lens, times nine lenses, times up to two rounds.
+     */
+    diffBudgetFor(settings = {}) {
+        const window = tokenManager.getModelLimit(settings?.model);
+        const chars = Math.floor(window * 4 * 0.25);
+        return Math.max(12000, Math.min(120000, chars));
     }
 
     /**

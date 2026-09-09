@@ -248,6 +248,23 @@ export class MultiPassReviewEngine {
             // Accumulate input/output tokens across the per-file pass; the
             // aggregation call adds to this at the end.
             const perFileFindings = results.successful.map(r => r.data.parsed);
+
+            // A unit whose LLM call succeeded but whose response never parsed
+            // as JSON comes back from `_fallbackResponse` as `findings: []`
+            // plus the raw text in `rawAnalysis` — which is bit-for-bit what a
+            // genuinely clean file looks like downstream. Nobody reads
+            // `rawAnalysis` or `parseError`, so without this counter a unit
+            // with real findings that got truncated (or a model that replied
+            // with prose instead of JSON) silently reads as "no problems
+            // found" instead of "not read". Count both signals a fallback can
+            // carry — an explicit `parseError` and the rawAnalysis-with-no-
+            // findings shape (the fallback's `_fallbackResponse(unit, null,
+            // responseText)` call site never sets `parseError`) — without
+            // double-counting a unit that happens to have both.
+            const parseFailures = perFileFindings.filter(r =>
+                r?.parseError || (r?.rawAnalysis && !(r.findings || []).length)
+            ).length;
+
             const accumulatedTokens = results.successful.reduce(
                 (acc, r) => ({
                     input: acc.input + (r.data.usage?.input ?? 0),
@@ -316,7 +333,8 @@ export class MultiPassReviewEngine {
                 reviewUnits: reviewUnits.length,
                 processingTime: Date.now() - startTime,
                 tokenUsage,
-                isMultiPass: true
+                isMultiPass: true,
+                stats: { parseFailures }
             };
 
         } finally {

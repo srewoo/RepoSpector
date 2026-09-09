@@ -140,3 +140,46 @@ describe('llmRefutation defaults', () => {
         expect(llm.streamChat).toHaveBeenCalled();
     });
 });
+
+describe('evidence survives _strip', () => {
+    // `FindingVerificationService` is already required at the top of this file.
+    const patch = [
+        '@@ -10,3 +10,4 @@ function load(req) {',
+        '   const id = req.params.id;',
+        '-  return db.get(id);',
+        '+  const owner = req.query.ownerId;',
+        '+  return db.get(owner);',
+        ' }',
+    ].join('\n');
+
+    it('copies the cited line into `evidence` when the model gave none', async () => {
+        const svc = new FindingVerificationService({ llmService: null });
+        const finding = {
+            file: 'src/auth.js', line: 12, severity: 'blocking', category: 'security',
+            title: 'Authorization trusts a caller-supplied owner id',
+            description: 'db.get(owner) trusts req.query.ownerId.',
+            confidence: 0.95, evidence: null, source: 'llm',
+        };
+        const res = await svc.verify([finding], {
+            prData: { files: [{ filename: 'src/auth.js', patch }] },
+            settings: {}, llmRefutation: false,
+        });
+        expect(res.findings).toHaveLength(1);
+        expect(res.findings[0].evidence).toBe('  return db.get(owner);');
+        expect(res.findings[0]).not.toHaveProperty('_evidence');
+    });
+
+    it('does not overwrite evidence a finding already carries', async () => {
+        const svc = new FindingVerificationService({ llmService: null });
+        const finding = {
+            file: 'src/auth.js', line: 12, severity: 'blocking', category: 'security',
+            title: 'Authorization trusts a caller-supplied owner id',
+            description: 'x', confidence: 0.95, evidence: 'from-scanner', source: 'llm',
+        };
+        const res = await svc.verify([finding], {
+            prData: { files: [{ filename: 'src/auth.js', patch }] },
+            settings: {}, llmRefutation: false,
+        });
+        expect(res.findings[0].evidence).toBe('from-scanner');
+    });
+});

@@ -161,7 +161,16 @@ function changedNear(line, addedNewLines, deletionAnchors, radius) {
 function occursIn(lines, token) {
     // Escape for a literal match; `.` in `json.Unmarshal` must not be a wildcard.
     const esc = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const re = new RegExp(`(^|[^\\w$.])${esc}(?![\\w$])`);
+    // A bare identifier may be reached through member access (`req.query.ownerId`),
+    // so a preceding `.` is allowed for it. A dotted chain still requires the
+    // chain as written here — but the `tailRe` fallback below then also accepts
+    // just its bare final segment, so e.g. `json.Unmarshal` IS grounded by
+    // `other.Unmarshal` in the code. That's deliberate, not a gap: this `re`
+    // alone cannot tell a truly different receiver from a renamed/aliased one,
+    // and refusing the tail match would refute findings the gate has no way to
+    // actually disprove — see the tailRe comment below.
+    const before = token.includes('.') ? '(^|[^\\w$.])' : '(^|[^\\w$])';
+    const re = new RegExp(`${before}${esc}(?![\\w$])`);
     // Also accept a bare tail match (`literal_eval` for `ast.literal_eval`) so a
     // differently-qualified call still counts as present.
     const tail = token.includes('.') ? token.split('.').pop() : null;

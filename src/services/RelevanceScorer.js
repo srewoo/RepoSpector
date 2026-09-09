@@ -124,22 +124,35 @@ export class RelevanceScorer {
      * Score semantic similarity (0-1)
      */
     scoreSemanticSimilarity(result) {
-        // Semantic similarity should already be provided by vector search
-        const similarity = result.similarity || result.semanticScore || 0;
+        // Vector-only results (VectorStore.search) carry a top-level
+        // `similarity`/`semanticScore`; hybrid results (HybridSearcher.search)
+        // nest the same signal under `matchInfo` instead. Both shapes must
+        // rank, so `matchInfo` is checked as a fallback. `??` (not `||`) so a
+        // legitimate score of 0 from the first-checked field isn't discarded
+        // in favor of the next one — that's the same "signal is a constant
+        // zero" bug this fix is for.
+        const similarity = result.similarity
+            ?? result.semanticScore
+            ?? result.matchInfo?.semanticScore
+            ?? 0;
 
         // Normalize to 0-1 range
-        return Math.max(0, Math.min(1, similarity));
+        return Math.max(0, Math.min(1, Number(similarity) || 0));
     }
 
     /**
      * Score keyword/BM25 match (0-1)
      */
     scoreKeywordMatch(result, _query) {
-        const keywordScore = result.keywordScore || result.bm25Score || 0;
+        // Same matchInfo fallback and `??` reasoning as scoreSemanticSimilarity.
+        const keywordScore = result.keywordScore
+            ?? result.bm25Score
+            ?? result.matchInfo?.keywordScore
+            ?? 0;
 
         // BM25 scores can be unbounded, normalize
         // Typical BM25 scores range from 0-20 for good matches
-        const normalized = Math.min(keywordScore / 15, 1);
+        const normalized = Math.min((Number(keywordScore) || 0) / 15, 1);
 
         return Math.max(0, normalized);
     }

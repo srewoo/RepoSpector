@@ -524,7 +524,7 @@ export class LLMService {
 
             const requestBody = {
                 model: requestData.model,
-                max_tokens: requestData.max_tokens || 4096,
+                max_tokens: requestData.max_tokens || 8192,
                 messages: anthropicMessages,
                 stream: streaming
             };
@@ -704,7 +704,7 @@ export class LLMService {
                 contents: contents,
                 generationConfig: {
                     temperature: requestData.temperature || 0.3,
-                    maxOutputTokens: requestData.max_tokens || 4096
+                    maxOutputTokens: requestData.max_tokens || 8192
                 }
             };
 

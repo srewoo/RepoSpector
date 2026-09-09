@@ -339,12 +339,23 @@ export class FindingVerificationService {
         return tryParse(cleaned) || tryParse((cleaned.match(/\{[\s\S]*\}/) || [])[0] || '') || [];
     }
 
-    /** Drop internal bookkeeping before a finding leaves this service. */
+    /**
+     * Drop internal bookkeeping before a finding leaves this service.
+     *
+     * The cited diff line is promoted to `evidence` when the model supplied
+     * none. The precision gate downstream requires evidence; before this the
+     * gate rejected every LLM finding because the only evidence the pipeline
+     * ever computed was deleted right here.
+     */
     _strip(f) {
         const { vid: _vid, _evidence, ...rest } = f;
         // Keep the premise verdict as provenance — it explains why a finding was
         // trusted — but not the raw source line, which would bloat every payload.
         if (_evidence?.verdict) rest.premise = _evidence.verdict;
+        const hasOwn = String(rest.evidence || rest.codeSnippet || '').trim().length > 0;
+        if (!hasOwn && typeof _evidence?.citedLine === 'string' && _evidence.citedLine.trim()) {
+            rest.evidence = _evidence.citedLine;
+        }
         return rest;
     }
 

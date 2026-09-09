@@ -10,7 +10,7 @@ import { ToastProvider } from './components/ui/Toast';
 import { Button } from './components/ui/Button';
 import { Card, CardContent } from './components/ui/Card';
 import { PRReviewInterface } from './components/PRReviewInterface';
-import { Sparkles, Code2, FileCode, GitPullRequest, RefreshCw, AlertCircle, Github, ExternalLink, BookOpen } from 'lucide-react';
+import { Sparkles, Code2, FileCode, GitPullRequest, RefreshCw, AlertCircle, Github, ExternalLink, BookOpen, Terminal } from 'lucide-react';
 
 /**
  * The published handbook: features, setup paths and symptom-keyed
@@ -539,6 +539,31 @@ function AppContent() {
                                     <span><span className="text-text font-medium">Review:</span> Open a PR to get AI code review, or use Chat for test generation and questions</span>
                                 </li>
                             </ol>
+                        </div>
+
+                        {/* MCP is a second way to use RepoSpector — from a coding
+                            agent instead of the browser — and someone who only
+                            ever opens this popup would otherwise never learn it
+                            exists. Named here rather than buried in Settings. */}
+                        <div className="rounded-lg border border-border/60 bg-surfaceHighlight/40 px-3 py-2.5 space-y-1 text-xs">
+                            <p className="flex items-center gap-1.5 font-medium text-text">
+                                <Terminal className="w-3.5 h-3.5 text-primary shrink-0" />
+                                Also available as an MCP server
+                            </p>
+                            <p className="text-textMuted">
+                                Let Claude Code, Claude Desktop or Codex query this repo&apos;s code graph
+                                and retrieval index directly. Your existing subscription does the
+                                reasoning, so it needs no API key.
+                            </p>
+                            <a
+                                href={`${HANDBOOK_URL}#mcp`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 text-primary font-medium hover:underline"
+                            >
+                                <ExternalLink className="w-3 h-3 shrink-0" />
+                                Set up npx repospector-mcp
+                            </a>
                         </div>
 
                         <div className="text-center pt-2 space-y-1.5">
