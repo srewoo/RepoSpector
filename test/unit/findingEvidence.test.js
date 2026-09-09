@@ -314,3 +314,44 @@ describe('GATE 2 — unchanged context lines', () => {
             .not.toBe(EVIDENCE.REFUTED);
     });
 });
+
+describe('member access counts as present', () => {
+    const { assessFinding, EVIDENCE } = require('../../src/utils/findingEvidence.js');
+    const patch = [
+        '@@ -10,3 +10,4 @@',
+        '   const id = req.params.id;',
+        '-  return db.get(id);',
+        '+  const owner = req.query.ownerId;',
+        '+  return db.get(owner);',
+        ' }',
+    ].join('\n');
+
+    it('`ownerId` in the title is grounded by `req.query.ownerId` on an added line', () => {
+        const res = assessFinding({ file: 'a.js', line: 11, title: 'Trusts `ownerId` from the query string' }, patch);
+        expect(res.verdict).toBe(EVIDENCE.GROUNDED);
+    });
+
+    it('a dotted construct still does not match a longer, different chain', () => {
+        const res = assessFinding({ file: 'a.js', line: 11, title: 'Calls `json.Unmarshal` unsafely' }, patch);
+        expect(res.verdict).toBe(EVIDENCE.REFUTED);
+    });
+
+    it('a dotted construct IS grounded by a differently-qualified receiver via the bare-tail fallback', () => {
+        // This is the tailRe fallback in occursIn working as designed: `json.Unmarshal`
+        // in the title is grounded by `other.Unmarshal` in the code. occursIn cannot tell
+        // a truly different receiver from a renamed/aliased one, and refusing the bare-tail
+        // match would refute findings the gate has no way to actually disprove — so it
+        // deliberately stays permissive here. (The above test proves the different case:
+        // REFUTED only holds when the token is absent entirely, not merely differently qualified.)
+        const withOtherReceiver = [
+            '@@ -10,3 +10,4 @@',
+            '   const id = req.params.id;',
+            '-  return db.get(id);',
+            '+  other.Unmarshal(payload);',
+            '+  return db.get(owner);',
+            ' }',
+        ].join('\n');
+        const res = assessFinding({ file: 'a.js', line: 11, title: 'Calls `json.Unmarshal` unsafely' }, withOtherReceiver);
+        expect(res.verdict).toBe(EVIDENCE.GROUNDED);
+    });
+});

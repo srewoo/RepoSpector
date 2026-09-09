@@ -70,65 +70,108 @@ export class CodeChunker {
         const boundaries = this.findCodeBoundaries(code);
 
         let currentChunk = '';
-        let currentTokens = 0;
         let lastBoundaryIndex = 0;
+
+        // NOTE: chunkSize (from getChunkSize) is a CHARACTER budget, not a token
+        // count, even though it is derived from a token limit. All comparisons
+        // and caps below are against character length directly — do not divide
+        // by tokensPerChar again, that reintroduces a ~4x oversize bug.
+        const pushChunk = (content, startIndex, endIndex) => {
+            chunks.push({ content, startIndex, endIndex, tokens: this.estimateTokens(content), type: 'code' });
+        };
+        // Split one oversized segment into budget-sized pieces on line ends.
+        // Needed because a single segment (e.g. one giant function/paragraph)
+        // can itself exceed the budget; without this it ships whole.
+        //
+        // Overlaps successive pieces by the SAME amount as the accumulate path
+        // above. This path is the only one that fires for files with no
+        // detectable code boundaries — JSON, prose, minified bundles — so
+        // without overlap those files were chunked with hard cuts and a defect
+        // spanning a cut lost its surrounding context on both sides.
+        //
+        // The overlap is capped at half the budget so `pos` still advances
+        // strictly on every iteration: a piece is always longer than
+        // chunkSize/2 (either a full chunkSize, or a newline found beyond
+        // pos + chunkSize/2), hence end - overlap > pos. The Math.max is a
+        // belt-and-braces guard against a future budget small enough to make
+        // that arithmetic degenerate — an infinite loop here would hang the
+        // indexer.
+        const overlapChars = Math.min(
+            this.calculateOverlapChars(),
+            Math.floor(chunkSize / 2),
+        );
+        const splitOversized = (segment, absStart) => {
+            let pos = 0;
+            while (pos < segment.length) {
+                let end = Math.min(segment.length, pos + chunkSize);
+                if (end < segment.length) {
+                    const nl = segment.lastIndexOf('\n', end);
+                    if (nl > pos + chunkSize / 2) end = nl + 1;
+                }
+                pushChunk(segment.slice(pos, end), absStart + pos, absStart + end);
+                if (end >= segment.length) break;
+                pos = Math.max(pos + 1, end - overlapChars);
+            }
+        };
 
         for (const boundary of boundaries) {
             const segment = code.substring(lastBoundaryIndex, boundary.end);
-            const segmentTokens = this.estimateTokens(segment);
 
-            if (currentTokens + segmentTokens > chunkSize && currentChunk) {
+            if (segment.length > chunkSize) {
+                // Flush what we have, then split the giant segment itself.
+                if (currentChunk) {
+                    pushChunk(currentChunk, lastBoundaryIndex - currentChunk.length, lastBoundaryIndex);
+                    currentChunk = '';
+                }
+                splitOversized(segment, lastBoundaryIndex);
+                lastBoundaryIndex = boundary.end;
+                continue;
+            }
+
+            if (currentChunk.length + segment.length > chunkSize && currentChunk) {
                 // Save current chunk
-                chunks.push({
-                    content: currentChunk,
-                    startIndex: chunks.length === 0 ? 0 : lastBoundaryIndex - segment.length,
-                    endIndex: lastBoundaryIndex,
-                    tokens: currentTokens,
-                    type: 'code'
-                });
+                pushChunk(currentChunk, lastBoundaryIndex - currentChunk.length, lastBoundaryIndex);
 
                 // Start new chunk with overlap
                 const overlapStart = Math.max(0, lastBoundaryIndex - this.calculateOverlapChars());
                 currentChunk = code.substring(overlapStart, boundary.end);
-                currentTokens = this.estimateTokens(currentChunk);
             } else {
                 currentChunk += segment;
-                currentTokens += segmentTokens;
             }
 
             lastBoundaryIndex = boundary.end;
         }
 
-        // Capture any trailing content after the last boundary
+        // Capture any trailing content after the last boundary. Must respect
+        // the same budget as the main loop — split it rather than appending
+        // unbounded text to currentChunk.
         if (lastBoundaryIndex < code.length) {
             const trailing = code.substring(lastBoundaryIndex);
             if (trailing.trim()) {
-                currentChunk += trailing;
-                currentTokens += this.estimateTokens(trailing);
+                if (currentChunk.length + trailing.length > chunkSize && currentChunk) {
+                    pushChunk(currentChunk, lastBoundaryIndex - currentChunk.length, lastBoundaryIndex);
+                    currentChunk = '';
+                }
+                if (trailing.length > chunkSize) {
+                    splitOversized(trailing, lastBoundaryIndex);
+                    lastBoundaryIndex = code.length;
+                    currentChunk = '';
+                } else {
+                    currentChunk += trailing;
+                    lastBoundaryIndex = code.length;
+                }
             }
         }
 
         // Add remaining content
         if (currentChunk) {
-            chunks.push({
-                content: currentChunk,
-                startIndex: chunks.length === 0 ? 0 : lastBoundaryIndex - currentChunk.length,
-                endIndex: code.length,
-                tokens: currentTokens,
-                type: 'code'
-            });
+            pushChunk(currentChunk, code.length - currentChunk.length, code.length);
         }
 
         // Safety: if we still have no chunks for non-empty code, create one
+        // (or more, capped at the same budget — no more chunkSize * 4 escape hatch).
         if (chunks.length === 0 && code.trim()) {
-            const content = code.length > chunkSize * 4 ? code.substring(0, chunkSize * 4) : code;
-            chunks.push({
-                content,
-                startIndex: 0,
-                endIndex: content.length,
-                tokens: this.estimateTokens(content),
-                type: 'code'
-            });
+            splitOversized(code, 0);
         }
 
         return chunks;
@@ -180,22 +223,24 @@ export class CodeChunker {
             }
         }
         
-        // If no boundaries found, create artificial ones
+        // If no boundaries found, create artificial ones by walking cumulative
+        // line offsets. Do NOT use code.indexOf(lines[i]) here: it returns the
+        // FIRST occurrence of a line's text, and on files with repeated lines
+        // ('},', blanks, JSON keys) that is non-monotonic — end can land before
+        // start, so substring(start, end) silently swaps them and re-emits
+        // earlier text (the duplication bug this fix removes).
         if (merged.length === 0) {
             const lines = code.split('\n');
-            const linesPerChunk = Math.ceil(lines.length / Math.ceil(code.length / this.getChunkSize('default')));
-            
+            const linesPerChunk = Math.max(1, Math.ceil(lines.length / Math.ceil(code.length / this.getChunkSize('default'))));
+            let offset = 0;
             for (let i = 0; i < lines.length; i += linesPerChunk) {
-                const start = code.indexOf(lines[i]);
-                const endLine = Math.min(i + linesPerChunk, lines.length - 1);
-                const end = code.indexOf(lines[endLine]) + lines[endLine].length;
-                
-                merged.push({
-                    start,
-                    end,
-                    type: 'artificial',
-                    name: `Lines ${i + 1}-${endLine + 1}`
-                });
+                const start = offset;
+                const endLine = Math.min(i + linesPerChunk, lines.length);
+                let end = start;
+                for (let j = i; j < endLine; j++) end += lines[j].length + 1; // +1 for the '\n'
+                end = Math.min(end, code.length);
+                merged.push({ start, end, type: 'artificial', name: `Lines ${i + 1}-${endLine}` });
+                offset = end;
             }
         }
         

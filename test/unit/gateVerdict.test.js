@@ -155,3 +155,21 @@ describe('isCacheableReport', () => {
         expect(isCacheableReport(null)).toBe(false);
     });
 });
+
+describe('LLM findings reach the merge gate', () => {
+    const { filterGenuineProblems } = require('../../src/utils/genuineProblemGate.js');
+    const { decideFailure } = require('../../src/utils/failLevel.js');
+
+    it('an LLM high finding that passed the precision gate requests changes', () => {
+        const f = {
+            file: 'src/auth.js', line: 42, severity: 'high', type: 'security', source: 'llm',
+            title: 'Authorization check uses the caller-supplied owner id',
+            description: 'x', evidence: 'return db.get(req.query.ownerId)',
+            confidence: 0.94, score: 9, scoreSource: 'model',
+        };
+        const kept = filterGenuineProblems([f]).findings;
+        const decision = decideFailure(kept, { failLevel: 'high' });
+        expect(decision.blocks).toBe(true);
+        expect(decision.reviewEvent).toBe('REQUEST_CHANGES');
+    });
+});

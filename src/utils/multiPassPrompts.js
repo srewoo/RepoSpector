@@ -335,7 +335,7 @@ Report every real issue found in Steps 1-2. Each finding MUST have:
 
 ## Output Format
 Respond with ONLY a valid JSON object. No markdown, no explanation text outside the JSON.
-Assign confidence honestly: 0.9+ for certain issues, 0.6-0.8 for likely issues, below 0.5 for uncertain.
+Confidence is a claim about proof, not a hedge. Use 0.9+ when the shown lines prove the defect, 0.8-0.9 when they prove it given the stated context. Findings below the reviewer's confidence floor are discarded unread. That floor is at least 0.8 and a repository may configure it higher, so if you cannot reach 0.8, omit the finding rather than report it at 0.6.
 Focus on CHANGED lines (+ lines), but use context lines to understand intent.
 Every diff is presented as numbered hunks: the number at the start of each line
 in \`__new hunk__\` IS that line's number in the file. Report it verbatim.

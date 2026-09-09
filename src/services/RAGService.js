@@ -138,7 +138,10 @@ export class RAGService {
         // 1. Clear existing index for this repo
         if (onProgress) onProgress({ status: 'clearing', message: 'Clearing old index...' });
         await this.vectorStore.clearRepo(repoId);
-        this.hybridSearcher.clear();
+        // Mark the fresh empty index as authoritative for repoId so a later
+        // ensureBM25For(repoId) in this same run doesn't reload the stale
+        // pre-index snapshot from storage over what we're about to rebuild.
+        this.hybridSearcher.clear(repoId);
 
         // Create a fresh manifest for this full re-index
         const manifest = new IndexManifest(repoId);
@@ -458,6 +461,14 @@ export class RAGService {
             }, chunkHashes);
         }
 
+        // Load the persisted keyword index first so both the deletions below
+        // and the additions further down apply ON TOP of it, and the save
+        // at the end persists the whole repo, not the delta. If this ran
+        // after the delete block, removeDocument would act on a fresh empty
+        // index post-restart — a no-op — and the load below would then pull
+        // the deleted chunks back in from storage, resurrecting them.
+        const bm25LoadStatus = await this.hybridSearcher.ensureBM25For(repoId);
+
         // Step 3: Delete outdated chunks from vector store
         if (chunksToDelete.length > 0) {
             if (onProgress) onProgress({ status: 'cleaning', message: `Removing ${chunksToDelete.length} outdated chunks...` });
@@ -514,22 +525,21 @@ export class RAGService {
             }
         }
 
-        // Step 5: Ensure reused chunks are in BM25 index (they may not be if BM25 is in-memory)
-        // BM25 index is rebuilt from scratch on service restart, so add reused chunks too
-        for (const chunkId of chunksToKeep) {
-            // BM25 addDocument is idempotent — safe to call even if already present
-            const filePath = manifest.getFileForChunk(chunkId);
-            if (filePath) {
-                // We don't have the content here, but BM25 may already have it
-                // If not, it will be populated on next full rebuild
-            }
-        }
-
         // Save updated manifest
         await this.manifestStore.save(manifest);
 
-        // Persist BM25 index to IndexedDB for fast startup
-        await this.hybridSearcher.saveBM25ToStorage(repoId);
+        // Persist BM25 index to IndexedDB for fast startup — but only when we
+        // know the in-memory index is complete. If loading the persisted index
+        // above errored (e.g. a transient IndexedDB failure), the in-memory
+        // index has only this run's delta, not the full repo; saving it now
+        // would overwrite a complete stored index with a truncated one. Leave
+        // the stored index intact — it's stale but complete, the delta still
+        // serves the current session, and the next successful index repairs it.
+        if (bm25LoadStatus?.errored) {
+            console.warn(`⚠️ BM25 storage load errored for ${repoId} — skipping save to avoid overwriting the stored index with a partial one.`);
+        } else {
+            await this.hybridSearcher.saveBM25ToStorage(repoId);
+        }
 
         if (onProgress) onProgress({
             status: 'complete',
@@ -572,13 +582,25 @@ export class RAGService {
         try {
             const startTime = performance.now();
 
-            // 1. Optionally expand query for better recall
-            let searchQuery = query;
-            if (useQueryExpansion) {
+            // 1. Expansion feeds the KEYWORD side only, with the original casing
+            //    kept so BM25's camelCase split (BM25Index.js:78-82) still
+            //    matches identifiers like `handleUpload` — expandQuery
+            //    lowercases everything, which broke that. The embedder gets
+            //    the plain question: up to three synonyms per token diluted
+            //    the vector when they rode along.
+            //
+            //    Because it feeds the keyword side ONLY, expansion is
+            //    hybrid-only: with `useHybridSearch` false there is no keyword
+            //    side, so the expansion is not computed and not logged rather
+            //    than being built, announced and then thrown away.
+            let keywordQuery = query;
+            if (useQueryExpansion && useHybridSearch) {
                 const expanded = expandQuery(query);
-                searchQuery = expanded.expandedQuery;
-                if (expanded.expansions.length > 0) {
-                    console.log(`🔄 Query expanded: "${query}" -> "${searchQuery.substring(0, 100)}..."`);
+                // `expansions` entries are `{ original, expansion, type }` (queryExpander.js:235-239).
+                const extra = expanded.expansions.map(e => e.expansion).filter(Boolean);
+                if (extra.length > 0) {
+                    keywordQuery = `${query} ${extra.join(' ')}`;
+                    console.log(`🔄 Query expanded for keyword search: "${query}" -> "${keywordQuery.substring(0, 100)}..."`);
                 }
             }
 
@@ -587,10 +609,10 @@ export class RAGService {
             // 2. Use hybrid search or vector-only search
             if (useHybridSearch) {
                 // Generate embedding for the query so HybridSearcher can pass it to VectorStore
-                const [queryEmbedding] = await this.generateEmbeddings([searchQuery], { isQuery: true });
+                const [queryEmbedding] = await this.generateEmbeddings([query], { isQuery: true });
 
                 // Hybrid search combines BM25 keyword + semantic vector search
-                results = await this.hybridSearcher.search(searchQuery, repoId, {
+                results = await this.hybridSearcher.search(keywordQuery, repoId, {
                     limit: limit * 2, // Fetch more for re-ranking
                     useSemanticSearch: true,
                     useKeywordSearch: true,
@@ -613,7 +635,7 @@ export class RAGService {
                 console.log(`🔍 RAG Hybrid: Retrieved ${results.length} chunks`);
             } else {
                 // Traditional vector-only search
-                const [queryEmbedding] = await this.generateEmbeddings([searchQuery], { isQuery: true });
+                const [queryEmbedding] = await this.generateEmbeddings([query], { isQuery: true });
                 results = await this.vectorStore.search(repoId, queryEmbedding, limit * 2, {
                     minScore,
                     deduplicate: true,

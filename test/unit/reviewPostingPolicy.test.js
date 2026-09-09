@@ -167,3 +167,49 @@ describe('renderPolicyNote', () => {
         expect(note).toContain('2 already commented on');
     });
 });
+
+/**
+ * The score floor must not delete a finding the precision gate deliberately
+ * kept. SuggestionScorer stamps `score: 5, scoreSource: 'default'` on any
+ * finding a batch did not return, so the number is finite but is NOT a
+ * verdict. With `minScore: 7` that stamp used to drop the comment while
+ * decideFailure had already used the same finding to produce
+ * REQUEST_CHANGES — a blocking verdict with nothing explaining it.
+ */
+describe('minScore floor only bites on a genuine model score', () => {
+    it('keeps a gate-tagged unscored finding under a minScore of 7', () => {
+        const res = partitionForPosting(
+            [f({ severity: 'critical', score: 5, scoreSource: 'default', _scoreUnavailable: true })],
+            { minScore: 7 },
+        );
+        expect(res.stats.droppedByScore).toBe(0);
+        expect(res.inline).toHaveLength(1);
+    });
+
+    it('keeps a stamped default score even without the gate tag', () => {
+        const res = partitionForPosting(
+            [f({ severity: 'critical', score: 5, scoreSource: 'default' })],
+            { minScore: 7 },
+        );
+        expect(res.stats.droppedByScore).toBe(0);
+        expect(res.inline).toHaveLength(1);
+    });
+
+    it('still drops a genuine model score below the floor', () => {
+        const res = partitionForPosting(
+            [f({ severity: 'critical', score: 4, scoreSource: 'model' })],
+            { minScore: 7 },
+        );
+        expect(res.stats.droppedByScore).toBe(1);
+        expect(res.inline).toHaveLength(0);
+    });
+
+    it('keeps a genuine model score at or above the floor', () => {
+        const res = partitionForPosting(
+            [f({ severity: 'critical', score: 8, scoreSource: 'model' })],
+            { minScore: 7 },
+        );
+        expect(res.stats.droppedByScore).toBe(0);
+        expect(res.inline).toHaveLength(1);
+    });
+});

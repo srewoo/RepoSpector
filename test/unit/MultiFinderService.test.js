@@ -166,3 +166,22 @@ describe('MultiFinderService', () => {
         expect(llm.streamChat).not.toHaveBeenCalled();
     });
 });
+
+describe('lens diff budget follows the model window', () => {
+    const { MultiFinderService } = require('../../src/services/MultiFinderService.js');
+
+    it('exposes the budget it will use for a model', () => {
+        const svc = new MultiFinderService({ llmService: {} });
+        expect(svc.diffBudgetFor({ model: 'openai:gpt-4' })).toBe(12000);        // 8192 window → floor
+        expect(svc.diffBudgetFor({ model: 'anthropic:claude-sonnet-4-5' })).toBe(120000); // 200k → cap
+        expect(svc.diffBudgetFor({ model: 'openai:gpt-4o' })).toBe(120000);      // 128k×4×0.25 = 128000 → cap
+        expect(svc.diffBudgetFor({ model: 'groq:mixtral-8x7b' })).toBe(32768);   // 32768×4×0.25
+    });
+
+    it('renders more than 12 000 chars when the budget allows', () => {
+        const svc = new MultiFinderService({ llmService: {} });
+        const big = { files: [{ filename: 'a.js', patch: '+x\n'.repeat(20000) }] };
+        expect(svc._buildDiffText(big, 12000).length).toBeLessThanOrEqual(12000 + 200);
+        expect(svc._buildDiffText(big, 60000).length).toBeGreaterThan(50000);
+    });
+});

@@ -30,6 +30,8 @@ import { partitionForPosting } from '../src/utils/reviewPostingPolicy.js';
 import { resolveBudget } from '../src/utils/reviewContextBudget.js';
 import { applyFilterMode } from '../src/utils/findingFilterMode.js';
 import { decideFailure } from '../src/utils/failLevel.js';
+import { SuggestionScorer } from '../src/services/SuggestionScorer.js';
+import { filterGenuineProblems } from '../src/utils/genuineProblemGate.js';
 import { ExternalFindingsService } from '../src/services/ExternalFindingsService.js';
 import { buildFileContext, buildDeclarations, alignmentReport } from './lib/fileContext.js';
 import { graphFindingsForCase } from './lib/graphContext.js';
@@ -44,6 +46,10 @@ export function parseArgs(argv) {
         // Graph findings are on by default, matching the shipped reviewer
         // (see GraphImpactFindingsService wiring in prReviewHandlers).
         graphFindings: true,
+        // Scorer and precision gate default ON to match the shipped pipeline.
+        // See the comment at their call site (in reviewOne) for why they were
+        // missing here in the first place.
+        scoreFindings: true, precisionGate: true,
         // A full run is hours of LLM time. Resume is the difference between a
         // crash costing one case and costing the whole run.
         resume: false,
@@ -62,6 +68,8 @@ export function parseArgs(argv) {
         else if (a === '--no-graph-findings') args.graphFindings = false;
         else if (a === '--filter-mode') args.filterMode = argv[++i];
         else if (a === '--fail-level') args.failLevel = argv[++i];
+        else if (a === '--no-scoring') args.scoreFindings = false;
+        else if (a === '--no-precision-gate') args.precisionGate = false;
         else if (a === '--help' || a === '-h') args.help = true;
         else throw new Error(`Unknown argument: ${a}`);
     }
@@ -210,6 +218,45 @@ export async function reviewOne(kase, { llm, settings, opts }) {
     });
     findings = verified.findings;
 
+    // The scorer, then the precision gate — the two shipped pipeline stages this
+    // harness never ran. Every recall/precision figure this project published
+    // before this change described findings the extension went on to delete:
+    // the extension always scores what survives verification and then runs
+    // `filterGenuineProblems` before anything reaches a reviewer, but this
+    // harness stopped at verification and scored that intermediate set as if it
+    // were the final output. Ordering matters here exactly as it does above —
+    // both stages run BEFORE the external/graph re-add blocks below, because
+    // those re-added findings are not model assertions and are not subject to
+    // either the scorer or the precision gate in production.
+    let scoringStats = null;
+    if (opts.scoreFindings && findings.length) {
+        try {
+            const scorer = new SuggestionScorer({ llmService: llm });
+            const sres = await scorer.score(findings, { prData, settings });
+            findings = sres.findings;
+            scoringStats = sres.stats;
+        } catch (e) {
+            // SuggestionScorer already absorbs per-batch LLM failures internally
+            // (see its file header), so this catch is reached only by a genuine
+            // bug in the scorer itself, not by ordinary LLM flakiness — do not
+            // assume this path is exercised routinely.
+            //
+            // On this path findings keep whatever scoreSource they arrived with
+            // (`null`, from canonicalisation — they were never scored at all).
+            // `filterGenuineProblems` (src/utils/genuineProblemGate.js) treats
+            // any scoreSource other than 'model' as a scoring outage: a
+            // high-severity, evidence-backed finding survives the gate and is
+            // ranked below scored findings rather than being deleted.
+            console.warn('  scorer failed (findings fall back to the precision gate\'s scoring-outage handling):', e?.message);
+        }
+    }
+    let precisionStats = null;
+    if (opts.precisionGate) {
+        const pres = filterGenuineProblems(findings, { minConfidence: 0.8, minScore: 7 });
+        findings = pres.findings;
+        precisionStats = pres.stats;
+    }
+
     // Re-add external scanner findings after the gates, exactly as the handler
     // does. Those gates demand cited evidence from findings a MODEL asserted; a
     // gosec match is not an assertion, and it carries no `evidence` field to
@@ -265,6 +312,10 @@ export async function reviewOne(kase, { llm, settings, opts }) {
             finderMode: opts.multiFinder ? opts.finderMode : 'off',
             generated,
             afterGates: findings.length,
+            scoring: scoringStats,
+            precision: precisionStats,
+            scoreFindings: opts.scoreFindings,
+            precisionGate: opts.precisionGate,
             droppedByGates: verified.stats.dropped,
             duplicates: verified.stats.duplicates,
             evidenceRefuted: verified.stats.evidenceRefuted,
@@ -326,6 +377,8 @@ async function main() {
             '  --no-graph-findings   Disable graph findings (A/B against the default)',
             '  --filter-mode <m>     added | diff_context | file | nofilter (default added)',
             '  --fail-level <l>      none | info | low | medium | high | critical | any (default high)',
+            '  --no-scoring          Skip the SuggestionScorer pass (A/B: the gate treats unscored findings as an outage, not a deletion)',
+            '  --no-precision-gate   Skip filterGenuineProblems (A/B against the shipped default)',
             '',
             'File context comes from the corpus. Populate it first:',
             '  node eval/fetch-content.js --corpus <file>',
@@ -382,7 +435,15 @@ async function main() {
         // scored before file context existed at all.
         && c.runStats.filesWithContent !== undefined
         && c.runStats.filterMode === args.filterMode
-        && c.runStats.failLevel === args.failLevel;
+        && c.runStats.failLevel === args.failLevel
+        // Compare the FLAGS, not whether a stats object came back non-null.
+        // Scoring's own catch branch sets `scoringStats = null` on a failed
+        // scorer, so a run with scoring ENABLED but a failed scorer would be
+        // indistinguishable from one with scoring DISABLED if this compared
+        // `runStats.scoring != null` instead of the flag — exactly the
+        // corpus-mixing this guard exists to prevent (see the comment above).
+        && c.runStats.scoreFindings === args.scoreFindings
+        && c.runStats.precisionGate === args.precisionGate;
 
     const all = cases.filter(c => (args.only ? c.id === args.only : true));
     const skipped = args.resume ? all.filter(isDone) : [];

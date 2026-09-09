@@ -3,50 +3,77 @@
  * Manages token counting and context window management for LLM requests
  */
 
+import { MODELS } from './constants.js';
+
+/**
+ * Context windows straight from the model catalogue, indexed by BOTH shapes a
+ * caller can hand us: the catalogue key (`groq:mixtral-8x7b`, what
+ * MultiPassReviewEngine/MultiFinderService pass) and the RESOLVED provider
+ * model id (`mixtral-8x7b-32768`, what getModelId(settings.model) returns and
+ * what src/background/index.js passes).
+ *
+ * This exists because the resolved-id shape matched none of the hand-written
+ * tables below and fell through to the 128000 default — reporting a 128k
+ * window for a 32k model, which turns an over-chunking annoyance into a
+ * provider 400. Making the catalogue the fallback also means a model added to
+ * constants.js is right here automatically, with no second table to update.
+ */
+const CATALOGUE_CONTEXT_WINDOWS = (() => {
+    const map = Object.create(null);
+    for (const [key, spec] of Object.entries(MODELS || {})) {
+        const ctx = Number(spec?.contextWindow);
+        if (!Number.isFinite(ctx) || ctx <= 0) continue;
+        map[key.toLowerCase()] = ctx;
+        if (spec.modelId) map[String(spec.modelId).toLowerCase()] = ctx;
+    }
+    return Object.freeze(map);
+})();
+
 export class TokenManager {
     constructor(options = {}) {
-        // Model token limits (context windows)
+        // Context windows. Exact names first; `familyLimits` below resolves
+        // anything with a version suffix. Keep the exact table small — the
+        // family table is what actually fires for dated model ids.
         this.modelLimits = {
-            // OpenAI
-            'gpt-4.1': 128000,
-            'gpt-4.1-mini': 128000,
-            'gpt-4-turbo': 128000,
-            'gpt-4': 8192,
-            'gpt-3.5-turbo': 16385,
-
-            // Anthropic
-            'claude-3.5-sonnet': 200000,
-            'claude-3-haiku': 200000,
-            'claude-3-opus': 200000,
-
-            // Google
-            'gemini-2.0-flash': 1000000,
-            'gemini-1.5-pro': 2000000,
-            'gemini-1.5-flash': 1000000,
-
-            // Groq
-            'llama-3.3-70b': 128000,
-            'llama3-70b': 8192,
-
-            // Mistral
-            'mistral-large-latest': 128000,
-            'mixtral-8x7b': 32768,
-
-            'default': 8000
+            'gpt-4.1': 128000, 'gpt-4.1-mini': 128000, 'gpt-4-turbo': 128000,
+            'gpt-4o': 128000, 'gpt-4o-mini': 128000,
+            'gpt-4': 8192, 'gpt-3.5-turbo': 16385,
+            'claude-3.5-sonnet': 200000, 'claude-3-haiku': 200000, 'claude-3-opus': 200000,
+            'gemini-2.0-flash': 1000000, 'gemini-1.5-pro': 2000000, 'gemini-1.5-flash': 1000000,
+            'llama-3.3-70b': 128000, 'llama3-70b': 8192,
+            'mistral-large-latest': 128000, 'mixtral-8x7b': 32768,
+            // An unknown model in 2026 is far more likely to have 128k than 8k.
+            // 8000 silently cut the diff budget to ~2400 tokens per review unit.
+            'default': 128000,
         };
 
-        // Output token limits (max response length)
+        // Longest prefix wins. Order does not matter.
+        this.familyLimits = {
+            'gpt-5': 400000, 'o3': 200000, 'o4': 200000, 'o1': 200000,
+            'gpt-4o': 128000, 'gpt-4.1': 128000,
+            'claude-sonnet-4': 200000, 'claude-opus-4': 200000, 'claude-haiku-4': 200000,
+            'claude-3': 200000, 'claude-sonnet-5': 200000, 'claude-opus-5': 200000, 'claude-fable-5': 200000,
+            'gemini-2.5': 1000000, 'gemini-2.0': 1000000, 'gemini-1.5': 1000000,
+            'llama-3.3': 128000, 'llama-3.1': 128000, 'llama-4': 128000,
+            // No `codestral` entry: it used to claim 256000 while the
+            // catalogue (constants.js, 'mistral:codestral') says 32000, and a
+            // maintainer had no way to tell which was right. The catalogue is
+            // authoritative, and `codestral-latest` now resolves through it.
+            'mistral-large': 128000,
+        };
+
         this.outputLimits = {
-            'gpt-4.1': 16384,
-            'gpt-4.1-mini': 16384,
-            'gpt-4-turbo': 4096,
-            'claude-3.5-sonnet': 8192,
-            'claude-3-haiku': 4096,
-            'gemini-2.0-flash': 8192,
-            'gemini-1.5-pro': 8192,
-            'llama-3.3-70b': 8192,
-            'mistral-large-latest': 8192,
-            'default': 4096
+            'gpt-4.1': 16384, 'gpt-4.1-mini': 16384, 'gpt-4-turbo': 4096,
+            'claude-3.5-sonnet': 8192, 'claude-3-haiku': 4096,
+            'gemini-2.0-flash': 8192, 'gemini-1.5-pro': 8192,
+            'llama-3.3-70b': 8192, 'mistral-large-latest': 8192,
+            'default': 8192,
+        };
+        this.familyOutputLimits = {
+            'gpt-5': 16384, 'o3': 16384, 'o4': 16384, 'gpt-4o': 16384,
+            'claude-sonnet-4': 8192, 'claude-opus-4': 8192, 'claude-haiku-4': 8192,
+            'claude-sonnet-5': 8192, 'claude-opus-5': 8192, 'claude-fable-5': 8192,
+            'gemini-2.5': 8192,
         };
 
         // Reserve tokens for system prompt and output
@@ -85,20 +112,49 @@ export class TokenManager {
     }
 
     /**
-     * Get maximum context tokens for a model
+     * Resolve a model identifier against an exact-name table, then a
+     * longest-matching-family-prefix table, then `catalogue` (an optional
+     * id → value map consulted with the RAW identifier as well, since
+     * extractModelName mangles ids that legitimately contain a colon such as
+     * `qwen2.5-coder:32b`), then that table's default.
+     */
+    _resolve(table, familyTable, modelIdentifier, catalogue = null) {
+        const name = this.extractModelName(modelIdentifier).toLowerCase();
+        if (table[name] != null) return table[name];
+        // Strip a vendor path ("anthropic/claude-sonnet-4") that gateways add.
+        const bare = name.includes('/') ? name.split('/').pop() : name;
+        if (table[bare] != null) return table[bare];
+        let best = null;
+        for (const prefix of Object.keys(familyTable)) {
+            if (bare.startsWith(prefix) && (best === null || prefix.length > best.length)) best = prefix;
+        }
+        if (best !== null) return familyTable[best];
+        if (catalogue) {
+            const raw = String(modelIdentifier || '').toLowerCase();
+            const fromCatalogue = catalogue[raw] ?? catalogue[name] ?? catalogue[bare];
+            if (fromCatalogue != null) return fromCatalogue;
+        }
+        return table.default;
+    }
+
+    /**
+     * Get maximum context tokens for a model. Falls back to the model
+     * catalogue before the generous 128000 default, so a resolved provider
+     * model id (`mixtral-8x7b-32768`, `mistral-small-latest`,
+     * `codestral-latest`, `qwen2.5-coder:32b`) reports its REAL window
+     * instead of one four times too large.
      */
     getModelLimit(modelIdentifier) {
-        // Extract model name from identifier (e.g., "openai:gpt-4.1" -> "gpt-4.1")
-        const modelName = this.extractModelName(modelIdentifier);
-        return this.modelLimits[modelName] || this.modelLimits.default;
+        return this._resolve(
+            this.modelLimits, this.familyLimits, modelIdentifier, CATALOGUE_CONTEXT_WINDOWS,
+        );
     }
 
     /**
      * Get maximum output tokens for a model
      */
     getOutputLimit(modelIdentifier) {
-        const modelName = this.extractModelName(modelIdentifier);
-        return this.outputLimits[modelName] || this.outputLimits.default;
+        return this._resolve(this.outputLimits, this.familyOutputLimits, modelIdentifier);
     }
 
     /**

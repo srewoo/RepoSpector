@@ -243,3 +243,40 @@ describe('toSarifJson', () => {
         });
     });
 });
+
+/**
+ * This branch unified the severity vocabulary on `blocking`/`suggestion`/
+ * `nitpick`. SARIF understood only the legacy names, so a canonical blocking
+ * finding exported through the `|| 'warning'` / `|| '5.0'` fallbacks and
+ * understated itself in a security dashboard.
+ */
+describe('canonical severity vocabulary', () => {
+    const levelOf = (severity) => buildSarif([finding({ severity })], {}).runs[0].results[0].level;
+    const scoreOf = (severity) => {
+        const log = buildSarif([finding({ severity })], {});
+        const rule = log.runs[0].tool.driver.rules.find(r => r.id === 'repospector/nullable-deref');
+        return rule.properties['security-severity'];
+    };
+
+    it('blocking is an error, not a warning', () => {
+        expect(levelOf('blocking')).toBe('error');
+        expect(scoreOf('blocking')).toBe('9.0');
+    });
+
+    it('suggestion and nitpick map to warning and note', () => {
+        expect(levelOf('suggestion')).toBe('warning');
+        expect(levelOf('nitpick')).toBe('note');
+    });
+
+    it('provider-path aliases resolve too', () => {
+        expect(levelOf('blocker')).toBe('error');
+        expect(levelOf('error')).toBe('error');
+    });
+
+    it('the legacy vocabulary is unchanged', () => {
+        expect(levelOf('critical')).toBe('error');
+        expect(levelOf('high')).toBe('error');
+        expect(levelOf('medium')).toBe('warning');
+        expect(levelOf('low')).toBe('note');
+    });
+});

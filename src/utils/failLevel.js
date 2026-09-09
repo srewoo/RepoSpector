@@ -29,12 +29,45 @@
  * cannot quietly lower it.
  */
 
-/** Severity ranks. Higher blocks more. */
+/**
+ * Severity ranks. Higher blocks more.
+ *
+ * `findingsFlatten.js` documents the governing principle: three severity
+ * vocabularies reach the post-processing pipeline and they must ALL be
+ * understood wherever severity is compared —
+ *   - legacy/display  `critical` | `high`   (static analysis, adaptOrchestratorReport)
+ *   - canonical       `blocking` | `suggestion` | `nitpick`
+ *                     (reviewSchema.toCanonicalFinding, ReviewCrossRepoService.toFindings)
+ *   - LLM prose       `error` | `blocker`   (some provider paths)
+ *
+ * `RANK` used to only know the legacy vocabulary, so a canonical `blocking`
+ * finding — the exact shape `toCanonicalFinding` produces for LLM
+ * `critical`/`high` output, and the shape cross-repo impact findings are
+ * emitted in directly — hit `rank === undefined` in `findingBlocks` and was
+ * silently treated as below every bar, however severe. `blocking` ranks
+ * alongside `high` (NOT `critical`'s 4): `FAIL_LEVEL_DEFAULT`'s doc comment
+ * below is explicit that `high` must block on exactly what
+ * `multiPassBlocking > 0` blocked on before, and `countBlocking` in
+ * `findingsFlatten.js` already treats `critical|high|blocking|blocker|error`
+ * as one equivalence class — ranking `blocking` at 3 preserves that. The
+ * `suggestion`→medium and `nitpick`/`nit`→low ranks mirror `SEVERITY_BACK`
+ * in `src/background/handlers/prReviewHandlers.js` (lines 306-310), which
+ * maps canonical → legacy severity (the inverse of `LEGACY_SEVERITY` in
+ * `src/services/reviewSchema.js`, which maps legacy → canonical) for
+ * exactly this purpose — keeping downstream severity-gating logic working
+ * unchanged.
+ */
 const RANK = Object.freeze({
     info: 0,
     low: 1,
+    nitpick: 1,
+    nit: 1,
     medium: 2,
+    suggestion: 2,
     high: 3,
+    blocking: 3,
+    blocker: 3,
+    error: 3,
     critical: 4,
 });
 

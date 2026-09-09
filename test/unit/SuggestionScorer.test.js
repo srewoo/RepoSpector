@@ -96,7 +96,11 @@ describe('SuggestionScorer', () => {
 });
 
 describe('partitionForPosting with scores', () => {
-    const blocking = (line, score, title) => ({ file: 'a.js', line, severity: 'blocking', score, title });
+    // `scoreSource: 'model'` is what SuggestionScorer stamps on a finding a
+    // batch actually scored, and it is now what makes the score a VERDICT the
+    // posting floor may act on. A bare number with no provenance is treated as
+    // unscored (see the two tests at the end of this block).
+    const blocking = (line, score, title) => ({ file: 'a.js', line, severity: 'blocking', score, scoreSource: 'model', title });
 
     it('fills the inline cap with the highest-scoring findings', () => {
         const { inline } = partitionForPosting(
@@ -129,6 +133,29 @@ describe('partitionForPosting with scores', () => {
         const input = [blocking(1, undefined, 'first'), blocking(2, undefined, 'second')];
         const { inline } = partitionForPosting(input, {});
         expect(inline.map(f => f.title)).toEqual(['first', 'second']);
+    });
+
+    it('never drops a finding whose score has no model provenance', () => {
+        // SuggestionScorer.js:88 stamps `score: 5, scoreSource: 'default'` on
+        // every finding a batch did not return. The number is finite but is not
+        // a verdict, so the floor must not act on it — otherwise a repo-set
+        // minScore deletes the comment for a finding the precision gate kept
+        // and decideFailure already turned into REQUEST_CHANGES.
+        const { inline, stats } = partitionForPosting(
+            [{ file: 'a.js', line: 1, severity: 'blocking', title: 'stamped', score: 5, scoreSource: 'default' }],
+            { minScore: 8 },
+        );
+        expect(inline).toHaveLength(1);
+        expect(stats.droppedByScore).toBe(0);
+    });
+
+    it('never drops a gate-tagged _scoreUnavailable finding', () => {
+        const { inline, stats } = partitionForPosting(
+            [{ file: 'a.js', line: 1, severity: 'blocking', title: 'tagged', score: 5, scoreSource: 'default', _scoreUnavailable: true }],
+            { minScore: 8 },
+        );
+        expect(inline).toHaveLength(1);
+        expect(stats.droppedByScore).toBe(0);
     });
 
     it('is off by default — no score floor unless asked for', () => {
