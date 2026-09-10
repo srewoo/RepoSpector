@@ -174,8 +174,13 @@ class BackgroundService {
     }
 
     /**
-     * Setup heartbeat to prevent service worker timeout
-     * Service workers timeout after 30 seconds of inactivity
+     * Notify content scripts on tabs with work in flight that we are still alive.
+     *
+     * This does NOT keep the service worker itself awake — a `setInterval` does
+     * not reset the MV3 idle timer, and this one makes no extension API call at
+     * all when `activeTabs` is empty. Worker lifetime is handled by
+     * `background/keepAlive.js`, which the message router holds for the
+     * lifetime of every handler.
      */
     setupHeartbeat() {
         // Clear any existing heartbeat

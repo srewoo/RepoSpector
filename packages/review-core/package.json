@@ -11,10 +11,13 @@
     "./chunker": "./src/MRChunker.js",
     "./normalizer": "./src/FindingsNormalizer.js",
     "./orchestrator": "./src/ReviewOrchestrator.js",
-    "./engine-contract": "./src/engineContract.js"
+    "./engine-contract": "./src/engineContract.js",
+    "./completeness": "./src/reviewCompleteness.js",
+    "./finding-pipeline": "./src/findingPipeline.js",
+    "./candidate-defence": "./src/candidateDefence.js"
   },
   "scripts": {
-    "test": "echo 'tests live in the repo root suite — see test/unit/'"
+    "test": "echo 'tests live in the repo root suite \u2014 see test/unit/'"
   },
   "license": "UNLICENSED"
 }

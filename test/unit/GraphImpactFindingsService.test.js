@@ -34,16 +34,71 @@ const prData = {
 };
 
 describe('GraphImpactFindingsService', () => {
-    it('emits a signature-changed finding naming callers outside the PR', () => {
+    // Deliberately flipped for P1-3. This previously asserted a `severity:
+    // 'high'` finding claiming the callers "still pass the old argument list",
+    // produced without reading a single call expression. With no source to
+    // read, the rule now asks rather than asserts.
+    it('asks about unreadable call sites instead of asserting they break', () => {
         const svc = new GraphImpactFindingsService({ graph: makeGraph(['src/checkout.js', 'src/refund.js']), impactAnalyzer: makeImpact() });
         const { findings, stats } = svc.build(prData);
         const sig = findings.find(f => f.rule === 'graph/signature-changed-callers');
-        expect(sig).toMatchObject({ file: 'src/pay.js', line: 1, severity: 'high', source: 'graph', tool: 'code-graph', category: 'logic' });
-        expect(sig.title).toMatch(/2 caller\(s\) outside this PR/);
+        expect(sig).toMatchObject({
+            file: 'src/pay.js', line: 1, source: 'graph', tool: 'code-graph',
+            severity: 'medium', needsHumanReview: true, assertionLevel: 'graph-inferred',
+        });
+        expect(sig.title).toMatch(/could not be checked/);
+        expect(sig.description).toMatch(/were not inspected/);
+        expect(sig.description).toMatch(/not a claim that they break/);
         expect(sig.evidence).toMatch(/src\/checkout\.js:10/);
         expect(sig.description).toMatch(/\(amount, currency\)/);
         expect(sig.description).toMatch(/\(amount\)/);
         expect(stats.signatureChanges).toBe(1);
+    });
+
+    it('asserts breakage only for a call site it actually read', () => {
+        const svc = new GraphImpactFindingsService({
+            graph: makeGraph(['src/checkout.js']),
+            impactAnalyzer: makeImpact(),
+            readSource: () => [
+                'function caller0() {',
+                '  // line 10 is the recorded call site',
+                '', '', '', '', '', '', '',
+                '  return charge(total, "USD");',
+                '}',
+            ].join('\n'),
+        });
+        const sig = svc.build(prData).findings.find(f => f.rule === 'graph/signature-changed-callers');
+        expect(sig).toMatchObject({ severity: 'high', category: 'logic', assertionLevel: 'validated' });
+        expect(sig.description).toMatch(/were read and do not match/);
+        expect(sig.evidence).toMatch(/charge\(total, "USD"\)/);
+    });
+
+    it('says nothing when every call site was read and none breaks', () => {
+        const svc = new GraphImpactFindingsService({
+            graph: makeGraph(['src/checkout.js']),
+            impactAnalyzer: makeImpact(),
+            readSource: () => [
+                'function caller0() {',
+                '', '', '', '', '', '', '', '',
+                '  return charge(total);',
+                '}',
+            ].join('\n'),
+        });
+        expect(svc.build(prData).findings.filter(f => f.rule === 'graph/signature-changed-callers')).toHaveLength(0);
+    });
+
+    it('an unrelated same-named symbol at the recorded line does not become a regression', () => {
+        // `CallGraphBuilder` resolves some edges by name. A graph edge pointing
+        // at a file with no such call is exactly the shape that manufactured
+        // asserted regressions.
+        const svc = new GraphImpactFindingsService({
+            graph: makeGraph(['src/checkout.js']),
+            impactAnalyzer: makeImpact(),
+            readSource: () => 'const x = 1;\n'.repeat(30),
+        });
+        const sig = svc.build(prData).findings.find(f => f.rule === 'graph/signature-changed-callers');
+        expect(sig.severity).toBe('medium');
+        expect(sig.description).toMatch(/not-found/);
     });
 
     it('ignores callers inside the PR and test callers', () => {
@@ -132,11 +187,23 @@ describe('GraphImpactFindingsService', () => {
         expect(stats.signatureChanges).toBe(4);
     });
 
-    it('marks every finding deterministic, so it can block a merge and is not mislabelled AI output', () => {
-        const svc = new GraphImpactFindingsService({ graph: makeGraph(['src/checkout.js']), impactAnalyzer: makeImpact() });
-        const { findings } = svc.build(prData);
-        const sig = findings.find(f => f.rule === 'graph/signature-changed-callers');
-        expect(sig.deterministic).toBe(true);
-        expect(findingBlocks(sig, 'high')).toBe(true);
+    // Deliberately flipped for P1-3. `deterministic: true` is still right — the
+    // finding is not AI output — but "deterministic" was doing double duty as
+    // "proven", letting an UNVERIFIED graph inference block a merge on severity
+    // alone. Only a validated call site blocks now.
+    it('marks findings deterministic, but only a validated one may block a merge', () => {
+        const unverified = new GraphImpactFindingsService({
+            graph: makeGraph(['src/checkout.js']), impactAnalyzer: makeImpact(),
+        }).build(prData).findings.find(f => f.rule === 'graph/signature-changed-callers');
+        expect(unverified.deterministic).toBe(true);
+        expect(findingBlocks(unverified, 'high')).toBe(false);
+
+        const validated = new GraphImpactFindingsService({
+            graph: makeGraph(['src/checkout.js']),
+            impactAnalyzer: makeImpact(),
+            readSource: () => `${'\n'.repeat(9)}  return charge(total, "USD");\n`,
+        }).build(prData).findings.find(f => f.rule === 'graph/signature-changed-callers');
+        expect(validated.deterministic).toBe(true);
+        expect(findingBlocks(validated, 'high')).toBe(true);
     });
 });

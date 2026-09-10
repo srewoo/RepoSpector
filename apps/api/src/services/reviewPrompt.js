@@ -81,7 +81,10 @@ export function buildChunkUserPrompt({ chunk, brief, mrContext, dismissedRules }
  */
 export function parseLLMReviewJson(text) {
     if (typeof text !== 'string' || !text.trim()) {
-        return { summary: '', findings: [] };
+        // An empty response is not a clean file. Without `_parseError` it is
+        // indistinguishable from a model that read the chunk and found nothing,
+        // which is how an unreviewed chunk ended up inside an APPROVE (P0-1).
+        return { summary: '', findings: [], _parseError: true };
     }
     const stripped = text
         .replace(/^﻿/, '')

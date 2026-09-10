@@ -17,6 +17,8 @@
  * threshold up to somewhere the next run cannot reach.
  */
 
+import { predictionId, defectId } from './ids.js';
+
 /** Line distance within which a predicted finding is considered co-located. */
 export const DEFAULT_LINE_TOLERANCE = 5;
 
@@ -93,24 +95,76 @@ export function wilson(successes, total, z = 1.96) {
  * @param {number} [tolerance]
  */
 export function scorePrecision(predictions = [], adjudications = [], tolerance = DEFAULT_LINE_TOLERANCE) {
+    const preds = predictions.map((p, index) => ({ record: p, id: predictionId(p), index }));
+
+    // Verdicts that name their prediction are attached to exactly that
+    // prediction. Everything else is a legacy row from before ids existed and
+    // is resolved by location, conservatively.
+    const byId = new Map();
+    const legacy = [];
+    for (const a of adjudications) {
+        const pid = a?.predictionId ?? null;
+        if (pid) {
+            if (!byId.has(String(pid))) byId.set(String(pid), []);
+            byId.get(String(pid)).push(a);
+        } else {
+            legacy.push(a);
+        }
+    }
+
+    const legacyByPrediction = new Map();
+    let ambiguousLegacy = 0;
+    let orphanAdjudications = 0;
+    for (const a of legacy) {
+        const candidates = preds.filter((e) => sameLocation(e.record, a, tolerance));
+        if (candidates.length === 0) { orphanAdjudications++; continue; }
+        if (candidates.length > 1) {
+            // THE defect this rewrite exists for: a verdict on one finding was
+            // credited to every other finding within the line tolerance. When
+            // a legacy row cannot say which claim it judged, it judges none.
+            ambiguousLegacy++;
+            continue;
+        }
+        const key = candidates[0].index;
+        if (!legacyByPrediction.has(key)) legacyByPrediction.set(key, []);
+        legacyByPrediction.get(key).push(a);
+    }
+
     let truePositives = 0;
     let falsePositives = 0;
+    let disputed = 0;
     let unadjudicated = 0;
 
-    for (const p of predictions) {
-        const verdicts = adjudications.filter(a => sameLocation(p, a, tolerance));
+    for (const entry of preds) {
+        const verdicts = [
+            ...(byId.get(entry.id) ?? []),
+            ...(legacyByPrediction.get(entry.index) ?? []),
+        ];
         if (verdicts.length === 0) { unadjudicated++; continue; }
-        // Any human calling it real makes it real; adjudicators disagree and the
-        // conservative reading of a split is "this was worth saying".
-        if (verdicts.some(v => v.verdict === 'true_positive')) truePositives++;
-        else falsePositives++;
+
+        const anyTrue = verdicts.some((v) => v.verdict === 'true_positive');
+        const anyFalse = verdicts.some((v) => v.verdict === 'false_positive');
+        if (anyTrue && anyFalse) {
+            // Adjudicators disagreed about THIS finding. Resolving that in
+            // favour of the finding (the old behaviour) turns an unresolved
+            // dispute into evidence of correctness. It is neither, so it is
+            // reported and left out of the rate.
+            disputed++;
+        } else if (anyTrue) {
+            truePositives++;
+        } else {
+            falsePositives++;
+        }
     }
 
     const interval = wilson(truePositives, truePositives + falsePositives);
     return {
         truePositives,
         falsePositives,
+        disputed,
         unadjudicated,
+        ambiguousLegacy,
+        orphanAdjudications,
         adjudicated: truePositives + falsePositives,
         predicted: predictions.length,
         ...interval,
@@ -151,13 +205,7 @@ export function scoreRecall(predictions = [], humanComments = [], tolerance = DE
     // "LGTM", "nice", approvals — a reviewer is not expected to reproduce those,
     // and counting them makes recall look worse than the tool is.
     const reference = humanComments.filter(c => c?.substantive !== false);
-
-    const matched = [];
-    const missed = [];
-    for (const c of reference) {
-        if (predictions.some(p => sameLocation(p, c, tolerance))) matched.push(c);
-        else missed.push(c);
-    }
+    const { matched, missed } = matchReferences(predictions, reference, tolerance);
 
     return {
         matched: matched.length,
@@ -166,6 +214,74 @@ export function scoreRecall(predictions = [], humanComments = [], tolerance = DE
         missedExamples: missed.slice(0, 10),
         ...wilson(matched.length, reference.length),
     };
+}
+
+/**
+ * Assign predictions to reference defects ONE-TO-ONE.
+ *
+ * The old test was `predictions.some(p => sameLocation(p, c))`, run
+ * independently per reference. Three consequences, all inflating recall: one
+ * prediction satisfied every reference near it; a duplicate finding satisfied
+ * two distinct defects; and a prediction about something else entirely got the
+ * credit because it happened to sit within the line tolerance.
+ *
+ * So this is an assignment, not a filter. Pairs are considered best-first —
+ * an explicit shared defect id, then exact line, then increasing line distance
+ * — and each prediction and each reference is consumed at most once. Location
+ * is supporting evidence for a pairing rather than the pairing itself.
+ *
+ * @returns {{matched: Array<{reference: object, prediction: object, basis: string}>, missed: object[]}}
+ */
+export function matchReferences(predictions = [], references = [], tolerance = DEFAULT_LINE_TOLERANCE) {
+    const preds = predictions.map((p, index) => ({ record: p, index, defect: p?.defectId ?? null }));
+
+    const pairs = [];
+    references.forEach((ref, refIndex) => {
+        const refDefect = ref?.defectId ?? null;
+        for (const p of preds) {
+            // An explicit shared defect id is identity and beats any distance.
+            if (refDefect && p.defect && String(refDefect) === String(p.defect)) {
+                pairs.push({ refIndex, predIndex: p.index, cost: -1, basis: 'defect-id' });
+                continue;
+            }
+            if (!sameLocation(p.record, ref, tolerance)) continue;
+            const a = locationOf(p.record).line;
+            const b = locationOf(ref).line;
+            // A file-wide reference (no line) is a weaker pairing than a
+            // line-for-line one, so it loses to any co-located candidate.
+            const cost = (a == null || b == null) ? tolerance + 1 : Math.abs(a - b);
+            pairs.push({ refIndex, predIndex: p.index, cost, basis: 'location' });
+        }
+    });
+
+    pairs.sort((x, y) => x.cost - y.cost || x.refIndex - y.refIndex || x.predIndex - y.predIndex);
+
+    const usedPredictions = new Set();
+    const matchedByRef = new Map();
+    for (const pair of pairs) {
+        if (matchedByRef.has(pair.refIndex)) continue;
+        if (usedPredictions.has(pair.predIndex)) continue;
+        usedPredictions.add(pair.predIndex);
+        matchedByRef.set(pair.refIndex, pair);
+    }
+
+    const matched = [];
+    const missed = [];
+    references.forEach((ref, refIndex) => {
+        const pair = matchedByRef.get(refIndex);
+        if (pair) {
+            matched.push({
+                reference: ref,
+                prediction: predictions[pair.predIndex],
+                basis: pair.basis,
+                defect: defectId(ref),
+            });
+        } else {
+            missed.push(ref);
+        }
+    });
+
+    return { matched, missed };
 }
 
 /**
@@ -183,6 +299,12 @@ export function scoreRecall(predictions = [], humanComments = [], tolerance = DE
  * @returns {Array<{key:string, matched:number, total:number, rate:number}>}
  */
 export function recallByTag(predictions = [], references = [], tolerance = DEFAULT_LINE_TOLERANCE, key = 'tag') {
+    // Assignment is computed over ALL references at once, not per bucket: a
+    // single prediction must not be able to satisfy an `unchecked-error` and a
+    // `sql-injection` reference on the same line.
+    const { matched } = matchReferences(predictions, references, tolerance);
+    const matchedRefs = new Set(matched.map((m) => m.reference));
+
     const buckets = new Map();
     for (const ref of references) {
         const bucket = ref?.[key];
@@ -190,7 +312,7 @@ export function recallByTag(predictions = [], references = [], tolerance = DEFAU
         if (!buckets.has(bucket)) buckets.set(bucket, { key: bucket, matched: 0, total: 0 });
         const entry = buckets.get(bucket);
         entry.total++;
-        if (predictions.some(p => sameLocation(p, ref, tolerance))) entry.matched++;
+        if (matchedRefs.has(ref)) entry.matched++;
     }
     return [...buckets.values()]
         .map(b => ({ ...b, rate: b.total ? b.matched / b.total : null }))
@@ -291,6 +413,12 @@ export function formatReport(result) {
         `F1:                ${pct(result.f1)}`,
         '',
         `Findings produced: ${p.predicted}   (${p.unadjudicated} not yet human-adjudicated)`,
+        // Each of these is a verdict that was NOT counted, and each used to be
+        // silently counted as a true positive. Reported so a precision figure
+        // cannot quietly rest on judgements that resolved nothing.
+        ...(p.disputed ? [`Disputed:          ${p.disputed} finding(s) with conflicting verdicts — excluded from the rate`] : []),
+        ...(p.ambiguousLegacy ? [`Ambiguous legacy:  ${p.ambiguousLegacy} verdict(s) matched more than one finding by location and were not credited`] : []),
+        ...(p.orphanAdjudications ? [`Orphan verdicts:   ${p.orphanAdjudications} verdict(s) matched no finding in this run`] : []),
         ...tagLines,
     ].join('\n');
 }

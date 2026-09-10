@@ -15,6 +15,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { validateCorpus } from './lib/corpus.js';
 import { scoreRun, formatReport, pct } from './lib/scoring.js';
+import { buildBenchmarkReport, formatBenchmarkReport } from './lib/benchmarkReport.js';
+import { splitByRepository, splitLeaks, repoOf } from './lib/splits.js';
 
 const BASELINE_PATH = resolve('eval/baseline.json');
 
@@ -30,6 +32,7 @@ function parseArgs(argv) {
         else if (a === '--include-unreviewed') args.includeUnreviewed = true;
         else if (a === '--tolerance') args.tolerance = Number(argv[++i]);
         else if (a === '--allow-llm-baseline') args.allowLlmBaseline = true;
+        else if (a === '--holdout') args.holdout = Number(argv[++i]);
         else if (a === '--help' || a === '-h') args.help = true;
         else throw new Error(`Unknown argument: ${a}`);
     }
@@ -142,10 +145,61 @@ function main() {
 
     const result = scoreRun(cases, { tolerance: args.tolerance });
 
+    // P1-7: the release-decision report. Separate inline and reported
+    // precision, defect recall split from design/style agreement, false
+    // positives per clean PR, incompleteness rate, and where candidates were
+    // lost. `scoreRun`'s single pair of figures stays available for continuity
+    // and for the CI gate, which is anchored to it.
+    let benchmark = null;
+    try {
+        benchmark = buildBenchmarkReport(cases, {
+            tolerance: args.tolerance,
+            manifest: cases.find(c => c.manifest)?.manifest ?? null,
+        });
+    } catch (e) {
+        // `requireSinglePath` refuses to average two different reviewers.
+        console.warn(`\nBenchmark report unavailable: ${e.message}\n`);
+    }
+
+    // P1-7: a held-out set, split BY REPOSITORY. Two merge requests from one
+    // repo share its conventions and often its defects, so a case-level split
+    // leaks the answer across the boundary and the held-out number is not one.
+    let holdoutReport = null;
+    if (Number.isFinite(args.holdout) && args.holdout > 0) {
+        const split = splitByRepository(cases, { holdout: args.holdout });
+        const leaks = splitLeaks(split);
+        if (leaks.length) {
+            throw new Error(`Split leaks ${leaks.length} repository/ies across the boundary: ${leaks.join(', ')}`);
+        }
+        holdoutReport = {
+            tuneRepos: split.repos.tune.length,
+            holdoutRepos: split.repos.holdout.length,
+            tuneCases: split.tune.length,
+            holdoutCases: split.holdout.length,
+            tune: split.tune.length ? buildBenchmarkReport(split.tune, { tolerance: args.tolerance }) : null,
+            holdout: split.holdout.length ? buildBenchmarkReport(split.holdout, { tolerance: args.tolerance }) : null,
+        };
+    }
+
     if (args.json) {
-        console.log(JSON.stringify(result, null, 2));
+        console.log(JSON.stringify({ ...result, benchmark, holdout: holdoutReport }, null, 2));
     } else {
         console.log(formatReport(result));
+        if (benchmark) console.log(`\n${'─'.repeat(72)}\n\n${formatBenchmarkReport(benchmark)}`);
+        if (holdoutReport) {
+            console.log(
+                `\n${'─'.repeat(72)}\n\nHeld-out split (by repository, not by case):`
+                + `\n  tuning:   ${holdoutReport.tuneCases} case(s) across ${holdoutReport.tuneRepos} repo(s)`
+                + `\n  held out: ${holdoutReport.holdoutCases} case(s) across ${holdoutReport.holdoutRepos} repo(s)`
+                + '\n\nThe held-out figures are the ones to quote. The tuning figures describe'
+                + '\ncode the thresholds were chosen against and will read high.',
+            );
+            for (const [label, report] of [['TUNING', holdoutReport.tune], ['HELD OUT', holdoutReport.holdout]]) {
+                if (!report) continue;
+                console.log(`\n── ${label} ${'─'.repeat(60 - label.length)}\n`);
+                console.log(formatBenchmarkReport(report));
+            }
+        }
     }
 
     // A recall percentage tells you that you missed things; the list tells you

@@ -11,8 +11,17 @@ function fakePrService(files, { failOn = [] } = {}) {
         calls,
         async fetchFullFileContent(prUrl, path, ref) {
             calls.push({ path, ref });
-            if (failOn.includes(path)) throw new Error('boom');
-            if (!(path in files)) throw new Error('404');
+            if (failOn.includes(path)) {
+                // A transport/permission failure: `notFound` deliberately unset,
+                // because the service must not read this as "the file is absent".
+                throw new Error('boom');
+            }
+            if (!(path in files)) {
+                const err = new Error('Failed to fetch file: 404');
+                err.status = 404;
+                err.notFound = true;
+                throw err;
+            }
             return { content: files[path], filePath: path };
         },
     };

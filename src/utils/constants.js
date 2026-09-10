@@ -406,9 +406,14 @@ const MODELS = {
         specialization: 'code'
     },
     'local:qwen2.5-coder': {
-        name: 'Qwen 2.5 Coder 32B (Local)',
+        // No `:32b` tag. Setup tells the user to `ollama pull qwen2.5-coder`,
+        // which lands `:latest` (7b), and the connection probe accepts any tag
+        // for an untagged selection — so pinning 32b here made Settings report
+        // the model installed while every request 404'd on a tag nobody pulled.
+        // Untagged lets Ollama resolve whichever tag is actually present.
+        name: 'Qwen 2.5 Coder (Local)',
         provider: LLM_PROVIDERS.LOCAL,
-        modelId: 'qwen2.5-coder:32b',
+        modelId: 'qwen2.5-coder',
         maxTokens: 8192,
         contextWindow: 32000,
         costPer1kTokens: { input: 0, output: 0 },

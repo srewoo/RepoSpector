@@ -9,6 +9,8 @@
  * use toCanonicalFinding() to lift legacy shapes without breaking callers.
  */
 
+import { governVerdict, createCompleteness } from '../utils/reviewCompleteness.js';
+
 export const PHASE = Object.freeze({
     DEEP: 'deep',        // logic, security, architecture, performance (LLM reasoning)
     STANDARDS: 'standards', // lint, conventions, coverage, secrets, SCA
@@ -26,6 +28,11 @@ export const VERDICT = Object.freeze({
     BLOCK: 'BLOCK',
     DEFER: 'DEFER',
     SKIP: 'SKIP',
+    // P0-1. Distinct from SKIP (nothing was read on purpose) and from
+    // NEEDS_DISCUSSION (something was read and is arguable): the pipeline
+    // tried to read the change and could not finish. It is the only honest
+    // answer when there are no blocking findings but also no assurance.
+    INCOMPLETE: 'INCOMPLETE',
 });
 
 /**
@@ -182,9 +189,19 @@ export function rollupVerdict(findings) {
  * Build the final report consumed by the UI / cache / webhook bot.
  * `summary` is split by phase so we can render two sections.
  */
-export function buildVerdictReport({ findings = [], summary = {}, meta = {}, override } = {}) {
+export function buildVerdictReport({ findings = [], summary = {}, meta = {}, override, completeness = null } = {}) {
     const canonical = findings.map((f) => toCanonicalFinding(f)).filter(Boolean);
-    const verdict = override ?? rollupVerdict(canonical);
+    const rolled = override ?? rollupVerdict(canonical);
+
+    // P0-1: completeness governs the verdict, and it does so here rather than
+    // in each caller, because "approve" is produced in four places and every
+    // one of them used to be free to approve a run that never finished.
+    // Blocking outcomes pass through untouched — a defect found in code that
+    // WAS read stays a defect.
+    const contract = completeness ?? meta?.completeness ?? null;
+    const governed = governVerdict({ verdict: rolled }, contract);
+    const verdict = governed.verdict ?? rolled;
+
     return {
         schemaVersion: 1,
         verdict,
@@ -200,6 +217,10 @@ export function buildVerdictReport({ findings = [], summary = {}, meta = {}, ove
         meta: {
             generatedAt: new Date().toISOString(),
             ...meta,
+            completeness: contract ? createCompleteness(contract) : (meta?.completeness ?? null),
+            incomplete: governed.reasons.length > 0,
+            incompleteReasons: governed.reasons,
+            verdictDowngradedForIncompleteness: governed.downgraded,
         },
     };
 }

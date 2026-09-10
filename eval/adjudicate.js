@@ -19,8 +19,14 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { hunkForLine } from './lib/hunks.js';
+import { predictionId } from './lib/ids.js';
 
-const COLUMNS = ['case', 'file', 'line', 'severity', 'posted', 'rule', 'title', 'suggestion', 'verdict', 'source'];
+// `prediction_id` is first because it is the column that makes a verdict mean
+// something: matching a verdict back by file and nearby line credited one
+// finding's judgement to another finding a few lines away (P0-3). It is written
+// by --export and read by --import; a sheet without it still imports, as a
+// legacy location-matched row.
+const COLUMNS = ['prediction_id', 'case', 'file', 'line', 'severity', 'posted', 'rule', 'title', 'suggestion', 'verdict', 'source'];
 
 function parseArgs(argv) {
     const args = {
@@ -104,11 +110,15 @@ function doExport(args) {
             if (args.postedOnly && !p.posted) continue;
             // Pre-fill any verdict already recorded, so re-exporting after a
             // partial pass does not throw away work.
-            const existing = (kase.adjudications ?? []).find(
-                a => a.file === p.file && Number(a.line) === Number(p.line)
-            );
+            const pid = predictionId(p);
+            // Prefer the id; fall back to location only for verdicts recorded
+            // before ids existed, so a partial pass is not thrown away.
+            const existing = (kase.adjudications ?? []).find(a => a.predictionId === pid)
+                ?? (kase.adjudications ?? []).find(
+                    a => !a.predictionId && a.file === p.file && Number(a.line) === Number(p.line)
+                );
             lines.push([
-                kase.id, p.file, p.line ?? '', p.severity ?? '', p.posted ? 'inline' : 'summary',
+                pid, kase.id, p.file, p.line ?? '', p.severity ?? '', p.posted ? 'inline' : 'summary',
                 p.rule ?? '', p.title ?? '', p.suggestion ?? '', existing?.verdict ?? '',
                 existing?.source ?? '',
             ].map(csvCell).join(','));
@@ -212,16 +222,24 @@ function doImport(args) {
             throw new Error(`Unrecognised source "${source}". Use human or llm.`);
         }
 
+        const pid = (row[idx.prediction_id] ?? '').trim() || null;
+
         kase.adjudications = kase.adjudications ?? [];
-        const existing = kase.adjudications.find(a => a.file === file && Number(a.line) === Number(line));
+        const existing = pid
+            ? kase.adjudications.find(a => a.predictionId === pid)
+            : kase.adjudications.find(
+                a => !a.predictionId && a.file === file && Number(a.line) === Number(line)
+            );
         if (existing) {
             existing.verdict = verdict;
+            if (pid) existing.predictionId = pid;
             // Absent means human; only ever write the field for llm, so existing
             // corpora keep their exact committed shape.
             if (source === 'llm') existing.source = 'llm';
             else delete existing.source;
         } else {
             kase.adjudications.push({
+                ...(pid ? { predictionId: pid } : {}),
                 file,
                 ...(line == null ? {} : { line }),
                 verdict,

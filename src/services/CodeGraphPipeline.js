@@ -562,9 +562,9 @@ export class CodeGraphPipeline {
     /**
      * Quick safety check for a symbol change
      */
-    safetyCheck(symbolName) {
+    safetyCheck(symbolName, options = {}) {
         if (!this.impactAnalyzer) return null;
-        return this.impactAnalyzer.quickSafetyCheck(symbolName);
+        return this.impactAnalyzer.quickSafetyCheck(symbolName, options);
     }
 
     /**

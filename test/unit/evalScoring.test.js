@@ -86,13 +86,21 @@ describe('scorePrecision', () => {
         expect(r.rate).toBe(0.5);
     });
 
-    it('resolves a split adjudication in favour of the finding', () => {
-        const r = scorePrecision([{ file: 'a.js', line: 10 }], [
-            { file: 'a.js', line: 10, verdict: 'false_positive' },
-            { file: 'a.js', line: 10, verdict: 'true_positive' },
+    // Deliberately flipped for P0-3. This previously asserted that a split
+    // adjudication resolved "in favour of the finding" — which converts an
+    // unresolved disagreement between adjudicators into evidence that the
+    // finding was correct. It is neither a true nor a false positive, so it is
+    // reported and excluded from the rate.
+    it('preserves a split adjudication as disputed rather than crediting it', () => {
+        const r = scorePrecision([{ file: 'a.js', line: 10, title: 'one claim' }], [
+            { predictionId: require('../../eval/lib/ids.js').predictionId({ file: 'a.js', line: 10, title: 'one claim' }), verdict: 'false_positive' },
+            { predictionId: require('../../eval/lib/ids.js').predictionId({ file: 'a.js', line: 10, title: 'one claim' }), verdict: 'true_positive' },
         ]);
-        expect(r.truePositives).toBe(1);
+        expect(r.disputed).toBe(1);
+        expect(r.truePositives).toBe(0);
         expect(r.falsePositives).toBe(0);
+        expect(r.adjudicated).toBe(0);
+        expect(r.rate).toBeNull();
     });
 
     it('reports no rate when nothing was adjudicated', () => {

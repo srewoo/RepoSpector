@@ -4,6 +4,8 @@ import { formatPatchWithLineNumbers } from './patchLines.js';
 import { resolveBudget } from './reviewContextBudget.js';
 import { expandPatch, shouldPreferExpansion } from './dynamicContext.js';
 import { stripDeletionOnlyHunks, renderOmittedFiles } from './diffBudget.js';
+import { describeDeletionSignals } from './deletionSignificance.js';
+import { renderScopedInstructions } from './instructionScope.js';
 
 /**
  * Language-specific review rules injected into per-file prompts
@@ -396,6 +398,7 @@ export function buildPerFileReviewPrompt(unit, context = {}) {
         // The repo's own AGENTS.md / CLAUDE.md, pre-rendered and sanitised by
         // RepoInstructionsService. Absent for repos that carry neither.
         repoInstructions = '',
+        instructionScopes = null,
         graphContext,
         // Phase 2 additions — see ReviewFileContextService / reviewIntentContext.
         fileContext = null,   // Map<filename, {fullContent, testPath, testContent, testFileMissing}>
@@ -411,6 +414,7 @@ export function buildPerFileReviewPrompt(unit, context = {}) {
         // diff budget). Rendered by name so the model cannot conclude that a
         // caller was never updated. See utils/diffBudget.js.
         omittedFiles = [],
+        omittedHunks = [],
         // Called once with what the diff section actually did, so the review's
         // stats block can report expansion/omission without this builder having
         // to change its return shape (an array of cache-marked parts).
@@ -418,7 +422,11 @@ export function buildPerFileReviewPrompt(unit, context = {}) {
     } = context;
 
     /** Filled in as files are rendered; surfaced on the returned prompt object. */
-    const contextStats = { expandedFiles: 0, fullFileFiles: 0, deletionOnlyHunksRemoved: 0 };
+    const contextStats = {
+        expandedFiles: 0, fullFileFiles: 0,
+        deletionOnlyHunksRemoved: 0, deletionOnlyHunksKept: 0,
+        omittedHunks: [],
+    };
 
     const budget = resolveBudget({ overrides: contextBudget || undefined });
 
@@ -515,6 +523,27 @@ ${String(conventionBlock).trim()}
     // again here would nest fences and break the block.
     if (repoInstructions && String(repoInstructions).trim()) {
         preamble += `\n${String(repoInstructions).trim()}\n`;
+    }
+
+    // P2-1: nested instruction files, scoped to the paths they govern. A rule
+    // from `services/billing/AGENTS.md` must be legible as applying to
+    // `services/billing/**` and to nothing else — pasting it unscoped is how a
+    // repo-specific convention becomes a finding on an unrelated package.
+    if (instructionScopes?.byPath) {
+        const forThisUnit = new Map();
+        for (const f of unit.files || []) {
+            for (const scope of instructionScopes.byPath.get(f.filename) || []) {
+                if (scope.dir) forThisUnit.set(scope.path, scope);
+            }
+        }
+        if (forThisUnit.size) {
+            preamble += `\n${renderScopedInstructions([...forThisUnit.values()])}\n`;
+        }
+    }
+    if (instructionScopes?.warning) {
+        // A repository asking its reviewer to approve everything is itself
+        // worth saying out loud, not something to handle silently.
+        preamble += `\n> ⚠️ ${instructionScopes.warning}\n`;
     }
 
     // ── Sections 3+ are per-unit: static findings, retrieved chunks, the
@@ -646,13 +675,23 @@ ${ctx.fullContent}
             }
         }
 
-        // Deletion-only hunks carry nothing reviewable — the prompt already tells
-        // the model never to report against a removed line, so those tokens buy a
-        // restatement of a rule. On a refactor or a file move they are most of the
-        // diff. See utils/diffBudget.js.
+        // Deletion-only hunks that carry nothing reviewable are stripped; ones
+        // that remove a guard, a rollback, a cleanup, an exported symbol or a
+        // test are KEPT and explicitly opened for review below (P1-1). On a
+        // refactor or a file move the strippable kind is most of the diff.
+        // See utils/diffBudget.js and utils/deletionSignificance.js.
         const stripped = stripDeletionOnlyHunks(renderPatch);
         contextStats.deletionOnlyHunksRemoved += stripped.removedHunks;
+        contextStats.deletionOnlyHunksKept += stripped.keptDeletionHunks ?? 0;
+        for (const header of stripped.removedHunkHeaders ?? []) {
+            contextStats.omittedHunks.push({
+                file: f.filename,
+                hunk: header,
+                reason: 'deletion-only hunk with no behavioural signal',
+            });
+        }
         if (stripped.patch) renderPatch = stripped.patch;
+        const keptDeletions = stripped.deletionSignals ?? [];
 
         // The test file — present or conspicuously absent.
         if (ctx?.testPath && ctx.testContent) {
@@ -667,9 +706,18 @@ ${ctx.testContent}
 `;
         } else if (ctx?.testFileMissing) {
             rest += `#### Test file: NONE FOUND
-No test file was located for this source file. If this diff adds or changes an
-exported/public function, missing test coverage is a legitimate finding — report
-it once for this file, not once per function.
+No test file exists for this source file — every candidate path was checked. If
+this diff adds or changes an exported/public function, missing test coverage is
+a legitimate finding — report it once for this file, not once per function.
+
+`;
+        } else if (ctx?.testDiscovery === 'unknown') {
+            // P1-5: "we could not look" was rendered as "NONE FOUND", and the
+            // reviewer reported missing coverage for a test that may well exist.
+            rest += `#### Test file: NOT DETERMINED
+The test lookup for this file did not complete${ctx.testDiscoveryReason ? ` (${ctx.testDiscoveryReason})` : ''}.
+This is NOT evidence that no test exists. Do not report missing test coverage
+for this file.
 
 `;
         }
@@ -679,10 +727,29 @@ it once for this file, not once per function.
         // silently — a correct finding on the wrong line still reads as
         // authoritative. The number is now printed next to the code, so `line`
         // is a value to COPY rather than compute.
+        // The blanket "never report against a removed line" rule cost this
+        // reviewer every deletion defect there is. Removals that were kept are
+        // named, with the reason, and the model is told how to report them:
+        // as a statement about the file, not as an inline comment on a line the
+        // host cannot place a comment on.
+        const deletionRule = keptDeletions.length
+            ? `
+
+**Removals kept for review in this file** (${keptDeletions.length}): `
+                + `${keptDeletions.map(d => describeDeletionSignals(d.signals)).join('; ')}.
+Removing a check, a rollback, a cleanup, an exported symbol or a test IS a
+behaviour change, and it is in scope here. If a removal above is a defect, report
+it with \`"removal": true\`, no \`line\` (or the removed code's OLD line number in
+\`"oldLine"\`), and quote the removed code in \`evidence\`. If the removal is
+deliberate and safe — dead code, a moved function, a superseded check — say
+nothing about it.`
+            : `
+Lines in \`__old hunk__\` were REMOVED — do not report a finding against them
+unless the removal itself is the defect; the PR has already deleted that code.`;
+
         rest += `#### Diff — THIS is what you are reviewing
 Each line in \`__new hunk__\` is prefixed with its REAL line number in the file.
-Lines marked \`+\` are added by this PR. Lines in \`__old hunk__\` were REMOVED —
-never report a finding against them; the PR has already deleted that code.
+Lines marked \`+\` are added by this PR.${deletionRule}
 
 \`\`\`
 ${formatPatchWithLineNumbers(renderPatch, f.filename)}
@@ -695,10 +762,18 @@ ${formatPatchWithLineNumbers(renderPatch, f.filename)}
     // Costs a handful of tokens and converts a wrong answer into a stated
     // limitation: without it the model believes it has seen the whole change and
     // reports "the caller was never updated" about a file it was not given.
-    const omittedBlock = renderOmittedFiles(omittedFiles);
+    // Hunk-level omissions from the diff budget, plus the ones stripped while
+    // rendering this unit's own patches, so coverage names every hunk the model
+    // is NOT looking at (P1-5).
+    const allOmittedHunks = [...omittedHunks, ...contextStats.omittedHunks];
+    const omittedBlock = renderOmittedFiles(omittedFiles, allOmittedHunks);
     if (omittedBlock) rest += `\n${omittedBlock}\n`;
 
-    onContextStats?.({ ...contextStats, omittedFiles: omittedFiles.length });
+    onContextStats?.({
+        ...contextStats,
+        omittedFiles: omittedFiles.length,
+        omittedHunks: allOmittedHunks,
+    });
 
     // ── Section 6: Required output ──
     const fileNames = unit.files.map(f => `"${f.filename}"`).join(' or ');

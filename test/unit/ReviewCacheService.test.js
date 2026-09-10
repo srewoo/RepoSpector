@@ -47,12 +47,35 @@ describe('ReviewCacheService', () => {
         expect((await c.lookup(URL, 'sha1')).status).toBe(CACHE_STATUS.MISS);
     });
 
-    it('is FRESH when the head SHA is unchanged', async () => {
+    // Deliberately flipped for P1-4. Freshness used to rest on the head SHA
+    // alone, so a rebase onto a new base, a model change, a lowered threshold
+    // or an edited CLAUDE.md all served the previous review as the current one.
+    // The head SHA is now necessary and no longer sufficient.
+    it('is FRESH when the head SHA AND the review inputs are unchanged', async () => {
+        const c = new ReviewCacheService({ storage: fakeStorage() });
+        await c.store(URL, { headSha: 'sha1', fingerprint: 'fp1', report: report() });
+
+        const hit = await c.lookup(URL, 'sha1', 'fp1');
+        expect(hit.status).toBe(CACHE_STATUS.FRESH);
+        expect(hit.entry.payload.findings).toHaveLength(1);
+    });
+
+    it('is STALE on the same head SHA when the review inputs changed', async () => {
+        const c = new ReviewCacheService({ storage: fakeStorage() });
+        await c.store(URL, { headSha: 'sha1', fingerprint: 'fp1', report: report() });
+
+        const hit = await c.lookup(URL, 'sha1', 'fp2');
+        expect(hit.status).toBe(CACHE_STATUS.STALE);
+        expect(hit.staleReason).toMatch(/review inputs changed/);
+    });
+
+    it('never grandfathers an entry stored without a fingerprint into FRESH', async () => {
         const c = new ReviewCacheService({ storage: fakeStorage() });
         await c.store(URL, { headSha: 'sha1', report: report() });
 
-        const hit = await c.lookup(URL, 'sha1');
-        expect(hit.status).toBe(CACHE_STATUS.FRESH);
+        const hit = await c.lookup(URL, 'sha1', 'fp1');
+        expect(hit.status).toBe(CACHE_STATUS.STALE);
+        // Still useful as priming context, which is what STALE is for.
         expect(hit.entry.payload.findings).toHaveLength(1);
     });
 

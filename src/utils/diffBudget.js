@@ -28,6 +28,7 @@
  */
 
 import { parsePatchHunks } from './patchLines.js';
+import { classifyDeletionHunk } from './deletionSignificance.js';
 
 export const DIFF_BUDGET_DEFAULTS = Object.freeze({
     /**
@@ -55,28 +56,47 @@ export function estimateTokens(text, charsPerToken = DIFF_BUDGET_DEFAULTS.charsP
 }
 
 /**
- * Drop hunks that only remove lines.
+ * Drop hunks that only remove lines — EXCEPT the removals that change behaviour.
  *
- * Kept deliberately narrow: a hunk with even one added line stays whole,
- * because a `-`/`+` pair is a MODIFICATION and the removed side is what makes
- * the change legible ("this used to check for null").
+ * Kept deliberately narrow in the other direction too: a hunk with even one
+ * added line stays whole, because a `-`/`+` pair is a MODIFICATION and the
+ * removed side is what makes the change legible ("this used to check for null").
  *
- * A patch whose every hunk is deletion-only returns '' — the caller should then
- * render the file as name-only (see `renderOmittedFiles`), not as an empty diff,
- * since "here is the diff:" followed by nothing reads as a fetch failure.
+ * P1-1: this used to drop every deletion-only hunk unconditionally, on the
+ * claim that a removal has nothing to review. Deleting an authorization check,
+ * a rollback, a resource release, an exported symbol or the only test for a
+ * branch is a behaviour change, and it was being removed from the prompt before
+ * the model ever saw it. `classifyDeletionHunk` decides; unmatched removals are
+ * still stripped, which keeps the token saving on the refactors and file moves
+ * this guard was written for. Pass `keepSignificant: false` for the old
+ * unconditional behaviour.
+ *
+ * A patch whose every hunk is deletion-only AND insignificant returns '' — the
+ * caller should then render the file as name-only (see `renderOmittedFiles`),
+ * not as an empty diff, since "here is the diff:" followed by nothing reads as
+ * a fetch failure.
  *
  * @param {string} patch
- * @returns {{patch:string, removedHunks:number, keptHunks:number}}
+ * @param {{keepSignificant?: boolean}} [options]
+ * @returns {{patch:string, removedHunks:number, keptHunks:number,
+ *            keptDeletionHunks:number, deletionSignals:Array}}
  */
-export function stripDeletionOnlyHunks(patch) {
+export function stripDeletionOnlyHunks(patch, options = {}) {
+    const keepSignificant = options.keepSignificant !== false;
     if (!patch || typeof patch !== 'string') {
-        return { patch: patch || '', removedHunks: 0, keptHunks: 0 };
+        return {
+            patch: patch || '', removedHunks: 0, keptHunks: 0,
+            keptDeletionHunks: 0, deletionSignals: [],
+        };
     }
 
     const lines = patch.split('\n');
     const out = [];
     let removedHunks = 0;
     let keptHunks = 0;
+    let keptDeletionHunks = 0;
+    const deletionSignals = [];
+    const removedHunkHeaders = [];
 
     // Buffer each hunk (header + body) and decide when the next header arrives.
     let current = null;
@@ -85,8 +105,22 @@ export function stripDeletionOnlyHunks(patch) {
         if (current.hasAdded) {
             out.push(...current.lines);
             keptHunks++;
+            current = null;
+            return;
+        }
+        const verdict = keepSignificant
+            ? classifyDeletionHunk(current.lines)
+            : { significant: false, signals: [] };
+        if (verdict.significant) {
+            out.push(...current.lines);
+            keptHunks++;
+            keptDeletionHunks++;
+            deletionSignals.push({ header: current.lines[0], signals: verdict.signals });
         } else {
             removedHunks++;
+            // Named, not just counted: coverage has to be able to say WHICH
+            // hunk was left out, or "no findings here" is unfalsifiable (P1-5).
+            removedHunkHeaders.push(current.lines[0]);
         }
         current = null;
     };
@@ -108,9 +142,17 @@ export function stripDeletionOnlyHunks(patch) {
     flush();
 
     // Nothing survived: report the empty patch rather than a header-only diff.
-    if (keptHunks === 0) return { patch: '', removedHunks, keptHunks };
+    if (keptHunks === 0) {
+        return {
+            patch: '', removedHunks, keptHunks, keptDeletionHunks,
+            deletionSignals, removedHunkHeaders,
+        };
+    }
 
-    return { patch: out.join('\n'), removedHunks, keptHunks };
+    return {
+        patch: out.join('\n'), removedHunks, keptHunks, keptDeletionHunks,
+        deletionSignals, removedHunkHeaders,
+    };
 }
 
 /**
@@ -152,7 +194,14 @@ export function fitFilesToBudget({
     const omitted = [];
     const stats = {
         filesIn: 0, filesOut: 0, diffTokens: 0,
-        deletionOnlyHunksRemoved: 0, budgetTokens: 0, stoppedEarly: false,
+        deletionOnlyHunksRemoved: 0, deletionOnlyHunksKept: 0, budgetTokens: 0,
+        stoppedEarly: false,
+        // Which behavioural signals kept a removal in the prompt, so the report
+        // can say "the authorization guard removed here was reviewed" rather
+        // than leaving it to be inferred from the absence of a finding.
+        deletionSignals: [],
+        /** Every hunk this budget declined to send, named. */
+        omittedHunks: [],
     };
 
     // No window figure means no budget to enforce. Include everything rather than
@@ -175,6 +224,17 @@ export function fitFilesToBudget({
     for (const file of files) {
         const stripped = stripDeletionOnlyHunks(file.patch || '');
         stats.deletionOnlyHunksRemoved += stripped.removedHunks;
+        stats.deletionOnlyHunksKept += stripped.keptDeletionHunks ?? 0;
+        for (const entry of stripped.deletionSignals ?? []) {
+            stats.deletionSignals.push({ file: file.filename ?? null, ...entry });
+        }
+        for (const header of stripped.removedHunkHeaders ?? []) {
+            stats.omittedHunks.push({
+                file: file.filename ?? null,
+                hunk: header,
+                reason: 'deletion-only hunk with no behavioural signal',
+            });
+        }
 
         if (!stripped.patch) {
             // Deletion-only or empty: name it, don't render an empty diff block.
@@ -189,6 +249,13 @@ export function fitFilesToBudget({
             omitted.push({ ...file, omittedBecause: 'budget' });
             stats.filesOut++;
             stats.stoppedEarly = true;
+            for (const hunk of stripped.patch.split('\n').filter(l => l.startsWith('@@'))) {
+                stats.omittedHunks.push({
+                    file: file.filename ?? null,
+                    hunk,
+                    reason: 'diff budget exhausted',
+                });
+            }
             continue;
         }
 
@@ -211,8 +278,8 @@ export function fitFilesToBudget({
  * @param {Array<{filename:string, status?:string, additions?:number, deletions?:number, omittedBecause?:string}>} omitted
  * @returns {string} '' when nothing was omitted
  */
-export function renderOmittedFiles(omitted = []) {
-    if (!omitted.length) return '';
+export function renderOmittedFiles(omitted = [], omittedHunks = []) {
+    if (!omitted.length && !omittedHunks.length) return '';
 
     const isDeleted = (f) => f.status === 'removed' || f.status === 'deleted';
     const deleted = omitted.filter(isDeleted);
@@ -239,6 +306,19 @@ export function renderOmittedFiles(omitted = []) {
     if (deleted.length) {
         out.push('', 'Deleted files:');
         for (const f of deleted) out.push(`- ${f.filename}`);
+    }
+
+    // P1-5: hunk-level coverage. A file can be shown while some of its hunks
+    // were dropped, and until now nothing said so — the model saw a partial
+    // diff labelled as the diff.
+    if (omittedHunks.length) {
+        out.push('', 'Hunks not shown (from files that ARE above):');
+        for (const h of omittedHunks.slice(0, 40)) {
+            out.push(`- ${h.file ?? '?'} ${h.hunk ?? ''} — ${h.reason}`);
+        }
+        if (omittedHunks.length > 40) {
+            out.push(`- …and ${omittedHunks.length - 40} more`);
+        }
     }
 
     return `${out.join('\n')}\n`;

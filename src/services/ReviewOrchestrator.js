@@ -29,6 +29,7 @@ import {
 import { liftEngineFindings } from './engineContract.js';
 import { normalizeFindingKeys } from './FindingsNormalizer.js';
 import { parsePatchHunks } from '../utils/patchLines.js';
+import { createCompleteness, mergeCompleteness } from '../utils/reviewCompleteness.js';
 
 /** Wall-clock cap per chunk. */
 export const DEFAULT_CHUNK_TIMEOUT_MS = 240_000;
@@ -205,6 +206,12 @@ export class ReviewOrchestrator {
         const deepFindings = [];
         const chunkNarratives = [];
         const failedChunks = [];
+        // P0-1: the engine's completeness contract, one per chunk, merged at the
+        // end. Previously `result.stats.parseFailures` died here — the handler
+        // read `result.stats.parseFailures` on the ADAPTED report, which never
+        // carried it, so on the default (orchestrated) path a truncated per-file
+        // response was invisible to the verdict.
+        const chunkCompleteness = [];
 
         for (const chunk of chunks) {
             onProgress?.({
@@ -288,6 +295,15 @@ export class ReviewOrchestrator {
                     chunkSummary: result.analysis ?? '',
                 });
 
+                chunkCompleteness.push(result.completeness ?? createCompleteness({
+                    // A stub/legacy engine that predates the contract still
+                    // reports what it can rather than claiming completeness.
+                    expectedUnits: chunk.files?.length ?? null,
+                    inspectedUnits: (chunk.files?.length ?? 0) - (result.failedFiles?.length ?? 0),
+                    parseFailures: Number(result.stats?.parseFailures) || 0,
+                    failedUnits: (result.failedFiles ?? []).map((f) => ({ unit: f, reason: 'unit-failed' })),
+                }));
+
                 if (result.failedFiles?.length) failedChunks.push({ chunk: chunk.index, failedFiles: result.failedFiles });
             } catch (err) {
                 // A credential failure is not a per-chunk problem to note and
@@ -304,6 +320,17 @@ export class ReviewOrchestrator {
                     throw markAuthError(err);
                 }
                 failedChunks.push({ chunk: chunk.index, error: err.message });
+                // A chunk that threw read none of its files. Every one of them
+                // is an expected unit that was never inspected.
+                chunkCompleteness.push(createCompleteness({
+                    expectedUnits: chunk.files?.length ?? 1,
+                    inspectedUnits: 0,
+                    failedUnits: (chunk.files ?? []).map((f) => ({
+                        unit: f.filename ?? f.path ?? f.new_path ?? `chunk-${chunk.index}`,
+                        reason: 'chunk-failed',
+                        error: err.message,
+                    })),
+                }));
                 onProgress?.({
                     step: 'deep_review_error',
                     chunkIndex: chunk.index,
@@ -351,7 +378,24 @@ export class ReviewOrchestrator {
               + `Absence of findings in those files is not evidence they are correct.\n`
             : '';
 
+        // P0-1: one contract for the whole run. The skip gate's partial budget is
+        // an omission like any other — files it declined to send were not read,
+        // and that is exactly the fact the verdict must respect.
+        const completeness = mergeCompleteness(
+            ...chunkCompleteness,
+            gate.partial?.skippedFileCount
+                ? createCompleteness({
+                    omissions: [{
+                        kind: 'partial-budget',
+                        detail: `${gate.partial.skippedFileCount} file(s) not read (${gate.partial.reason})`,
+                        count: gate.partial.skippedFileCount,
+                    }],
+                })
+                : null,
+        );
+
         const report = buildVerdictReport({
+            completeness,
             findings: merged,
             summary: {
                 deep: partialNote
@@ -372,6 +416,7 @@ export class ReviewOrchestrator {
                 },
                 cache: this.findingCache?.getStats?.() ?? null,
                 failedChunks,
+                completeness,
             },
         });
 

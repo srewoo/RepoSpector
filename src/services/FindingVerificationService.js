@@ -63,6 +63,11 @@ export class FindingVerificationService {
         }
 
         const diffsByFile = this._buildDiffsByFile(prData);
+        // Post-change file bodies, when the context build fetched them. Absent
+        // is normal — patch-only review is a supported degradation — and the
+        // citation check reports `unverified` rather than `fabricated` when it
+        // has no file to check against.
+        const sourceByFile = this._buildSourceByFile(prData, opts.fileContext);
 
         // ── Stage 0: deterministic gates, before any token is spent ──
         //
@@ -77,9 +82,14 @@ export class FindingVerificationService {
         const survivorsOfEvidence = [];
         for (const f of deduped) {
             const patch = diffsByFile[f.file] || diffsByFile[f.filePath] || '';
+            // P1-2: the full post-change file when the context build fetched it.
+            // A citation cites the FILE; checking it only against the diff called
+            // a correctly-quoted enclosing function fabricated, and let a quote
+            // that exists nowhere pass whenever the diff did not cover it.
+            const fileSource = sourceByFile[f.file] || sourceByFile[f.filePath] || null;
 
             // Premise: does the code the finding describes actually exist here?
-            const assessment = assessFinding(f, patch);
+            const assessment = assessFinding(f, patch, fileSource);
             if (assessment.verdict === EVIDENCE.REFUTED) {
                 evidenceDropped.push({ ...f, _drop: { reason: assessment.reason, by: 'evidence-gate' } });
                 continue;
@@ -317,6 +327,26 @@ export class FindingVerificationService {
      */
     // Delegates so the verifier and the sibling sweep can never disagree about
     // which patch belongs to which file — they gate and sweep the same bytes.
+    /**
+     * `filename -> full post-change content`, from whichever shape the caller has.
+     *
+     * `fileContext` is the Map `ReviewFileContextService` produces; `prData.files`
+     * may carry `fullContent` directly on the API-worker path. Neither is
+     * required, and a file missing from both simply has no source to check.
+     */
+    _buildSourceByFile(prData, fileContext) {
+        const out = {};
+        for (const f of prData?.files || []) {
+            if (f?.filename && typeof f.fullContent === 'string') out[f.filename] = f.fullContent;
+        }
+        if (fileContext instanceof Map) {
+            for (const [name, ctx] of fileContext) {
+                if (typeof ctx?.fullContent === 'string') out[name] = ctx.fullContent;
+            }
+        }
+        return out;
+    }
+
     _buildDiffsByFile(prData) {
         return buildDiffsByFile(prData);
     }

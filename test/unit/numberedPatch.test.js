@@ -98,7 +98,13 @@ describe('buildPerFileReviewPrompt', () => {
         expect(prompt).toMatch(/MUST be one printed in the `__new hunk__` gutter/);
     });
 
-    it('warns the model off reporting findings on removed code', () => {
-        expect(prompt).toMatch(/never report a finding against them/i);
+    // Deliberately flipped for P1-1. The blanket "never report a finding
+    // against them" is what made every deletion defect unreportable — removing
+    // an authorization check or a rollback is a behaviour change. The rule now
+    // carves out the removal ITSELF being the defect, and when a significant
+    // removal is present the prompt names it and invites a finding.
+    it('scopes removed code out of review EXCEPT when the removal is the defect', () => {
+        expect(prompt).not.toMatch(/never report a finding against them/i);
+        expect(prompt).toMatch(/unless the removal itself is the defect/i);
     });
 });

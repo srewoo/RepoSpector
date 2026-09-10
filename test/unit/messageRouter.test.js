@@ -309,3 +309,51 @@ describe('messageRouter — dispatch', () => {
         });
     });
 });
+
+describe('messageRouter — service worker keepalive', () => {
+    // Long handlers (a PR review against a local model runs for minutes) outlive
+    // the ~30s MV3 idle timer. Without a ping the worker is killed mid-handler and
+    // the caller sees "the message channel closed before a response was received".
+    function keepAliveSpy() {
+        const calls = { begin: 0, end: 0 };
+        return {
+            calls,
+            begin() {
+                calls.begin += 1;
+                return () => { calls.end += 1; };
+            },
+        };
+    }
+
+    it('holds the worker awake for the whole handler and releases it after', async () => {
+        const ka = keepAliveSpy();
+        let beginsSeenInsideHandler = 0;
+        registerHandler('SLOW', async (m, send) => {
+            beginsSeenInsideHandler = ka.calls.begin;
+            expect(ka.calls.end).toBe(0); // still held while we work
+            await Promise.resolve();
+            send({ success: true });
+        });
+
+        await dispatch({ type: 'SLOW' }, { id: 'test-extension-id' }, makeSendResponse(), { keepAlive: ka });
+
+        expect(beginsSeenInsideHandler).toBe(1);
+        expect(ka.calls.end).toBe(1);
+    });
+
+    it('releases the worker even when the handler throws', async () => {
+        const ka = keepAliveSpy();
+        registerHandler('BOOM', async () => { throw new Error('nope'); });
+
+        await dispatch({ type: 'BOOM' }, { id: 'test-extension-id' }, makeSendResponse(), { keepAlive: ka });
+
+        expect(ka.calls.begin).toBe(1);
+        expect(ka.calls.end).toBe(1);
+    });
+
+    it('does not hold the worker for messages that never reach a handler', async () => {
+        const ka = keepAliveSpy();
+        await dispatch({ type: 'NEVER_REGISTERED' }, { id: 'test-extension-id' }, makeSendResponse(), { keepAlive: ka });
+        expect(ka.calls.begin).toBe(0);
+    });
+});

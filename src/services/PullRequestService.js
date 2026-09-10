@@ -9,6 +9,27 @@ import { PRIORITY } from '../utils/callBudget.js';
 import { formatInlineComments } from '../utils/inlineCommentFormatter.js';
 import { buildCommentableLineMap, oldLineForNewLine } from '../utils/patchLines.js';
 import { githubApiBase, gitlabApiBase, rememberGitLabHost, detectPlatform, PLATFORM } from '../utils/gitHosts.js';
+import { createCompleteness } from '../utils/reviewCompleteness.js';
+
+/**
+ * A file-fetch failure that says whether the file is ABSENT or merely
+ * unreadable. P1-5.
+ *
+ * Every non-OK status used to become the same opaque `Failed to fetch file:
+ * N`, and `ReviewFileContextService._findTest` caught it and moved on. A 404
+ * (this test does not exist) and a 401, 429 or 503 (we could not look) then
+ * produced the identical conclusion — "no test file was located" — which the
+ * prompt renders as `Test file: NONE FOUND` and the reviewer reports as missing
+ * coverage. "We could not check" is not "it is not there".
+ */
+function fileFetchError(status, statusText) {
+    const err = new Error(`Failed to fetch file: ${status}${statusText ? ` ${statusText}` : ''}`);
+    err.status = status;
+    // Only 404 and 410 are statements about the file. Everything else is a
+    // statement about the request.
+    err.notFound = status === 404 || status === 410;
+    return err;
+}
 
 export class PullRequestService {
     constructor(options = {}) {
@@ -17,6 +38,52 @@ export class PullRequestService {
 
         this.githubBaseUrl = githubApiBase();
         this.gitlabBaseUrl = gitlabApiBase();
+
+        // P0-4: everything that went wrong while fetching the CURRENT change.
+        // Reset per PR/MR fetch, drained into the normalized result's
+        // `completeness`. Previously a 401/429/500 on the diff endpoint became
+        // `{ changes: [] }` — a fetch failure rendered as "this MR changes
+        // nothing", which reviews clean and approves.
+        this._fetchIncidents = [];
+    }
+
+    /** Start a fresh incident log for one PR/MR fetch. */
+    _beginFetch() {
+        this._fetchIncidents = [];
+    }
+
+    _recordIncident(entry) {
+        this._fetchIncidents.push(entry);
+        console.warn(`⚠️ Diff completeness: ${entry.kind} — ${entry.detail}`);
+    }
+
+    /**
+     * Turn this fetch's incidents plus the per-file evidence into the shared
+     * completeness contract (utils/reviewCompleteness.js).
+     */
+    _buildFetchCompleteness(files = []) {
+        const omissions = this._fetchIncidents.map((i) => ({
+            kind: i.kind,
+            detail: i.detail,
+            file: i.file ?? null,
+        }));
+
+        // A file the provider listed but sent no patch for is content this
+        // review does not have. Binary files are the legitimate case and are
+        // recorded as advisory: there is no text to review either way.
+        for (const f of files) {
+            if (f.patch) continue;
+            omissions.push({
+                kind: f.binary ? 'binary-file' : 'missing-patch',
+                detail: f.binary
+                    ? 'binary file — no reviewable text'
+                    : 'provider returned no patch for this file (too large or truncated)',
+                file: f.filename ?? null,
+                advisory: !!f.binary,
+            });
+        }
+
+        return createCompleteness({ omissions });
     }
 
     /**
@@ -46,7 +113,16 @@ export class PullRequestService {
 
         while (nextUrl && page < maxPages) {
             const response = await fetch(nextUrl, { headers });
-            if (!response.ok) break;
+            if (!response.ok) {
+                // P0-4: `break` alone returned the pages fetched so far as if
+                // they were all of them. Page 1 of 4 failing looks identical to
+                // a PR with one page of files.
+                this._recordIncident({
+                    kind: 'page-fetch-failed',
+                    detail: `${url} page ${page + 1}: HTTP ${response.status} ${response.statusText || ''}`.trim(),
+                });
+                break;
+            }
 
             const data = await response.json();
             if (Array.isArray(data)) {
@@ -58,6 +134,13 @@ export class PullRequestService {
 
             nextUrl = this.parseNextLink(response.headers.get('Link'));
             page++;
+        }
+
+        if (nextUrl && page >= maxPages) {
+            this._recordIncident({
+                kind: 'pagination-cap',
+                detail: `${url}: stopped after ${maxPages} page(s); more pages exist and were not fetched`,
+            });
         }
 
         return allResults;
@@ -74,7 +157,13 @@ export class PullRequestService {
 
         while (nextUrl && page < maxPages) {
             const response = await fetch(nextUrl, { headers });
-            if (!response.ok) break;
+            if (!response.ok) {
+                this._recordIncident({
+                    kind: 'page-fetch-failed',
+                    detail: `${url} page ${page + 1}: HTTP ${response.status} ${response.statusText || ''}`.trim(),
+                });
+                break;
+            }
 
             const data = await response.json();
             if (Array.isArray(data)) {
@@ -92,6 +181,13 @@ export class PullRequestService {
                 nextUrl = this.parseNextLink(response.headers.get('Link'));
             }
             page++;
+        }
+
+        if (nextUrl && page >= maxPages) {
+            this._recordIncident({
+                kind: 'pagination-cap',
+                detail: `${url}: stopped after ${maxPages} page(s); more pages exist and were not fetched`,
+            });
         }
 
         return allResults;
@@ -204,6 +300,7 @@ export class PullRequestService {
      * Fetch GitHub PR details
      */
     async fetchGitHubPR(prInfo) {
+        this._beginFetch();
         const { owner, repo, prNumber } = prInfo;
         const headers = {
             'Accept': 'application/vnd.github.v3+json'
@@ -283,6 +380,19 @@ export class PullRequestService {
             // Labels
             labels: (pr.labels || []).map(l => l.name),
 
+            // P0-4: what this fetch could not obtain. Governs the verdict via
+            // utils/reviewCompleteness.js — a diff we could not fully read may
+            // not produce an approval.
+            completeness: this._buildFetchCompleteness(files.map(f => ({
+                filename: f.filename,
+                patch: f.patch,
+                // GitHub sends no `patch` for binary files AND for files that
+                // exceed its diff limits, with no field distinguishing them.
+                // Guessing "binary" would let a truncated source file pass as
+                // nothing-to-review, so an unflagged missing patch stays a gap.
+                binary: false,
+            }))),
+
             // Files with changes
             files: files.map(f => ({
                 filename: f.filename,
@@ -338,6 +448,7 @@ export class PullRequestService {
      * Fetch GitLab MR details
      */
     async fetchGitLabMR(mrInfo) {
+        this._beginFetch();
         const { projectPath, owner, repo, mrNumber } = mrInfo;
         const projectId = encodeURIComponent(projectPath || `${owner}/${repo}`);
         const api = this.gitlabApiFor(mrInfo);
@@ -363,7 +474,12 @@ export class PullRequestService {
             // Changes returns all diffs in one response (no pagination needed)
             // Commits and notes may paginate on large MRs
             const [changesData, commitsData, notesData] = await Promise.all([
-                fetch(`${base}/changes`, { headers }).then(r => r.ok ? r.json() : { changes: [] }),
+                // P0-4: the diff endpoint is the one fetch whose failure CANNOT
+                // be tolerated. `r.ok ? r.json() : { changes: [] }` turned a 401,
+                // 429 or 500 into "this MR changes no files", which produced a
+                // clean, approving review of a change nobody could read. There is
+                // no useful review without the diff, so fail the fetch instead.
+                this._fetchGitLabChanges(`${base}/changes`, headers),
                 this.fetchAllPagesGitLab(`${base}/commits`, headers),
                 this.fetchAllPagesGitLab(`${base}/notes`, headers)
             ]);
@@ -390,6 +506,45 @@ export class PullRequestService {
             console.error('Error fetching GitLab MR:', error);
             throw error;
         }
+    }
+
+    /**
+     * Fetch an MR's diff, treating every failure as a failure.
+     *
+     * Also surfaces GitLab's own truncation signal: when a diff exceeds the
+     * instance limits the response carries `overflow: true` and a SHORTENED
+     * `changes` array. That array is indistinguishable from a complete one, so
+     * it is recorded as an omission rather than reviewed as the whole change.
+     *
+     * @throws {Error} when the diff cannot be retrieved
+     */
+    async _fetchGitLabChanges(url, headers) {
+        let response;
+        try {
+            response = await fetch(url, { headers });
+        } catch (err) {
+            throw new Error(`GitLab diff fetch failed: ${err.message}`);
+        }
+        if (!response.ok) {
+            throw new Error(
+                `GitLab diff fetch failed: ${response.status} ${response.statusText || ''}`.trim()
+            );
+        }
+
+        const data = await response.json();
+        if (data?.overflow === true) {
+            this._recordIncident({
+                kind: 'provider-truncated',
+                detail: 'GitLab reported diff overflow — the change list is truncated by the server',
+            });
+        }
+        if (!Array.isArray(data?.changes)) {
+            this._recordIncident({
+                kind: 'malformed-diff-response',
+                detail: 'GitLab diff response contained no `changes` array',
+            });
+        }
+        return data;
     }
 
     /**
@@ -484,6 +639,14 @@ export class PullRequestService {
 
             // Labels
             labels: mr.labels || [],
+
+            completeness: this._buildFetchCompleteness((changes.changes || []).map(f => ({
+                filename: f.new_path || f.old_path,
+                patch: f.diff || '',
+                // Only GitLab's explicit flag counts as "binary". Anything else
+                // missing a diff is a gap, not a file with nothing to review.
+                binary: !!f.diff_binary,
+            }))),
 
             // Files with changes
             files: (changes.changes || []).map(f => ({
@@ -1223,7 +1386,7 @@ export class PullRequestService {
             };
             const url = `${this.githubApiFor(prInfo)}/repos/${owner}/${repo}/contents/${encodeURIComponent(filePath)}${ref ? `?ref=${ref}` : ''}`;
             const response = await fetch(url, { headers });
-            if (!response.ok) throw new Error(`Failed to fetch file: ${response.status}`);
+            if (!response.ok) throw fileFetchError(response.status, response.statusText);
             const content = await response.text();
             return { content, filePath };
         } else if (prInfo.platform === 'gitlab') {
@@ -1236,7 +1399,7 @@ export class PullRequestService {
             // ReviewFileContextService already does this.
             const url = `${gitlabApiBase(prUrl)}/projects/${projectPath}/repository/files/${encodedPath}/raw${ref ? `?ref=${ref}` : '?ref=main'}`;
             const response = await fetch(url, { headers });
-            if (!response.ok) throw new Error(`Failed to fetch file: ${response.status}`);
+            if (!response.ok) throw fileFetchError(response.status, response.statusText);
             const content = await response.text();
             return { content, filePath };
         }

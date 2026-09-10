@@ -131,8 +131,15 @@ export class TokenManager {
         if (best !== null) return familyTable[best];
         if (catalogue) {
             const raw = String(modelIdentifier || '').toLowerCase();
-            const fromCatalogue = catalogue[raw] ?? catalogue[name] ?? catalogue[bare];
-            if (fromCatalogue != null) return fromCatalogue;
+            // Ollama ids carry a `:tag` the catalogue does not key on
+            // (`local:qwen2.5-coder` covers every tag of that model), and
+            // extractModelName reduces `qwen2.5-coder:32b` to `32b`, so try the
+            // id with its provider prefix and tag stripped as well.
+            const noProvider = raw.startsWith('local:') ? raw.slice('local:'.length) : raw;
+            const untagged = noProvider.split(':')[0];
+            for (const key of [raw, name, bare, noProvider, untagged, `local:${untagged}`]) {
+                if (catalogue[key] != null) return catalogue[key];
+            }
         }
         return table.default;
     }

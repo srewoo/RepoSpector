@@ -4,16 +4,31 @@
  * TESTED_BY edges) and ImpactAnalyzer (to exclude tests from blast radius).
  */
 
-const TEST_PATH_HINTS = ['__tests__', '__mocks__', '/test/', '/tests/', '/spec/', '/__test__/'];
+/**
+ * A test directory anywhere in the path, INCLUDING at the repository root.
+ *
+ * This was a substring match against `'/test/'`, `'/tests/'` and `'/spec/'`,
+ * which the leading slash made unreachable for a root-level directory: paths
+ * arrive repo-relative, so ky's whole suite (`test/main.ts`, `test/hooks.ts`)
+ * matched nothing and carried no `.test.` marker in the filename either. Every
+ * TESTED_BY edge for such a repository was therefore missing, and the graph
+ * reported `coverageRatio: 0` with every symbol "untested" — which in turn is
+ * what `untested-blast-radius` findings are computed from, so a repo laid out
+ * this way got a page of coverage findings that were all noise.
+ *
+ * `(^|\/)` is the whole fix: anchor at a path boundary rather than requiring a
+ * preceding slash.
+ */
+const TEST_DIR_RE = /(^|\/)(tests?|spec|specs|__tests__|__test__|__mocks__)\//i;
 
 /** Is this path a test/spec file? */
 export function isTestFile(filePath) {
     if (!filePath) return false;
-    const lower = filePath.toLowerCase();
-    if (TEST_PATH_HINTS.some(h => lower.includes(h))) return true;
-    return /(\.|_|-)(test|spec)\.[a-z0-9]+$/.test(lower) || // foo.test.js, foo_spec.rb
-        /(^|\/)test_[^/]+\.py$/.test(lower) ||               // test_foo.py
-        /_test\.(go|py|rb|java|kt)$/.test(lower);            // foo_test.go
+    const lower = String(filePath).toLowerCase();
+    if (TEST_DIR_RE.test(lower)) return true;
+    return /(\.|_|-)(test|spec|e2e)\.[a-z0-9]+$/.test(lower) || // foo.test.js, foo_spec.rb
+        /(^|\/)test_[^/]+\.py$/.test(lower) ||                  // test_foo.py
+        /_test\.(go|py|rb|java|kt)$/.test(lower);               // foo_test.go
 }
 
 /**

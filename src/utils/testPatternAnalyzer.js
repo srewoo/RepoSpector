@@ -5,6 +5,13 @@
  * to generate consistent and idiomatic test code.
  */
 
+// One shared definition of "is this a test file". The local copy this replaced
+// used an unanchored `/tests?\//i`, which matched any path containing the
+// letters `test/` — `src/greatest/x.js` read as a test file — and it drifted
+// from the canonical rules besides. Three copies of this predicate existed;
+// this is now the only one outside the MCP package's own re-export.
+import { isTestFile } from '../services/testFileUtils.js';
+
 /**
  * Testing pattern categories
  */
@@ -311,17 +318,6 @@ export async function learnPatternsFromRAG(ragService, repoId, targetFunction) {
         console.error('Failed to learn patterns from RAG:', error);
         return null;
     }
-}
-
-/**
- * Check if file is a test file
- */
-function isTestFile(filePath) {
-    if (!filePath) return false;
-    return /\.(test|spec|e2e)\.(js|ts|jsx|tsx)$/.test(filePath) ||
-           /tests?\//i.test(filePath) ||
-           /__tests__\//.test(filePath) ||
-           /test_\w+\.py$/.test(filePath);
 }
 
 /**

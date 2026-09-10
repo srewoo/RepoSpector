@@ -18,6 +18,7 @@
  */
 
 import { isDeterministicSource } from '../utils/findingSources.js';
+import { partitionCarriedFindings } from '../utils/reviewFingerprint.js';
 
 const STORAGE_KEY = 'repospectorIncrementalReviewState';
 const DEFAULT_MAX_ENTRIES = 100;
@@ -229,6 +230,25 @@ export class IncrementalReviewService {
         const changedSet = new Set(changedFiles);
         const unchangedSet = new Set(unchangedFiles);
 
+        // Carry forward only LLM findings on files whose diff is byte-identical.
+        //
+        // - A finding on a CHANGED file must be re-derived; it may already be fixed.
+        // - DETERMINISTIC findings (static, external, graph — see findingSources.js)
+        //   are never carried: they cost no tokens, so re-deriving them every run
+        //   is both cheaper to reason about and immune to going stale. Carrying
+        //   them would also double-count against the fresh pass, which always
+        //   runs over the full PR and would re-derive the same finding.
+        const eligible = (prevState.findings || []).filter(f => {
+            if (isDeterministicSource(f?.source)) return false;
+            const file = f?.file || f?.filePath;
+            return file && unchangedSet.has(file);
+        });
+        // …and then only those whose cited evidence is also unchanged.
+        const carried = partitionCarriedFindings(
+            eligible,
+            [...changedFiles, ...(options.changedOutsideDiff || [])],
+        );
+
         return {
             mode: REVIEW_MODE.INCREMENTAL,
             filesToReview: allFiles.filter(f => changedSet.has(f.filename)),
@@ -240,11 +260,13 @@ export class IncrementalReviewService {
             //   is both cheaper to reason about and immune to going stale. Carrying
             //   them would also double-count against the fresh pass, which always
             //   runs over the full PR and would re-derive the same finding.
-            carriedFindings: (prevState.findings || []).filter(f => {
-                if (isDeterministicSource(f?.source)) return false;
-                const file = f?.file || f?.filePath;
-                return file && unchangedSet.has(file);
-            }),
+            carriedFindings: carried.reusable,
+            // P1-4: a finding whose EVIDENCE moved, even though its own file did
+            // not. Reuse was decided by one rule — "is this finding's own file
+            // byte-identical?" — which cannot see that the callee it cited was
+            // fixed in this push. Those findings are re-derived rather than
+            // carried, and are reported so the drop is explainable.
+            invalidatedFindings: carried.invalidated,
             changedFiles,
             unchangedFiles,
             prevHeadSha: prevState.headSha,
@@ -262,7 +284,10 @@ export class IncrementalReviewService {
         }
         if (plan.mode === REVIEW_MODE.INCREMENTAL) {
             const short = (plan.prevHeadSha || '').slice(0, 7);
-            return `_Incremental re-review since \`${short}\`: re-read ${plan.changedFiles.length} changed file(s), carried ${plan.carriedFindings.length} finding(s) forward from ${plan.unchangedFiles.length} unchanged file(s)._`;
+            const revalidated = plan.invalidatedFindings?.length
+                ? ` ${plan.invalidatedFindings.length} prior finding(s) were re-derived because the code they cited changed.`
+                : '';
+            return `_Incremental re-review since \`${short}\`: re-read ${plan.changedFiles.length} changed file(s), carried ${plan.carriedFindings.length} finding(s) forward from ${plan.unchangedFiles.length} unchanged file(s)._${revalidated}`;
         }
         return '';
     }

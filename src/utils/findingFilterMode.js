@@ -33,6 +33,7 @@
  */
 
 import { parsePatchHunks } from './patchLines.js';
+import { classifyRemovedLines } from './deletionSignificance.js';
 
 export const FILTER_MODE = Object.freeze({
     /** Only lines this PR ADDED. The strictest, and the default. */
@@ -112,6 +113,51 @@ export function allowedLines(patch, mode = FILTER_MODE_DEFAULT) {
 }
 
 /**
+ * Old-side line ranges this patch REMOVED, and whether each removal is
+ * behaviourally significant (see utils/deletionSignificance.js).
+ *
+ * P1-1: `added` mode scopes findings to new-side lines, which is right for a
+ * finding about added code and fatal for a finding about deleted code — the
+ * removed lines have no new-side number at all, so a correct "you deleted the
+ * authorization check" was dropped as "outside the diff". This gives the filter
+ * the vocabulary to recognise one.
+ *
+ * @param {string} patch
+ * @returns {{ranges: Array<{from:number, to:number, significant:boolean}>}}
+ */
+export function removedRanges(patch) {
+    const ranges = [];
+    for (const hunk of parsePatchHunks(patch)) {
+        let run = null;
+        const flush = () => {
+            if (!run) return;
+            const { significant } = classifyRemovedLines(run.texts);
+            ranges.push({ from: run.from, to: run.to, significant });
+            run = null;
+        };
+        for (const l of hunk.lines) {
+            if ((l.type === 'deleted' || l.type === 'removed') && l.number.old != null) {
+                if (!run) run = { from: l.number.old, to: l.number.old, texts: [] };
+                run.to = l.number.old;
+                run.texts.push(l.content ?? l.text ?? '');
+            } else {
+                flush();
+            }
+        }
+        flush();
+    }
+    return { ranges };
+}
+
+/** Does this finding claim to be about code the change REMOVED? */
+function claimsRemoval(finding) {
+    return finding?.removal === true
+        || finding?.onDeletedLine === true
+        || String(finding?.side ?? '').toLowerCase() === 'old'
+        || finding?.oldLine != null;
+}
+
+/**
  * Apply the filter to a set of findings.
  *
  * Returns kept and dropped findings separately, with a reason on each drop.
@@ -137,6 +183,11 @@ export function applyFilterMode(findings = [], files = [], { mode = FILTER_MODE_
         droppedOutsideDiff: 0,
         droppedUnknownFile: 0,
         droppedNoLine: 0,
+        // A deletion finding kept as a file-level statement rather than dropped.
+        // The host cannot place an inline comment on a line that no longer
+        // exists, but that is a COMMENT PLACEMENT limit, not a reason to discard
+        // a proven defect (P1-1).
+        keptAsRemovalSummary: 0,
     };
 
     if (m === FILTER_MODE.NOFILTER) {
@@ -150,7 +201,8 @@ export function applyFilterMode(findings = [], files = [], { mode = FILTER_MODE_
     for (const f of files) {
         const name = f?.filename || f?.new_path || f?.path;
         if (!name) continue;
-        byFile.set(name, allowedLines(f.patch ?? f.diff ?? '', m));
+        const patch = f.patch ?? f.diff ?? '';
+        byFile.set(name, { ...allowedLines(patch, m), removed: removedRanges(patch).ranges });
     }
 
     const window = SNAP_WINDOW[m] ?? 0;
@@ -164,7 +216,7 @@ export function applyFilterMode(findings = [], files = [], { mode = FILTER_MODE_
             continue;
         }
 
-        const { lines, fileLevel } = byFile.get(path);
+        const { lines, fileLevel, removed } = byFile.get(path);
         // `Number(null)` is 0 and `Number('')` is 0, both finite — so coercing
         // first turns a line-less finding into a finding on line 0, which then
         // fails every scope check and is dropped as "outside the diff". Reject the
@@ -173,6 +225,28 @@ export function applyFilterMode(findings = [], files = [], { mode = FILTER_MODE_
         const line = (rawLine === null || rawLine === undefined || rawLine === '' || !Number.isFinite(Number(rawLine)))
             ? null
             : Number(rawLine);
+
+        // An explicit removal claim is handled before the line checks: it may
+        // arrive with `oldLine` and no `line` at all, and falling through to the
+        // file-level branch would keep it without the removal anchor the
+        // renderer needs to say WHERE the deleted code was.
+        if (claimsRemoval(finding)) {
+            const anchorLine = finding.oldLine ?? line;
+            const range = coversRemoval(removed, anchorLine);
+            kept.push({
+                ...finding,
+                line: null,
+                removal: true,
+                removedAnchor: {
+                    side: 'old',
+                    line: anchorLine ?? null,
+                    ...(range ? { from: range.from, to: range.to } : {}),
+                },
+            });
+            stats.kept++;
+            stats.keptAsRemovalSummary++;
+            continue;
+        }
 
         // A finding with no line is a statement about the file. Legitimate for a
         // changed file ("this file's new dependency is vulnerable"), and there is
@@ -191,6 +265,25 @@ export function applyFilterMode(findings = [], files = [], { mode = FILTER_MODE_
         if (fileLevel || lines.has(line)) {
             kept.push(finding);
             stats.kept++;
+            continue;
+        }
+
+        // A finding whose line falls inside a SIGNIFICANT removal, checked
+        // before the near-miss snap: snapping would relocate a claim about
+        // deleted code onto a surviving added line, which reads as an assertion
+        // about the wrong thing. Significance is required here because this is
+        // an inference — without it, any new-side finding whose line number
+        // happens to collide with a removed old line would be rescued.
+        const range = coversRemoval(removed, line);
+        if (range?.significant) {
+            kept.push({
+                ...finding,
+                line: null,
+                removal: true,
+                removedAnchor: { side: 'old', line, from: range.from, to: range.to },
+            });
+            stats.kept++;
+            stats.keptAsRemovalSummary++;
             continue;
         }
 
@@ -215,6 +308,12 @@ export function applyFilterMode(findings = [], files = [], { mode = FILTER_MODE_
     }
 
     return { kept, dropped, stats };
+}
+
+/** The removed range covering `line`, or null. */
+function coversRemoval(ranges, line) {
+    if (!Array.isArray(ranges) || line == null) return null;
+    return ranges.find((r) => line >= r.from && line <= r.to) ?? null;
 }
 
 /**
@@ -254,6 +353,12 @@ export function describeFilterMode(stats) {
     if (outside) parts.push(`${outside} finding(s) outside that scope were not reported`);
     if (stats.relocated) {
         parts.push(`${stats.relocated} finding(s) were moved to the nearest reportable line`);
+    }
+    if (stats.keptAsRemovalSummary) {
+        parts.push(
+            `${stats.keptAsRemovalSummary} finding(s) about REMOVED code are reported at file `
+            + 'level, because the host cannot place an inline comment on a deleted line'
+        );
     }
     return `${parts.join('; ')}.`;
 }

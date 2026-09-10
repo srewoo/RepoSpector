@@ -9,29 +9,14 @@
  */
 
 import { BLOCKING_SEVERITIES } from './findingsFlatten.js';
+import { classifyClaim, validationStatusOf } from './findingClaim.js';
 
-const NON_PROBLEM_CATEGORIES = new Set([
-    'style',
-    'lint',
-    'naming',
-    'formatting',
-    'documentation',
-    'docs',
-    'maintainability',
-    'conventions',
-    'coverage',
-    'testing',
-    'test',
-    'quality',
-    'best-practice',
-]);
-
-const NON_PROBLEM_TEXT = [
-    /\b(no tests?|missing tests?|test coverage|add (?:a |more )?tests?)\b/i,
-    /\b(naming|formatting|readability|code style|style guide|convention)\b/i,
-    /^(consider|prefer)\b|\b(could be cleaner|more maintainable|best practice)\b/i,
-    /\b(todo|fixme)\b/i,
-];
+// P1-2: the category and text blacklists that used to live here matched
+// anywhere in `title + description + message + suggestion`, so a real
+// authorization-bypass finding whose advice said "add a test for this bypass"
+// was erased as commentary. Classification now lives in utils/findingClaim.js
+// and judges the CLAIM, requiring both "the claim is a preference" and "no
+// defect is asserted" before rejecting.
 
 const LOW_SEVERITIES = new Set(['low', 'info', 'nit', 'nitpick']);
 const AUTHORITATIVE_TOOLS = new Set(['secrets', 'dependency', 'osv', 'eol']);
@@ -55,14 +40,6 @@ function normalizedScore(finding) {
     return Number.isFinite(n) ? n : null;
 }
 
-function textOf(finding) {
-    return [
-        finding?.title,
-        finding?.description,
-        finding?.message,
-        finding?.suggestion,
-    ].filter(Boolean).join(' ');
-}
 
 function hasLocation(finding) {
     const file = finding?.file || finding?.filePath;
@@ -135,10 +112,9 @@ export function filterGenuineProblems(findings = [], options = {}) {
             continue;
         }
 
-        const category = String(finding.category || finding.type || '').toLowerCase();
-        const text = textOf(finding);
-        if (NON_PROBLEM_CATEGORIES.has(category) || NON_PROBLEM_TEXT.some((re) => re.test(text))) {
-            reject(finding, 'review-commentary');
+        const claim = classifyClaim(finding);
+        if (claim.commentary) {
+            reject({ ...finding, _claimReason: claim.reason }, 'review-commentary');
             continue;
         }
 
@@ -199,7 +175,17 @@ export function filterGenuineProblems(findings = [], options = {}) {
     // Passing this gate IS the pipeline's mark that a finding may block. Before
     // this flag existed, `failLevel.findingBlocks` required it and nothing set
     // it, so an LLM critical could never produce REQUEST_CHANGES.
-    const marked = kept.map(f => (f.blocking === true ? f : { ...f, blocking: true }));
+    //
+    // P1-2: every kept finding also carries what actually backs it. Clearing a
+    // confidence threshold is not evidence — the model's 0.99 says nothing
+    // about reachability or consequence — so the label is derived from the
+    // citation, never from the score, and travels with the finding so no
+    // downstream reader has to infer "proven" from "kept".
+    const marked = kept.map((f) => ({
+        ...f,
+        blocking: true,
+        validationStatus: validationStatusOf(f),
+    }));
 
     return {
         findings: marked,
@@ -211,6 +197,13 @@ export function filterGenuineProblems(findings = [], options = {}) {
             minConfidence,
             minScore,
             byReason: reasons,
+            // How many of the accepted findings actually had a citation checked
+            // against source. A review reporting 10 problems of which 0 were
+            // validated is a different claim from one where 10 were.
+            byValidation: marked.reduce((acc, f) => {
+                acc[f.validationStatus] = (acc[f.validationStatus] || 0) + 1;
+                return acc;
+            }, {}),
         },
     };
 }

@@ -28,6 +28,8 @@ import {
     ReviewOrchestrator,
     buildVerdictReport,
     toCanonicalFinding,
+    createCompleteness,
+    mergeCompleteness,
     PHASE,
 } from '@repospector/review-core';
 
@@ -51,13 +53,29 @@ class BackendDeepEngine {
     }
 
     async execute(prData, context, _settings, _options, onProgress) {
+        const chunkFiles = prData?.files ?? [];
+        const unitName = (f) => f.filename ?? f.path ?? f.new_path ?? 'unknown';
+
         if (!this.llm?.apiKey) {
             onProgress?.({ phase: 'deep_skipped_no_llm' });
+            // P0-1: "skipped" is not "clean". With empty `failedFiles` the
+            // orchestrator saw a successful chunk with no findings, rolled up
+            // to APPROVE, and the worker persisted an approval for a change no
+            // model ever looked at.
             return {
                 analysis: '_Deep review skipped — no LLM credentials for this trigger._',
                 perFileFindings: [],
-                failedFiles: [],
+                failedFiles: chunkFiles.map(unitName),
                 tokenUsage: { input: 0, output: 0 },
+                completeness: createCompleteness({
+                    expectedUnits: chunkFiles.length,
+                    inspectedUnits: 0,
+                    failedUnits: chunkFiles.map((f) => ({
+                        unit: unitName(f),
+                        reason: 'no-llm-credentials',
+                    })),
+                    unavailableChecks: [{ name: 'deep-review', reason: 'no LLM credentials', required: true }],
+                }),
             };
         }
 
@@ -67,7 +85,7 @@ class BackendDeepEngine {
         const chunk = {
             index: chunkInfo.index,
             total: chunkInfo.total,
-            files: prData?.files ?? [],
+            files: chunkFiles,
         };
 
         const dismissedRules = this.adaptive
@@ -110,6 +128,13 @@ class BackendDeepEngine {
                 perFileFindings: [],
                 failedFiles: chunk.files.map((f) => ({ filename: f.filename, error: err.message })),
                 tokenUsage: { input: 0, output: 0 },
+                completeness: createCompleteness({
+                    expectedUnits: chunk.files.length,
+                    inspectedUnits: 0,
+                    failedUnits: chunk.files.map((f) => ({
+                        unit: unitName(f), reason: 'llm-call-failed', error: err.message,
+                    })),
+                }),
             };
         }
 
@@ -118,6 +143,24 @@ class BackendDeepEngine {
         this.costCents += resp.costCents;
 
         const parsed = parseLLMReviewJson(resp.content);
+        // P0-1: `_parseError` was computed and then ignored here. A truncated or
+        // non-JSON response returned `findings: []` and `failedFiles: []`, which
+        // is byte-for-byte what a genuinely clean chunk returns.
+        if (parsed._parseError) {
+            logger.warn({ chunk: chunk.index }, 'llm_response_unparseable');
+            return {
+                analysis: `_Chunk ${chunk.index} produced output that could not be parsed._`,
+                perFileFindings: [],
+                failedFiles: chunk.files.map((f) => ({ filename: f.filename, error: 'unparseable response' })),
+                tokenUsage: { input: resp.tokensIn, output: resp.tokensOut },
+                stats: { parseFailures: 1 },
+                completeness: createCompleteness({
+                    expectedUnits: chunk.files.length,
+                    inspectedUnits: 0,
+                    parseFailures: 1,
+                }),
+            };
+        }
         const perFileFindings = parsed.findings.map((f) => ({
             severity: f.severity,
             category: f.category,
@@ -134,6 +177,10 @@ class BackendDeepEngine {
             perFileFindings,
             failedFiles: [],
             tokenUsage: { input: resp.tokensIn, output: resp.tokensOut },
+            completeness: createCompleteness({
+                expectedUnits: chunk.files.length,
+                inspectedUnits: chunk.files.length,
+            }),
         };
     }
 }
@@ -225,7 +272,12 @@ async function processJob(job) {
         }
 
         // 6. Build final report
+        // P0-1: carry the run's completeness into the persisted report so the
+        // stored verdict obeys the same rule as the extension's.
+        const reportCompleteness = mergeCompleteness(report.meta?.completeness ?? null);
+
         const finalReport = buildVerdictReport({
+            completeness: reportCompleteness,
             findings: kept,
             summary: {
                 deep: report.summary.deep + (crossRepoFindings.length

@@ -127,6 +127,16 @@ export function findingBlocks(finding, level) {
     const rank = RANK[severity];
     if (rank === undefined || rank < bar) return false;
 
+    // P1-3: `deterministic` means "not model output", which is a claim about
+    // PROVENANCE, not about proof. It was doing double duty as "proven", so a
+    // scanner match on pre-existing code — or an unverified graph inference —
+    // blocked a merge on severity alone.
+    //
+    // An explicit `blocking: false` from `admitDeterministic` now wins: that is
+    // the admission stage saying it could not establish the finding in THIS
+    // review. Absent that field, deterministic still blocks, so a repo whose
+    // scanners have always gated merges keeps gating them.
+    if (finding?.blocking === false) return false;
     if (finding?.deterministic === true) return true;
     return finding?.blocking === true;
 }

@@ -40,6 +40,7 @@ import {
     buildToolResultMessages,
 } from '../utils/toolProtocol.js';
 import { numberLines } from '../utils/chunkLines.js';
+import { stitchChunksByLine } from '../utils/indexedSource.js';
 import { PRIORITY } from '../utils/callBudget.js';
 
 /** Tool definitions in the OpenAI shape; LLMService translates for Anthropic. */
@@ -51,14 +52,42 @@ export const EXPLORER_TOOLS = Object.freeze([
             description:
                 'Read a file from the repository index. Use when the diff calls, extends, or '
                 + 'depends on code you cannot see, and the answer to "does this change break it?" '
-                + 'requires the actual source. Returns indexed content, which may be partial for '
-                + 'very large files.',
+                + 'requires the actual source. Long files are returned a window at a time; when a '
+                + 'result says more follows, call again with `start_line` set to the next line it '
+                + 'names. Do not conclude anything from content you have not read.',
             parameters: {
                 type: 'object',
                 properties: {
                     path: {
                         type: 'string',
                         description: 'Repository-relative path, e.g. "src/api/upload.js".',
+                    },
+                    // P1-5: every result was cut at 6,000 characters with a bare
+                    // "… (truncated)" and no way to ask for the rest, so a
+                    // relevant function further down a large file was
+                    // unreachable — and the model had no way to know it was
+                    // reasoning about a fragment.
+                    start_line: {
+                        type: 'integer',
+                        description: 'First line to return (1-based). Use the line a previous '
+                            + 'result told you to continue from.',
+                    },
+                    // P1-5: which revision you want. The index is built at one
+                    // commit; a review is about another. Asking for the
+                    // reviewed head and being told the index cannot serve it is
+                    // a usable answer, whereas silently serving the indexed
+                    // commit as though it were the head is not.
+                    revision: {
+                        type: 'string',
+                        description: 'The revision you need this file at — usually the reviewed '
+                            + 'head. If the index was built at a different commit the result says '
+                            + 'so; treat what it returns as possibly-stale rather than as the '
+                            + 'code under review.',
+                    },
+                    end_line: {
+                        type: 'integer',
+                        description: 'Last line to return. Omit to read a default-sized window '
+                            + 'from `start_line`.',
                     },
                 },
                 required: ['path'],
@@ -108,6 +137,15 @@ export const EXPLORER_TOOLS = Object.freeze([
 /** Truncation applied to every tool result, so one call cannot flood the loop. */
 const MAX_RESULT_CHARS = 6000;
 
+/**
+ * Lines returned by one `read_file` window when the caller names no range.
+ *
+ * A window, not a cap: the result says which line to continue from, so the
+ * whole file is reachable in successive calls. The character limit above still
+ * applies as a hard backstop for pathological lines.
+ */
+const DEFAULT_WINDOW_LINES = 200;
+
 export class RepoExplorerService {
     /**
      * @param {Object} deps
@@ -115,10 +153,51 @@ export class RepoExplorerService {
      * @param {Object} deps.ragService - provides vectorStore + retrieveContext
      * @param {Object} deps.codeGraphPipeline
      */
-    constructor({ llmService, ragService, codeGraphPipeline } = {}) {
+    /**
+     * @param {Object} deps
+     * @param {string|null} [deps.indexedRevision] The commit the index was built
+     *   from, and `reviewedRevision` the one under review. Supplying both is
+     *   what makes a read revision-AWARE (P1-5): the explorer cannot fetch
+     *   arbitrary revisions — there is no worktree in a service worker — but it
+     *   can tell the model when what it is reading is not the code being
+     *   reviewed, which is the failure that mattered. Silently serving the
+     *   indexed commit as the head is how a reviewer reasons confidently about
+     *   a function that has since changed.
+     */
+    constructor({
+        llmService, ragService, codeGraphPipeline,
+        indexedRevision = null, reviewedRevision = null,
+    } = {}) {
         this.llmService = llmService;
         this.ragService = ragService;
         this.pipeline = codeGraphPipeline;
+        this.indexedRevision = indexedRevision;
+        this.reviewedRevision = reviewedRevision;
+    }
+
+    /**
+     * What this read actually describes, relative to what was asked for.
+     *
+     * Three outcomes, and only the first is silence: the revisions agree (or we
+     * cannot tell, which is stated), the index is at a known-different commit,
+     * or the caller named a revision the index cannot serve.
+     */
+    _revisionNote(requested) {
+        const want = requested ?? this.reviewedRevision ?? null;
+        const have = this.indexedRevision ?? null;
+
+        if (!have) {
+            return 'the commit this index was built from is not recorded, so this content may '
+                + 'not be the revision under review — do not treat it as the reviewed code '
+                + 'without confirming a quoted line appears in the diff';
+        }
+        if (!want) return null;
+        if (String(want) === String(have)) return null;
+
+        return `THIS IS NOT THE REVISION YOU ASKED FOR. The index is at ${String(have).slice(0, 12)}; `
+            + `you asked for ${String(want).slice(0, 12)}. This server cannot read arbitrary `
+            + 'revisions, so what follows is the indexed commit. Anything you conclude from it '
+            + 'about the code under review is unsupported unless the diff confirms it.';
     }
 
     /** Is exploration possible for this provider and this repo's index? */
@@ -143,7 +222,11 @@ export class RepoExplorerService {
         try {
             switch (call.name) {
                 case 'read_file':
-                    return await this._readFile(call.args?.path, repoId);
+                    return await this._readFile(call.args?.path, repoId, {
+                        startLine: call.args?.start_line ?? call.args?.startLine ?? null,
+                        endLine: call.args?.end_line ?? call.args?.endLine ?? null,
+                        revision: call.args?.revision ?? null,
+                    });
                 case 'find_callers':
                     return this._findCallers(call.args?.symbol);
                 case 'search_repo':
@@ -156,7 +239,7 @@ export class RepoExplorerService {
         }
     }
 
-    async _readFile(path, repoId) {
+    async _readFile(path, repoId, range = {}) {
         if (!path) return 'Error: read_file requires a "path".';
         const store = this.ragService?.vectorStore;
         if (!store?.getChunksForFiles) return 'Error: repository index unavailable.';
@@ -165,22 +248,52 @@ export class RepoExplorerService {
         const chunks = map?.get(path);
         if (!chunks?.length) {
             return `No indexed content for "${path}". The path may be wrong, or the file may be `
-                + 'excluded from indexing (binary, vendored, or over the size limit).';
+                + 'excluded from indexing (binary, vendored, or over the size limit). This is not '
+                + 'evidence that the file does not exist.';
         }
-        // Number each chunk from its own recorded start line. Chunks overlap,
-        // so a single stitched body would have drifting line numbers — but each
-        // chunk individually knows where it begins, so numbering them
-        // separately is both correct and more useful than one blob.
-        const numbered = chunks.map(c => (
-            Number.isInteger(c.startLine)
-                ? numberLines(c.content, c.startLine)
-                : c.content
-        ));
-        const anyLines = chunks.some(c => Number.isInteger(c.startLine));
-        const note = anyLines
-            ? 'line numbers are real; sections may overlap slightly'
-            : 'this index predates line tracking — do not cite line numbers from it';
-        return `File: ${path} (indexed content; ${note})\n\n${truncate(numbered.join('\n\n'))}`;
+
+        // P1-5: reassembled at real line numbers so a range means something.
+        // Chunks overlap, so the old "number each chunk from its own start line
+        // and join them" produced a result with repeated and out-of-order line
+        // numbers, which is unusable as a citation and impossible to page
+        // through.
+        const body = stitchChunksByLine(chunks);
+        if (body == null) {
+            // A pre-line-tracking index. Serve it, and say the line numbers are
+            // not real rather than letting them be cited.
+            const joined = chunks.map(c => c.content).join('\n\n');
+            return `File: ${path} (indexed content; this index predates line tracking — do not `
+                + `cite line numbers from it)\n\n${truncate(joined)}`;
+        }
+
+        const lines = body.split('\n');
+        const total = lines.length;
+        const from = clampLine(range.startLine, 1, total);
+        const requestedTo = range.endLine != null
+            ? clampLine(range.endLine, from, total)
+            : Math.min(total, from + DEFAULT_WINDOW_LINES - 1);
+
+        const window = lines.slice(from - 1, requestedTo);
+        const rendered = numberLines(window.join('\n'), from);
+        const capped = truncate(rendered);
+        // A character-capped window ends somewhere the caller cannot compute, so
+        // the continuation line has to be conservative: resume from the last
+        // line we can prove was delivered whole.
+        const deliveredTo = capped.length < rendered.length
+            ? from + Math.max(0, capped.split('\n').length - 2)
+            : requestedTo;
+
+        const revisionNote = this._revisionNote(range.revision);
+        const header = `File: ${path} (indexed content, lines ${from}-${deliveredTo} of ${total}; `
+            + `line numbers are real${this.indexedRevision ? `; indexed at ${String(this.indexedRevision).slice(0, 12)}` : ''})`
+            + (revisionNote ? `\n⚠️  ${revisionNote}` : '');
+        const more = deliveredTo < total
+            ? `\n\n… ${total - deliveredTo} more line(s) follow. To read them, call read_file again `
+                + `with path="${path}" and start_line=${deliveredTo + 1}. Do not conclude anything `
+                + 'about the unread part of this file.'
+            : '';
+
+        return `${header}\n\n${capped}${more}`;
     }
 
     _findCallers(symbol) {
@@ -476,6 +589,13 @@ export function parseExplorationFindings(text) {
         } catch { /* try the next shape */ }
     }
     return [];
+}
+
+/** A 1-based line number clamped into `[min, max]`, or `min` when unusable. */
+function clampLine(value, min, max) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return min;
+    return Math.min(Math.max(Math.floor(n), min), max);
 }
 
 function truncate(text, limit = MAX_RESULT_CHARS) {

@@ -27,6 +27,32 @@
 
 import { isTestFile, testCandidatesForProduction } from './testFileUtils.js';
 
+/**
+ * What we established about a file's test coverage.
+ *
+ * `ABSENT` and `UNKNOWN` were the same value — a bare `null` — so a lookup that
+ * failed on a rate limit was reported to the model as `Test file: NONE FOUND`
+ * and came back as a missing-coverage finding (P1-5).
+ */
+export const TEST_DISCOVERY = Object.freeze({
+    FOUND: 'found',
+    ABSENT: 'absent',
+    UNKNOWN: 'unknown',
+});
+
+/**
+ * UTF-8 byte length.
+ *
+ * The byte budget was enforced against `String.length`, which counts UTF-16
+ * code units: a file of CJK source or emoji-laden fixtures spends up to three
+ * times the budget it is charged for.
+ */
+export function byteLength(text) {
+    const s = String(text ?? '');
+    if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(s).length;
+    return Buffer.byteLength(s, 'utf8');
+}
+
 /** Files we never fetch: no reviewer insight, and often enormous. */
 const SKIP_EXT = /\.(lock|min\.js|min\.css|map|svg|png|jpe?g|gif|ico|woff2?|ttf|eot|pdf|zip|gz|jar|class|pyc|so|dylib|dll|exe|bin|wasm)$/i;
 const SKIP_PATH = /(^|\/)(node_modules|vendor|dist|build|\.git|coverage|__snapshots__)\//;
@@ -93,10 +119,20 @@ async function pooled(items, limit, worker) {
  */
 export function truncateFile(content, maxBytes) {
     const s = String(content ?? '');
-    if (s.length <= maxBytes) return { text: s, truncated: false };
+    if (byteLength(s) <= maxBytes) return { text: s, truncated: false };
 
-    const headBytes = Math.floor(maxBytes * 0.65);
-    const tailBytes = maxBytes - headBytes;
+    // Character slicing against a BYTE budget under-counts multibyte source:
+    // a CJK or emoji-heavy file kept ~3x the bytes it was charged for. Shrink
+    // the slice until the encoded result actually fits.
+    let budget = maxBytes;
+    for (let attempt = 0; attempt < 4; attempt++) {
+        const h = Math.floor(budget * 0.65);
+        if (byteLength(s.slice(0, h)) + byteLength(s.slice(-(budget - h))) <= maxBytes) break;
+        budget = Math.floor(budget * 0.6);
+    }
+
+    const headBytes = Math.floor(budget * 0.65);
+    const tailBytes = budget - headBytes;
 
     const head = s.slice(0, headBytes);
     const tail = s.slice(-tailBytes);
@@ -138,7 +174,12 @@ export class ReviewFileContextService {
         const byFile = new Map();
         const stats = {
             requested: 0, fetched: 0, failed: 0, truncated: 0,
-            testsFound: 0, testsMissing: 0, bytes: 0, skipped: 0,
+            testsFound: 0, testsMissing: 0, testsUnknown: 0, bytes: 0, skipped: 0,
+            budgetExhausted: 0,
+            // Every piece of context this build did NOT deliver, named. A
+            // reviewer cannot tell a file that was clean from one that was
+            // never read unless the omissions are listed (P1-5).
+            omitted: [],
         };
 
         if (!this.prService?.fetchFullFileContent) return { byFile, stats };
@@ -167,10 +208,29 @@ export class ReviewFileContextService {
 
         stats.requested = ordered.length;
 
-        let totalBytes = 0;
+        // P1-5: the budget is RESERVED before the fetch and reconciled after.
+        //
+        // `if (totalBytes >= max) return null` ran before an await, and
+        // `totalBytes += ...` after it, so with `concurrency: 4` every in-flight
+        // fetch saw the same pre-fetch total: four files could each pass the
+        // check on the last of the budget and then all be added. The overshoot
+        // scaled with concurrency, which is exactly the knob a user raises to
+        // make reviews faster.
+        let reservedBytes = 0;
+        const reserve = (n) => {
+            if (reservedBytes + n > opts.maxTotalBytes) return false;
+            reservedBytes += n;
+            return true;
+        };
+        const settle = (reserved, actual) => { reservedBytes += actual - reserved; };
 
         await pooled(ordered, opts.concurrency, async (file) => {
-            if (totalBytes >= opts.maxTotalBytes) return null;
+            // Reserve the worst case up front; give back what was not used.
+            if (!reserve(opts.maxBytesPerFile)) {
+                stats.budgetExhausted++;
+                stats.omitted.push({ file: file.filename, reason: 'context byte budget exhausted' });
+                return null;
+            }
 
             const entry = {
                 fullContent: null,
@@ -180,33 +240,58 @@ export class ReviewFileContextService {
                 testFileMissing: false,
             };
 
+            let usedBytes = 0;
             try {
                 const res = await this.prService.fetchFullFileContent(prUrl, file.filename, ref);
                 const { text, truncated } = truncateFile(res?.content ?? '', opts.maxBytesPerFile);
                 entry.fullContent = text;
                 entry.truncated = truncated;
-                totalBytes += text.length;
+                usedBytes = byteLength(text);
                 stats.fetched++;
-                stats.bytes += text.length;
-                if (truncated) stats.truncated++;
+                stats.bytes += usedBytes;
+                if (truncated) {
+                    stats.truncated++;
+                    stats.omitted.push({
+                        file: file.filename,
+                        reason: `file truncated to ${opts.maxBytesPerFile} bytes`,
+                    });
+                }
             } catch (e) {
                 stats.failed++;
+                stats.omitted.push({ file: file.filename, reason: `fetch failed: ${e.message}` });
                 // Soft: the prompt falls back to the patch for this file.
                 console.warn(`[FileContext] ${file.filename}: ${e.message}`);
             }
+            settle(opts.maxBytesPerFile, usedBytes);
 
             // Test lookup. Skipped for files that ARE tests — a test's test is not
             // a thing — and for files we could not read at all.
             if (opts.fetchTests && entry.fullContent && !isTestFile(file.filename)) {
                 const found = await this._findTest(prUrl, file.filename, ref, prData, opts);
-                if (found) {
-                    entry.testPath = found.path;
-                    entry.testContent = found.content;
-                    stats.testsFound++;
-                    totalBytes += found.content.length;
-                } else {
+                entry.testDiscovery = found.status;
+                entry.testDiscoveryReason = found.reason ?? null;
+                if (found.status === TEST_DISCOVERY.FOUND) {
+                    const testBytes = byteLength(found.content);
+                    // A test body is charged against the same budget as the
+                    // files. Before this it was added AFTER the check, so it was
+                    // never subject to one at all.
+                    if (reserve(testBytes)) {
+                        entry.testPath = found.path;
+                        entry.testContent = found.content;
+                        stats.testsFound++;
+                    } else {
+                        stats.budgetExhausted++;
+                        stats.omitted.push({
+                            file: found.path,
+                            reason: 'context byte budget exhausted before the test body fit',
+                        });
+                    }
+                } else if (found.status === TEST_DISCOVERY.ABSENT) {
+                    // The ONLY case that licenses a missing-coverage finding.
                     entry.testFileMissing = true;
                     stats.testsMissing++;
+                } else {
+                    stats.testsUnknown++;
                 }
             }
 
@@ -215,6 +300,7 @@ export class ReviewFileContextService {
             return entry;
         });
 
+        stats.reservedBytes = reservedBytes;
         return { byFile, stats };
     }
 
@@ -227,27 +313,68 @@ export class ReviewFileContextService {
      */
     async _findTest(prUrl, filename, ref, prData, opts) {
         const candidates = testCandidatesForProduction(filename);
-        if (!candidates.length) return null;
+        if (!candidates.length) {
+            // No candidate path could even be guessed for this language or
+            // layout. That is a limit of the guesser, not a fact about the repo.
+            return { status: TEST_DISCOVERY.UNKNOWN, reason: 'no test path convention is known for this file' };
+        }
 
         // Free hit: the test is in this PR.
         const changed = new Set((prData?.files || []).map(f => f.filename));
         const inPr = candidates.find(c => changed.has(c));
         const ordered = inPr ? [inPr, ...candidates.filter(c => c !== inPr)] : candidates;
+        const tried = ordered.slice(0, opts.maxTestCandidates);
 
-        for (const path of ordered.slice(0, opts.maxTestCandidates)) {
+        // A repository tree, when the caller has one, settles absence without
+        // spending a request — and settles it for EVERY candidate rather than
+        // the first few. "Not in the tree" is a real answer; "the fetch failed"
+        // never is.
+        const tree = opts.repoTree instanceof Set
+            ? opts.repoTree
+            : (Array.isArray(opts.repoTree) ? new Set(opts.repoTree) : null);
+        if (tree) {
+            const present = candidates.find(c => tree.has(c));
+            if (!present) {
+                return {
+                    status: TEST_DISCOVERY.ABSENT,
+                    reason: `none of ${candidates.length} candidate path(s) exist in the repository tree`,
+                    tried: candidates,
+                };
+            }
+            // Fetch the one we know is there, rather than guessing in order.
+            tried.unshift(present);
+        }
+
+        let unreadable = null;
+        for (const path of tried) {
             try {
                 const res = await this.prService.fetchFullFileContent(prUrl, path, ref);
                 const content = res?.content;
                 if (typeof content === 'string' && content.trim()) {
                     const { text } = truncateFile(content, Math.floor(opts.maxBytesPerFile / 2));
-                    return { path, content: text };
+                    return { status: TEST_DISCOVERY.FOUND, path, content: text };
                 }
-            } catch {
-                // 404 is the expected outcome for most candidates — keep going.
+            } catch (e) {
+                // P1-5: a 404 says this candidate is not there. A 401, 429 or
+                // 503 says we could not look, and must not be reported as
+                // absence — `Test file: NONE FOUND` is what makes the reviewer
+                // claim missing coverage.
+                if (!e?.notFound) unreadable = e;
             }
         }
 
-        return null;
+        if (unreadable) {
+            return {
+                status: TEST_DISCOVERY.UNKNOWN,
+                reason: `test lookup failed (${unreadable.message}) — this is not evidence that no test exists`,
+                tried,
+            };
+        }
+        return {
+            status: TEST_DISCOVERY.ABSENT,
+            reason: `${tried.length} candidate path(s) checked and not present`,
+            tried,
+        };
     }
 }
 

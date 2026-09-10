@@ -13,6 +13,8 @@
  * feature module instead of in `background/index.js`.
  */
 
+import { keepAlive as defaultKeepAlive } from './keepAlive.js';
+
 // Origins that may send messages from a content script.
 // Kept in sync with `manifest.json#content_scripts[0].matches`.
 const ALLOWED_CONTENT_ORIGIN_PATTERNS = [
@@ -121,7 +123,7 @@ function validateSender(message, sender, entry) {
  * @param {any} message
  * @param {chrome.runtime.MessageSender} sender
  * @param {Function} sendResponse
- * @param {{ errorHandler?: { logError: Function } }} [ctx]
+ * @param {{ errorHandler?: { logError: Function }, keepAlive?: { begin: Function } }} [ctx]
  */
 export async function dispatch(message, sender, sendResponse, ctx = {}) {
     if (!message || typeof message.type !== 'string') {
@@ -144,6 +146,12 @@ export async function dispatch(message, sender, sendResponse, ctx = {}) {
 
     const isFromPopup = !sender || !sender.tab || message.isFromPopup === true;
 
+    // Hold the service worker awake for the whole handler. Handlers routinely
+    // outlive the ~30s MV3 idle timer (a review against a local model runs for
+    // minutes), and a worker killed mid-handler surfaces to the caller as
+    // "the message channel closed before a response was received".
+    const releaseWorker = (ctx.keepAlive || defaultKeepAlive).begin();
+
     try {
         await entry.fn(message, sendResponse, sender, { isFromPopup });
     } catch (error) {
@@ -156,6 +164,8 @@ export async function dispatch(message, sender, sendResponse, ctx = {}) {
             success: false,
             error: (error && error.message) || 'Handler error',
         });
+    } finally {
+        releaseWorker();
     }
 }
 

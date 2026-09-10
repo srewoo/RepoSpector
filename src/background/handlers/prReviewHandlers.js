@@ -41,6 +41,24 @@ import { ReviewReuseContextService } from '../../services/ReviewReuseContextServ
 import { RepoExplorerService } from '../../services/RepoExplorerService.js';
 import { freshFindings } from '../../utils/findingDedup.js';
 import { assessGraphCoverage, graphCoverageWarning } from '../../utils/graphCoverage.js';
+import { readIndexedSources } from '../../utils/indexedSource.js';
+import { HypothesisValidationService } from '../../services/HypothesisValidationService.js';
+import { runFindingPipeline } from '../../services/findingPipeline.js';
+import { defendCandidates } from '../../services/candidateDefence.js';
+import { rejectInvalidFixes } from '../../utils/fixValidation.js';
+import {
+    buildReviewSession,
+    validateVerificationResult,
+    applyVerification,
+} from '../../services/reviewSession.js';
+import { resolveInstructionScopes } from '../../utils/instructionScope.js';
+import { admitDeterministic } from '../../utils/deterministicAdmission.js';
+import {
+    buildReviewFingerprint,
+    withEvidenceDeps,
+    hashParts,
+    PIPELINE_VERSION,
+} from '../../utils/reviewFingerprint.js';
 import { shouldExplore } from '../../utils/modelCapabilities.js';
 import { LLMService } from '../../services/LLMService.js';
 import { OffscreenLintService } from '../../services/OffscreenLintService.js';
@@ -61,6 +79,12 @@ import { resolveConfig, explainOverrides } from '../../utils/configPrecedence.js
 import { ExternalFindingsService } from '../../services/ExternalFindingsService.js';
 import { applyFilterMode, describeFilterMode } from '../../utils/findingFilterMode.js';
 import { decideFailure, describeFailLevel } from '../../utils/failLevel.js';
+import {
+    createCompleteness,
+    mergeCompleteness,
+    governVerdict,
+    describeCompleteness,
+} from '../../utils/reviewCompleteness.js';
 import { describeTiering, settingsForStage } from '../../utils/modelTiers.js';
 import { CONVENTION_WARM_DEADLINE_MS } from '../../utils/constants.js';
 import {
@@ -161,6 +185,119 @@ async function loadRepoInstructions(svc, prUrl, settings) {
         console.warn('Repo instructions (non-fatal):', e?.message);
         return '';
     }
+}
+
+/**
+ * The evidence provider handed to `HypothesisValidationService` (P1-6).
+ *
+ * Resolves each named evidence request against the local index and the code
+ * graph — the same sources the explorer reads, but pulled deterministically by
+ * the claim rather than chosen by a model. Returns `null` when it cannot get
+ * the evidence, which the service records as MISSING; a provider that returned
+ * an empty string on failure would make every unretrievable claim look
+ * confirmed, which is the exact inversion this stage exists to prevent.
+ */
+function buildEvidenceProvider(svc, repoId, prData) {
+    const vectorStore = svc.ragService?.vectorStore ?? null;
+    const graph = svc.codeGraphPipeline?.graph ?? null;
+    const patchByFile = new Map(
+        (prData?.files || []).map(f => [f.filename, f.patch || ''])
+    );
+
+    return {
+        async fetch(request) {
+            const target = request?.target;
+            const file = request?.finding?.file ?? request?.finding?.filePath ?? null;
+
+            if (request?.kind === 'callers') {
+                if (!graph) return null;
+                const { listCallers } = await import('../../utils/graphQueries.js');
+                const symbol = typeof target === 'string' ? target : null;
+                if (!symbol) return null;
+                const callers = listCallers(graph, symbol, { limit: 10 });
+                if (!callers.length) return null;
+                return {
+                    text: callers.map(c => `${c.filePath}:${c.line ?? '?'}`).join('\n'),
+                    location: { kind: 'graph', symbol },
+                };
+            }
+
+            const path = typeof target === 'string' && target.includes('/') ? target : file;
+            if (!path) return null;
+
+            // The patch is free and already in hand; the indexed file costs a
+            // store read. Prefer the file, fall back to the patch.
+            const sources = vectorStore
+                ? await readIndexedSources(vectorStore, repoId, [path])
+                : new Map();
+            const text = sources.get(path) || patchByFile.get(path) || '';
+            if (!text) return null;
+            return { text, location: { kind: 'file', path } };
+        },
+    };
+}
+
+/**
+ * Resolve nested instruction files for the paths this change touches (P2-1).
+ *
+ * Soft in every direction: an unreachable file, an unparsed tree or a service
+ * that is not wired all yield `null`, and the review proceeds on the root
+ * instructions exactly as before.
+ */
+async function resolveScopedInstructions(svc, prUrl, settings, prData) {
+    try {
+        if (!svc.repoInstructionsService?.getScopedInstructions) return null;
+        const ref = parseRepoRef(prUrl);
+        if (!ref) return null;
+        const token = ref.platform === 'gitlab' ? settings.gitlabToken : settings.githubToken;
+        const apiBase = ref.platform === 'github' ? githubApiBase(prUrl) : gitlabApiBase(prUrl);
+        const changed = (prData?.files || []).map(f => f.filename).filter(Boolean);
+
+        const { files } = await svc.repoInstructionsService.getScopedInstructions({
+            platform: ref.platform,
+            owner: ref.owner,
+            repo: ref.repo,
+            projectPath: ref.projectPath,
+            apiBase,
+            token,
+        }, changed);
+
+        if (!files.length) return null;
+        return resolveInstructionScopes(changed, files, { ref: 'default branch' });
+    } catch (e) {
+        console.warn('Scoped repo instructions (non-fatal):', e?.message);
+        return null;
+    }
+}
+
+/**
+ * A stable identity for the scanner reports this review ingested (P1-4).
+ *
+ * Name and read-status per source, plus the tools and the finding count. A
+ * re-run of the same job that produces a different number of annotations is a
+ * different input and must invalidate; a source that failed to read is
+ * distinguished from one that read and found nothing, because those are
+ * different reviews.
+ */
+function scannerFingerprint(externalResult) {
+    if (!externalResult) return null;
+    const sources = (externalResult.sources || [])
+        .map(s => `${s.name ?? 'unnamed'}:${s.ok ? 'ok' : 'failed'}`)
+        .sort();
+    return [
+        ...sources,
+        `tools=${(externalResult.stats?.tools || []).slice().sort().join('+')}`,
+        `findings=${externalResult.findings?.length ?? 0}`,
+    ];
+}
+
+/**
+ * The completeness contract to travel with an exported session (P0-1 + P1-8).
+ * A verifier that does not know half the diff went unread cannot judge what
+ * "no other problems" would mean.
+ */
+function reviewCompletenessForSession(result, prData) {
+    return mergeCompleteness(result?.completeness ?? null, prData?.completeness ?? null);
 }
 
 /**
@@ -340,6 +477,12 @@ function adaptOrchestratorReport(report) {
         reviewUnits: report.meta?.chunkSummary?.totalChunks ?? 1,
         processingTime: report.meta?.durationMs ?? 0,
         isMultiPass: true,
+        // P0-1: the adapter used to drop every completeness signal the
+        // orchestrator collected, so the handler's `result.stats.parseFailures`
+        // read `undefined` on the DEFAULT path. Both shapes are carried now:
+        // `stats` for the legacy readers, `completeness` for the contract.
+        completeness: report.meta?.completeness ?? null,
+        stats: { parseFailures: report.meta?.completeness?.parseFailures ?? 0 },
         verdict: report.verdict,
         // Carried so the response verdict can tell "nothing was wrong" apart from
         // "nothing was reviewed" without reaching into `_orchestrated`.
@@ -357,6 +500,9 @@ export function createPrReviewHandlers(svc) {
     // when it opens — instead of re-running. `reviewStatus` tracks running/done/error.
     const reviewResultCache = new Map();
     const reviewStatus = new Map();
+    // P1-8: exported verification sessions, keyed by PR URL. Bounded like the
+    // result cache — a session is only useful while its head is current.
+    const reviewSessions = new Map();
 
     // Per-PR revision state for incremental re-review. Supplied by BackgroundService
     // when available; the local fallback keeps tests and older callers working.
@@ -1119,17 +1265,102 @@ export function createPrReviewHandlers(svc) {
 
             const repoId = canonicalRepoId(prUrl, prData);
 
+            // #16b — honour model pin from .repospector.yaml in multi-pass path
+            const customConfig = await loadRepoConfig(svc, prUrl, settings);
+
+            // Review-quality toggles (default ON), overridable via .repospector.yaml
+            // `settings` block or the extension's reviewSettings. Everything below
+            // runs on the user's own BYOK model — nothing leaves the machine.
+            // Layered resolution, not a spread: defaults → user Settings → org
+            // policy → .repospector.yaml → this call. The chain, what an org may
+            // pin, and why a repo config can never supply a credential are all
+            // documented in utils/configPrecedence.js. `rqCfg` keeps its name and
+            // shape so every existing `rqCfg.x !== false` test still reads the
+            // same value it did before.
+            const configResolution = resolveConfig({
+                user: reviewSettings || {},
+                org: settings.orgPolicy || null,
+                repo: customConfig?.settings || {},
+                call: options.settings || null,
+            });
+            const rqCfg = configResolution.config;
+            if (configResolution.rejected.length) {
+                for (const line of explainOverrides(configResolution)) console.warn(`⚙️  ${line}`);
+            }
+
             // ── Review cache ─────────────────────────────────────────────────
             // A fresh hit (same head SHA) returns the previous review outright —
             // re-opening the panel on an unchanged PR should not cost the user
             // another run on their own key. A stale hit is kept as priming
             // context so consecutive reviews of a moving PR stay coherent
             // instead of re-rolling the dice each push.
+            // Fetched before the cache decision rather than alongside the other
+            // context below, because an edited `AGENTS.md`/`CLAUDE.md` changes
+            // what a review says and must therefore invalidate a stored one.
+            // `RepoInstructionsService` caches per repo with its own TTL, so the
+            // later reuse of this value costs nothing.
+            const repoInstructions = await loadRepoInstructions(svc, prUrl, settings);
+            // P2-1: which instruction files govern which changed paths, with the
+            // revision they were read at. A rule for `services/billing` must not
+            // fire on `apps/web`, and a rule with no provenance is
+            // indistinguishable from one this pull request supplied.
+            const instructionScopes = await resolveScopedInstructions(svc, prUrl, settings, prData);
+            if (instructionScopes?.warning) {
+                console.warn(`📜 ${instructionScopes.warning}`);
+            }
+            const repoInstructionsFingerprint = repoInstructions
+                ? hashParts([repoInstructions])
+                : null;
+
+            // ── Ingested scanner reports ─────────────────────────────────────
+            //
+            // Fetched BEFORE the cache decision, because a CodeQL run that
+            // landed since the last review changes what this review says — and
+            // P1-4 requires "relevant scanner inputs" to be part of what the
+            // cache key proves. Leaving it downstream meant the field existed
+            // and was wired to nothing: a new scanner report was served the
+            // previous answer for the whole TTL. Costs one host call on a cache
+            // hit, which is the price of being able to prove freshness at all.
+            let externalResult = null;
+            if (rqCfg.externalFindings !== false) {
+                try {
+                    externalResult = await new ExternalFindingsService({
+                        pullRequestService: svc.pullRequestService,
+                    }).collect({
+                        prUrl,
+                        prData,
+                        config: customConfig,
+                        reports: options.externalReports || [],
+                        options: { checkAnnotations: rqCfg.checkAnnotations !== false },
+                    });
+                } catch (e) {
+                    console.warn('External findings (non-fatal):', e?.message);
+                }
+            }
+
             const reviewCache = new ReviewCacheService();
+            // P1-4: everything this review's output depends on, not just the head
+            // SHA. A rebase onto a new base, a different model, a lowered
+            // `minScore`, a new `failLevel`, an edited instruction file or a
+            // rebuilt index all change the answer, and all of them used to be
+            // invisible to the freshness check.
+            const reviewFingerprint = buildReviewFingerprint({
+                baseSha: prData.baseSha ?? prData.diffRefs?.base_sha ?? null,
+                headSha: prData.headSha ?? null,
+                model: customConfig?.settings?.model || settings.model || null,
+                provider: settings.provider ?? null,
+                config: rqCfg,
+                instructions: repoInstructionsFingerprint,
+                contextSnapshot: svc.codeGraphPipeline?.indexVersion
+                    ?? svc.codeGraphPipeline?.snapshotId
+                    ?? null,
+                scanners: scannerFingerprint(externalResult),
+            });
+
             let primingContext = '';
             if (reviewSettings.reviewCache !== false && options.forceFullReview !== true) {
                 try {
-                    const hit = await reviewCache.lookup(prUrl, prData.headSha);
+                    const hit = await reviewCache.lookup(prUrl, prData.headSha, reviewFingerprint.hash);
                     if (hit.status === CACHE_STATUS.FRESH && options.bypassCache !== true) {
                         console.log(`💾 Cache hit (fresh, ${Math.round(hit.ageMs / 60000)}m old) — returning stored review`);
                         reviewStatus.set(prUrl, 'idle');
@@ -1142,7 +1373,10 @@ export function createPrReviewHandlers(svc) {
                     if (hit.status === CACHE_STATUS.STALE) {
                         primingContext = renderPrimingContext(hit.entry);
                         if (primingContext) {
-                            console.log(`💾 Cache hit (stale) — priming with ${hit.entry.payload?.findings?.length || 0} prior finding(s)`);
+                            console.log(
+                                `💾 Cache hit (stale: ${hit.staleReason || 'unknown'}) — priming with `
+                                + `${hit.entry.payload?.findings?.length || 0} prior finding(s)`
+                            );
                         }
                     }
                 } catch (e) {
@@ -1173,28 +1407,6 @@ export function createPrReviewHandlers(svc) {
                 }
             }
 
-            // #16b — honour model pin from .repospector.yaml in multi-pass path
-            const customConfig = await loadRepoConfig(svc, prUrl, settings);
-
-            // Review-quality toggles (default ON), overridable via .repospector.yaml
-            // `settings` block or the extension's reviewSettings. Everything below
-            // runs on the user's own BYOK model — nothing leaves the machine.
-            // Layered resolution, not a spread: defaults → user Settings → org
-            // policy → .repospector.yaml → this call. The chain, what an org may
-            // pin, and why a repo config can never supply a credential are all
-            // documented in utils/configPrecedence.js. `rqCfg` keeps its name and
-            // shape so every existing `rqCfg.x !== false` test still reads the
-            // same value it did before.
-            const configResolution = resolveConfig({
-                user: reviewSettings || {},
-                org: settings.orgPolicy || null,
-                repo: customConfig?.settings || {},
-                call: options.settings || null,
-            });
-            const rqCfg = configResolution.config;
-            if (configResolution.rejected.length) {
-                for (const line of explainOverrides(configResolution)) console.warn(`⚙️  ${line}`);
-            }
             const graphContextEnabled = rqCfg.graphContext !== false && options.graphContext !== false;
             // Verification ALWAYS runs — but "verification" now means the
             // deterministic evidence gates (cited line absent, construct only on
@@ -1461,7 +1673,7 @@ export function createPrReviewHandlers(svc) {
                 // Enables caller-source inlining; absent, the service emits summaries only.
                 vectorStore: svc.ragService?.vectorStore,
             });
-            const [ragContext, repoDocumentation, staticResult, graphContextObj, repoInstructions] = await Promise.all([
+            const [ragContext, repoDocumentation, staticResult, graphContextObj] = await Promise.all([
                 svc._fetchRAGContextForMultiPass(repoId, prData, options),
                 svc._fetchRepoDocForMultiPass(repoId, options),
                 svc.staticAnalysisService.analyzePullRequest(prData, {
@@ -1479,7 +1691,6 @@ export function createPrReviewHandlers(svc) {
                         return { available: false, byFile: {}, combined: '' };
                     })
                     : Promise.resolve({ available: false, byFile: {}, combined: '' }),
-                loadRepoInstructions(svc, prUrl, settings)
             ]);
 
             if (graphContextObj?.available) {
@@ -1536,35 +1747,20 @@ export function createPrReviewHandlers(svc) {
             // find what they missed), and appended to the final set after the
             // precision gate so a gate built for model output cannot suppress a
             // scanner's match. Same reasoning as the cross-repo findings below.
-            let externalResult = null;
-            if (rqCfg.externalFindings !== false) {
-                try {
-                    const extSvc = new ExternalFindingsService({
-                        pullRequestService: svc.pullRequestService,
-                    });
-                    externalResult = await extSvc.collect({
-                        prUrl,
-                        prData,
-                        config: customConfig,
-                        reports: options.externalReports || [],
-                        options: { checkAnnotations: rqCfg.checkAnnotations !== false },
-                    });
-
-                    if (externalResult.findings.length) {
-                        staticResult.findings.push(...externalResult.findings);
-                        staticResult.totalFindings = staticResult.findings.length;
-                        console.log(
-                            `🛰️  External findings: ${externalResult.findings.length} from `
-                            + `${externalResult.stats.tools.join(', ') || 'CI'} `
-                            + `(${externalResult.stats.ok}/${externalResult.stats.sources} source(s) read)`
-                        );
-                    }
-                    for (const src of externalResult.sources.filter(x => !x.ok)) {
-                        console.warn(`🛰️  External source "${src.name}" not read: ${src.error}`);
-                    }
-                } catch (e) {
-                    console.warn('External findings (non-fatal):', e?.message);
-                }
+            // The scanner findings themselves are merged into `staticResult`
+            // below, where the static analysis it joins actually exists. Only
+            // the FETCH moved earlier — see the hoist above the cache lookup.
+            if (externalResult?.findings?.length) {
+                staticResult.findings.push(...externalResult.findings);
+                staticResult.totalFindings = staticResult.findings.length;
+                console.log(
+                    `🛰️  External findings: ${externalResult.findings.length} from `
+                    + `${externalResult.stats.tools.join(', ') || 'CI'} `
+                    + `(${externalResult.stats.ok}/${externalResult.stats.sources} source(s) read)`
+                );
+            }
+            for (const src of externalResult?.sources?.filter(x => !x.ok) ?? []) {
+                console.warn(`🛰️  External source "${src.name}" not read: ${src.error}`);
             }
 
             // Cache deterministic scores
@@ -1689,13 +1885,22 @@ export function createPrReviewHandlers(svc) {
             // file and its test file (bounded, soft-failing) so the model can
             // judge fit, coupling and coverage rather than just syntax.
             let fileContext = null;
+            let fileContextStats = null;
             if (reviewSettings.fullFileContext !== false) {
                 try {
                     const ctxSvc = new ReviewFileContextService({
                         pullRequestService: svc.pullRequestService
                     });
                     const built = await ctxSvc.build(prUrl, prDataForEngine, {
-                        maxFiles: options.maxContextFiles || 12,
+                        // P1-5: one budget governs both full-file paths. This
+                        // read `maxContextFiles` falling back to a hard-coded 12
+                        // while the earlier fetch read `contextBudget.maxFullFiles`, so selecting
+                        // the `legacy` context profile changed one of them and
+                        // left the other at a hard-coded 12 — a profile that did
+                        // not do what it said.
+                        maxFiles: options.maxContextFiles
+                            || options.maxFullFiles
+                            || contextBudget.maxFullFiles,
                         fetchTests: reviewSettings.fetchTestFiles !== false,
                         // Incremental runs only need context for what moved.
                         onlyFiles: reviewPlan?.mode === REVIEW_MODE.INCREMENTAL
@@ -1703,10 +1908,12 @@ export function createPrReviewHandlers(svc) {
                             : null,
                     });
                     fileContext = built.byFile;
+                    fileContextStats = built.stats;
                     console.log(
                         `📄 File context: ${built.stats.fetched}/${built.stats.requested} files, ` +
-                        `${built.stats.testsFound} test file(s) found, ${built.stats.testsMissing} missing, ` +
-                        `${built.stats.failed} failed`
+                        `${built.stats.testsFound} test file(s) found, ${built.stats.testsMissing} absent, ` +
+                        `${built.stats.testsUnknown} undetermined, ${built.stats.failed} failed` +
+                        (built.stats.omitted.length ? `, ${built.stats.omitted.length} omission(s)` : '')
                     );
                 } catch (e) {
                     // Soft — the prompt falls back to patch-only, exactly as before.
@@ -1814,6 +2021,7 @@ export function createPrReviewHandlers(svc) {
                 conventionBlock,
                 standardsText,
                 repoInstructions,
+                instructionScopes,
                 fileContext,
                 declarationsByFile,
                 dynamicContext: { enabled: reviewSettings.enableDynamicContext !== false },
@@ -1992,6 +2200,15 @@ export function createPrReviewHandlers(svc) {
                         llmService: svc.llmService,
                         ragService: svc.ragService,
                         codeGraphPipeline: svc.codeGraphPipeline,
+                        // P1-5: which commit the index describes, and which one
+                        // is under review. The explorer cannot fetch arbitrary
+                        // revisions — there is no worktree here — but it can say
+                        // when what it served is not the reviewed code, which is
+                        // the failure that mattered.
+                        indexedRevision: svc.codeGraphPipeline?.indexedCommit
+                            ?? svc.codeGraphPipeline?.indexVersion
+                            ?? null,
+                        reviewedRevision: prData.headSha ?? null,
                     });
                     const xres = await explorer.findWithExploration(verifiedFindings, {
                         prData,
@@ -2018,34 +2235,50 @@ export function createPrReviewHandlers(svc) {
                 }
             }
 
-            // 2) Enforce citations — every finding ends up with a rule (inferred if absent)
-            const cited = enforceCitations(verifiedFindings);
-            verifiedFindings = cited.findings;
-            citationStats = cited.stats;
-
-            // 3) Adversarial verification — cut false positives (protects recall: fail-open)
-            if (verificationEnabled && verifiedFindings.length > 0) {
-                try {
-                    const verifier = new FindingVerificationService({ llmService: svc.llmService });
-                    const vres = await verifier.verify(verifiedFindings, {
-                        prData,
-                        settings: reviewSettings_,
+            // ── Candidate defence: citations → verification ──────────────────
+            //
+            // P2-2: the second runtime-neutral slice, in
+            // services/candidateDefence.js. Both stages fail OPEN — a citation
+            // enforcer that throws or a verifier that cannot reach its model
+            // returns the candidates unchanged rather than an empty list,
+            // because silence from a broken defence stage is indistinguishable
+            // from a clean review.
+            const defended = await defendCandidates(
+                verifiedFindings,
+                {
+                    enforceCitations,
+                    verifier: verificationEnabled
+                        ? new FindingVerificationService({ llmService: svc.llmService })
+                        : null,
+                    onStageError: (stage, e) => console.warn(
+                        `${stage} pass failed (candidates kept unchanged):`, e?.message,
+                    ),
+                },
+                {
+                    prData,
+                    // P1-2: the post-change file bodies, so a quoted citation is
+                    // checked against the FILE rather than only the diff.
+                    fileContext,
+                    settings: reviewSettings_,
+                    options: {
                         votes: verificationVotes,
                         llmRefutation: llmRefutationEnabled,
-                        onProgress
-                    });
-                    verifiedFindings = vres.findings;
-                    droppedFindings = vres.dropped;
-                    verificationStats = vres.stats;
-                    postUsage.input += vres.usage.input;
-                    postUsage.output += vres.usage.output;
-                    console.log(
-                        `✅ Verification (${llmRefutationEnabled ? 'gates + LLM refuter' : 'deterministic gates'}): ` +
-                        `kept ${vres.stats.kept}, dropped ${vres.stats.dropped} likely FPs`
-                    );
-                } catch (e) {
-                    console.warn('Verification pass failed (keeping all findings):', e?.message);
-                }
+                        onProgress,
+                    },
+                },
+            );
+
+            verifiedFindings = defended.findings;
+            droppedFindings = defended.dropped;
+            citationStats = defended.stats.citation;
+            verificationStats = defended.stats.verification;
+            postUsage.input += defended.usage.input;
+            postUsage.output += defended.usage.output;
+
+            if (verificationStats) {
+                console.log(
+                    `🕵️  Verification: kept ${verificationStats.kept}/${verificationStats.input}`,
+                );
             }
 
             // 3a-pre) Missing-test finder — deterministic, and covering a class
@@ -2080,7 +2313,31 @@ export function createPrReviewHandlers(svc) {
                 try {
                     const pipeline = svc.codeGraphPipeline;
                     const impact = pipeline.impactAnalyzer || new ImpactAnalyzer(pipeline.graph);
-                    const gsvc = new GraphImpactFindingsService({ graph: pipeline.graph, impactAnalyzer: impact });
+                    // P1-3: the signature rule may only assert that a caller
+                    // broke if it has READ that caller's call expression. The
+                    // index is async and the service is not, so the caller files
+                    // are collected first, fetched line-accurately, and handed
+                    // back as a synchronous reader. When this comes back empty
+                    // the rule degrades to a question instead of an assertion.
+                    let callerSources = new Map();
+                    try {
+                        const probe = new GraphImpactFindingsService({
+                            graph: pipeline.graph, impactAnalyzer: impact,
+                        });
+                        callerSources = await readIndexedSources(
+                            svc.ragService?.vectorStore,
+                            repoId,
+                            probe.collectCallerFiles(prData),
+                        );
+                    } catch (e) {
+                        console.warn('Caller source prefetch skipped (non-fatal):', e?.message);
+                    }
+
+                    const gsvc = new GraphImpactFindingsService({
+                        graph: pipeline.graph,
+                        impactAnalyzer: impact,
+                        readSource: (path) => callerSources.get(path) ?? null,
+                    });
                     const { findings: graphFindings, stats } = gsvc.build(prData);
                     const rules = {};
                     for (const f of graphFindings) rules[f.rule] = (rules[f.rule] || 0) + 1;
@@ -2130,11 +2387,36 @@ export function createPrReviewHandlers(svc) {
                         settings: reviewSettings_,
                         onProgress
                     });
-                    verifiedFindings = fres.findings;
-                    fixStats = fres.stats;
+                    // P1-6: a fix that cannot be applied is worse than none —
+                    // the reviewer has to work out which of the two versions is
+                    // real. Fixes whose `original` is not in the file, whose
+                    // replacement does not parse, or which change nothing are
+                    // removed. The FINDING survives: a defect does not stop
+                    // being real because the proposed correction was wrong.
+                    const sourceByFile = {};
+                    for (const f of prData.files || []) {
+                        if (f?.filename && typeof f.fullContent === 'string') {
+                            sourceByFile[f.filename] = f.fullContent;
+                        }
+                    }
+                    if (fileContext instanceof Map) {
+                        for (const [name, ctx] of fileContext) {
+                            if (typeof ctx?.fullContent === 'string') sourceByFile[name] = ctx.fullContent;
+                        }
+                    }
+                    const checked = rejectInvalidFixes(fres.findings, { sourceByFile });
+
+                    verifiedFindings = checked.findings;
+                    fixStats = { ...fres.stats, validation: checked.stats };
                     postUsage.input += fres.usage.input;
                     postUsage.output += fres.usage.output;
-                    console.log(`🔧 Fix recommendations: ${fres.stats.produced}/${fres.stats.requested}`);
+                    console.log(
+                        `🔧 Fix recommendations: ${fres.stats.produced}/${fres.stats.requested}`
+                        + (checked.stats.rejected
+                            ? ` (${checked.stats.rejected} could not be applied and were removed: `
+                                + `${Object.keys(checked.stats.byReason).join(', ')})`
+                            : ''),
+                    );
                 } catch (e) {
                     console.warn('Fix recommendation pass failed:', e?.message);
                 }
@@ -2213,109 +2495,117 @@ export function createPrReviewHandlers(svc) {
                 console.warn('Cross-repo impact (non-fatal):', e?.message);
             }
 
-            // Final precision gate. Candidate generation and specialist passes
-            // intentionally cast a wide net; only concrete, evidence-backed,
-            // high-confidence defects cross this boundary. This accepted array
-            // is the sole source for UI, verdict, metrics, cache, and posting.
-            const precisionResult = filterGenuineProblems(verifiedFindings, {
-                minConfidence: Math.max(0.8, Number(rqCfg.minConfidence ?? options.minConfidence ?? 0.8)),
-                minScore,
-            });
-            verifiedFindings = precisionResult.findings;
-            precisionStats = precisionResult.stats;
-            precisionDropped = precisionResult.dropped;
-            if (precisionStats.dropped) {
+            // ── Findings → what a reviewer will see ──────────────────────────
+            //
+            // P2-2: the precision gate, the three deterministic admissions,
+            // hypothesis validation and diff scoping now live in
+            // services/findingPipeline.js — the first runtime-neutral slice
+            // extracted behind the completeness seam. Every gate, scanner and
+            // validator arrives there as an injected adapter, so this handler
+            // supplies the browser's and the API worker can supply its own
+            // without either re-implementing the order or the stats.
+            //
+            // The extraction is incremental by design, and this slice was
+            // chosen because it has no browser in it: findings in, findings
+            // out, no chrome APIs, no fetch, no storage.
+            const pipelineResult = await runFindingPipeline(
+                verifiedFindings,
+                {
+                    precisionGate: (findings, opts) => filterGenuineProblems(findings, {
+                        minConfidence: Math.max(
+                            0.8,
+                            Number(opts.minConfidence ?? options.minConfidence ?? 0.8),
+                        ),
+                        minScore: opts.minScore,
+                    }),
+                    admit: admitDeterministic,
+                    scope: applyFilterMode,
+                    validator: rqCfg.hypothesisValidation === false
+                        ? null
+                        : new HypothesisValidationService({
+                            evidenceProvider: buildEvidenceProvider(svc, repoId, prData),
+                            // No runner in an extension. A host that supplies one
+                            // must declare it authorized AND isolated; anything
+                            // less is treated as no runner at all.
+                            runner: svc.executionRunner ?? null,
+                        }),
+                },
+                {
+                    external: externalResult?.findings ?? [],
+                    graph: graphFindingsPending,
+                    missingTests: missingTestFindingsPending,
+                    files: prData.files || [],
+                    revision: prData.headSha ?? null,
+                    baseRevision: prData.baseSha ?? prData.diffRefs?.base_sha ?? null,
+                    keyOf: findingKey,
+                    config: {
+                        minConfidence: rqCfg.minConfidence,
+                        minScore,
+                        filterMode: rqCfg.filterMode,
+                        validationLimits: rqCfg.validationLimits || undefined,
+                    },
+                },
+            );
+
+            verifiedFindings = pipelineResult.findings;
+            precisionDropped = pipelineResult.dropped;
+            precisionStats = pipelineResult.stats.precision;
+            const admissionStats = pipelineResult.stats.admission;
+            const validationStats = pipelineResult.stats.validation;
+            const filterModeStats = pipelineResult.stats.scope;
+            const filterModeDropped = pipelineResult.dropped.filter(f => f.filteredBecause);
+
+            if (precisionStats?.dropped) {
                 console.log(
                     `🎯 Precision gate: kept ${precisionStats.kept}/${precisionStats.input}; `
                     + `suppressed ${precisionStats.dropped} unproven or low-value candidate(s)`,
                 );
             }
-
-            // External scanner findings survive the precision gate unconditionally.
-            //
-            // That gate exists to demand evidence from findings a model asserted.
-            // A CodeQL match is not an assertion — it is a scanner's output, with
-            // a rule id and a link. Judging it by the model-output standard would
-            // suppress the most credible findings in the review, and re-adding
-            // them here (rather than exempting them inside the gate) keeps the
-            // gate's own logic about one kind of input.
-            if (externalResult?.findings?.length) {
-                const alreadyThere = new Set(verifiedFindings.map(f => `${f.filePath || f.file}:${f.line}:${f.ruleId}`));
-                const readd = externalResult.findings.filter(
-                    f => !alreadyThere.has(`${f.filePath}:${f.line}:${f.ruleId}`)
+            if (filterModeStats) console.log(`🎚️  ${describeFilterMode(filterModeStats)}`);
+            if (validationStats) {
+                console.log(
+                    `🔬 Hypothesis validation: ${validationStats.confirmed} confirmed, `
+                    + `${validationStats.refuted} refuted, ${validationStats.unresolved} unresolved`
+                    + `${validationStats.executionAvailable ? '' : ' (no runner — source only)'}`,
                 );
-                if (readd.length) {
-                    verifiedFindings = [...verifiedFindings, ...readd];
-                    console.log(`🛰️  Re-added ${readd.length} external finding(s) after the precision gate`);
-                }
             }
 
-            // Graph-impact findings survive the precision gate unconditionally,
-            // for the same reason external findings do.
+            // ── Host-agent verification session ──────────────────────────────
             //
-            // The gate demands evidence for a finding a MODEL asserted. Graph
-            // findings are facts read off the call graph, not model assertions:
-            // the escalation rule is an intentional open question
-            // (`needsHumanReview: true`, rejected by the gate at
-            // `open-question`), and the untested-blast-radius rule is
-            // deliberately low severity/coverage (rejected by the gate's
-            // low-severity and non-problem-category rules). Judging either by
-            // the model-output standard would suppress the two most checkable
-            // findings in the review — exactly backwards for output that is
-            // cheaper to verify than anything an LLM produces. Re-adding them
-            // here, rather than exempting them inside the gate, keeps the
-            // gate's own logic about one kind of input, matching the external
-            // re-add above.
-            if (graphFindingsPending.length) {
-                const alreadyThere = new Set(verifiedFindings.map(findingKey));
-                const readd = graphFindingsPending.filter(f => !alreadyThere.has(findingKey(f)));
-                if (readd.length) {
-                    verifiedFindings = [...verifiedFindings, ...readd];
-                    console.log(`🕸️  Re-added ${readd.length} graph finding(s) after the precision gate`);
+            // Built whenever the feature is on. In SHADOW mode (the default)
+            // nothing about posting changes: the session is exported and any
+            // verdicts that arrive are recorded for comparison, which is what
+            // makes the ablation in P1-7 possible before this layer is trusted
+            // with a posting decision.
+            //
+            // Candidates come from BEFORE the pipeline's suppression: the stage
+            // exists to rescue a real bug the pipeline under-investigated, and
+            // one already deleted for scoring 6 cannot be rescued (P1-8).
+            let reviewSession = null;
+            if (rqCfg.hostVerification === true || rqCfg.hostVerificationShadow !== false) {
+                try {
+                    reviewSession = buildReviewSession({
+                        reviewId: `${prUrl}@${prData.headSha ?? 'unknown'}`,
+                        repository: { url: prUrl, id: repoId },
+                        baseSha: prData.baseSha ?? prData.diffRefs?.base_sha ?? null,
+                        headSha: prData.headSha ?? null,
+                        candidates: pipelineResult.preSuppressionCandidates,
+                        withheld: pipelineResult.dropped,
+                        completeness: reviewCompletenessForSession(result, prData),
+                        pipelineVersion: PIPELINE_VERSION,
+                    });
+                    // Live mode is opt-in and separate from shadow: a session
+                    // that only records must never be able to withhold a finding
+                    // the pipeline would otherwise have posted.
+                    reviewSession.shadow = rqCfg.hostVerification !== true;
+                    // Retained so EXPORT_REVIEW_SESSION can hand it to a host
+                    // agent and IMPORT_REVIEW_VERIFICATION can bind results back
+                    // to it. Without this the session was built and discarded —
+                    // infrastructure nobody could reach.
+                    reviewSessions.set(prUrl, reviewSession);
+                } catch (e) {
+                    console.warn('Review session export skipped (non-fatal):', e?.message);
                 }
-            }
-
-            // Missing-test findings survive the precision gate unconditionally,
-            // for the same reason external and graph findings do.
-            //
-            // A missing-test finding is a deterministic statement about the
-            // diff's own text — it names an exported symbol the diff added and
-            // states no test in the diff mentions it — not a claim a model
-            // asserted. It is deliberately `severity: 'low'` because it is
-            // advisory (a nudge to add coverage) rather than a defect, but that
-            // is exactly the severity the gate always rejects
-            // (`non-problem-severity`), so every one of these would be dropped
-            // regardless of how sound it is. Re-adding it here, rather than
-            // exempting it inside the gate, keeps the gate's own logic about
-            // one kind of input — judging model output — matching the external
-            // and graph re-adds above.
-            if (missingTestFindingsPending.length) {
-                const alreadyThere = new Set(verifiedFindings.map(findingKey));
-                const readd = missingTestFindingsPending.filter(f => !alreadyThere.has(findingKey(f)));
-                if (readd.length) {
-                    verifiedFindings = [...verifiedFindings, ...readd];
-                    console.log(`🧪 Re-added ${readd.length} missing-test finding(s) after the precision gate`);
-                }
-            }
-
-            // ── Diff scope, stated ────────────────────────────────────────────
-            //
-            // One named policy for which lines a finding may be reported on,
-            // replacing the implicit union of assigned-hunk normalization,
-            // `commentableLines` and a ±5 snap. `added` is the default. A finding
-            // moved to a nearby line now says so — see utils/findingFilterMode.js.
-            let filterModeStats = null;
-            let filterModeDropped = [];
-            try {
-                const filtered = applyFilterMode(verifiedFindings, prData.files || [], {
-                    mode: rqCfg.filterMode,
-                });
-                verifiedFindings = filtered.kept;
-                filterModeStats = filtered.stats;
-                filterModeDropped = filtered.dropped;
-                console.log(`🎚️  ${describeFilterMode(filtered.stats)}`);
-            } catch (e) {
-                console.warn('Filter mode (non-fatal):', e?.message);
             }
 
             // ── Prior review history ──────────────────────────────────────────
@@ -2489,12 +2779,36 @@ export function createPrReviewHandlers(svc) {
             const blockingVerdict = failDecision.verdict;
             const blockingEvent = failDecision.reviewEvent;
             console.log(`🚧 ${describeFailLevel(failDecision)}`);
-            const multiPassVerdict = gateOutcome
+            const rawVerdict = gateOutcome
                 ? (gateOutcome.partialOnly ? (blockingVerdict ?? gateOutcome.verdict) : gateOutcome.verdict)
                 : (blockingVerdict ?? 'APPROVED');
-            const multiPassReviewEvent = gateOutcome
+            const rawReviewEvent = gateOutcome
                 ? (gateOutcome.partialOnly ? (blockingEvent ?? gateOutcome.reviewEvent) : gateOutcome.reviewEvent)
                 : (blockingEvent ?? 'APPROVE');
+
+            // P0-1: the completeness contract has the final say on approval.
+            // Everything above decides what the FINDINGS justify; this decides
+            // whether the run is entitled to make an affirmative claim at all.
+            // Sources merged here: the engine/orchestrator contract, and the
+            // host-diff fetch contract from PullRequestService (P0-4).
+            const reviewCompleteness = mergeCompleteness(
+                result?.completeness ?? null,
+                result?.stats?.parseFailures
+                    ? createCompleteness({ parseFailures: Number(result.stats.parseFailures) || 0 })
+                    : null,
+                prData?.completeness ?? null,
+            );
+            const governed = governVerdict(
+                { verdict: rawVerdict, reviewEvent: rawReviewEvent },
+                reviewCompleteness,
+            );
+            const multiPassVerdict = governed.verdict;
+            const multiPassReviewEvent = governed.reviewEvent;
+            if (governed.downgraded) {
+                console.warn(
+                    `🚧 Incomplete review — withdrawing approval: ${governed.reasons.join('; ')}`
+                );
+            }
             if (gateOutcome) {
                 console.log(
                     `🚦 Gate outcome ${gateOutcome.gateVerdict} (${gateOutcome.reason}) — ` +
@@ -2511,15 +2825,19 @@ export function createPrReviewHandlers(svc) {
             // treatment as one the orchestrator skipped: until now the count
             // was recorded in `reviewQuality` and read by nobody, and a
             // truncated file was reported inside a "Clean review".
-            const parseFailures = Number(result?.stats?.parseFailures) || 0;
-            const reviewWasPartial = !!gateOutcome?.partialOnly || parseFailures > 0;
+            const parseFailures = reviewCompleteness.parseFailures;
+            const reviewWasPartial = !!gateOutcome?.partialOnly || governed.reasons.length > 0;
             result.analysis = buildPrecisionAnalysis(verifiedFindings, {
                 skipped: reviewWasSkipped,
                 partial: reviewWasPartial,
                 reason: gateOutcome?.reason,
             });
-            if (parseFailures > 0) {
-                result.analysis += `\n\n> ⚠️ ${parseFailures} review unit${parseFailures === 1 ? '' : 's'} produced output that could not be parsed (truncated or non-JSON response), so ${parseFailures === 1 ? 'its file was' : 'those files were'} not actually reviewed. ${parseFailures === 1 ? 'It is' : 'They are'} not considered clean.`;
+            // One rendering of every incompleteness reason — parse failures,
+            // failed chunks, dropped hunks, host-diff gaps — instead of the
+            // single hand-written parse-failure sentence this replaced.
+            const completenessNote = describeCompleteness(reviewCompleteness);
+            if (completenessNote) {
+                result.analysis += `\n\n${completenessNote}`;
             }
             if (indexStatus === 'index-failed' || indexStatus === 'indexing-started') {
                 const contextCaveat = indexStatus === 'index-failed'
@@ -2557,6 +2875,12 @@ export function createPrReviewHandlers(svc) {
 
             const responseData = {
                     reviewedAt: Date.now(),
+                    // The head this result describes. Read by the posting
+                    // handler's head re-check (P1-8): without it, a comment can
+                    // be placed against a revision the author has already moved
+                    // past, on lines that no longer exist.
+                    headSha: prData.headSha ?? null,
+                    baseSha: prData.baseSha ?? prData.diffRefs?.base_sha ?? null,
                     analysis: result.analysis,
                     reviewVerdict: multiPassVerdict,
                     reviewEvent: multiPassReviewEvent,
@@ -2574,7 +2898,12 @@ export function createPrReviewHandlers(svc) {
                     reviewSkipped: reviewWasSkipped,
                     // Also true when a review unit's output never parsed — that
                     // file was not reviewed, whatever the orchestrator reported.
-                    partial: result._orchestrated?.meta?.partial ?? (parseFailures > 0 ? true : null),
+                    partial: result._orchestrated?.meta?.partial ?? (governed.reasons.length > 0 ? true : null),
+                    // The full contract, so the UI and the cache can say WHAT
+                    // was not read rather than only that something wasn't.
+                    completeness: reviewCompleteness,
+                    incomplete: governed.reasons.length > 0,
+                    incompleteReasons: governed.reasons,
                     aiSummary,
                     aiSummaryError,
                     isMultiPass: true,
@@ -2601,6 +2930,33 @@ export function createPrReviewHandlers(svc) {
                         fixes: fixStats,
                         graphContextUsed: !!graphContextObj?.available,
                         graphFindings: graphFindingsStats,
+                        // What each non-model source was admitted as, and how
+                        // many entries lacked the provenance to be reportable.
+                        // A review reporting 6 problems of which 5 are
+                        // "reported by a scanner" is a different claim from one
+                        // where 5 were checked against source (P1-3).
+                        deterministicAdmission: admissionStats,
+                        // What was sought, what came back, and what it settled.
+                        hypothesisValidation: validationStats,
+                        // The exported session, so the popup can hand it to a
+                        // host agent and import structured results back.
+                        hostVerification: reviewSession
+                            ? {
+                                reviewId: reviewSession.reviewId,
+                                shadow: reviewSession.shadow,
+                                candidates: reviewSession.candidates.length,
+                                withheld: reviewSession.withheld.length,
+                            }
+                            : null,
+                        // P1-5: what was actually READ. Files and hunks the
+                        // budget declined, test lookups that failed rather than
+                        // came back empty, and the measured prompt reserve —
+                        // so "the review said nothing about X" is traceable to a
+                        // decision instead of read as a clean bill of health.
+                        contextCoverage: {
+                            fileContext: fileContextStats,
+                            engine: result?.contextCoverage ?? null,
+                        },
                         // What the ceiling actually cost this review: total spend,
                         // per-stage breakdown, and any stage it refused. Without the
                         // refusal list a budget-shortened review is indistinguishable
@@ -2728,7 +3084,15 @@ export function createPrReviewHandlers(svc) {
                 try {
                     await reviewCache.store(prUrl, {
                         headSha: prData.headSha,
-                        report: responseData,
+                        fingerprint: reviewFingerprint.hash,
+                        fingerprintParts: reviewFingerprint.parts,
+                        report: {
+                            ...responseData,
+                            // Which files each finding's evidence rests on, so a
+                            // later run can invalidate a carried finding whose
+                            // callee changed even though its own file did not.
+                            verifiedFindings: withEvidenceDeps(responseData.verifiedFindings),
+                        },
                     });
                 } catch (e) {
                     console.warn('Could not cache review result:', e?.message);
@@ -2832,6 +3196,38 @@ export function createPrReviewHandlers(svc) {
                 prDataForLines = await svc.pullRequestService.fetchPullRequest(prUrl);
             } catch (e) {
                 console.warn('Could not fetch PR for line validation / dedupe; posting without it:', e.message);
+            }
+
+            // ── Head re-check ─────────────────────────────────────────────────
+            //
+            // P1-8: between reviewing and posting, the author can push. A
+            // comment placed against the reviewed head then lands on lines that
+            // have moved, and a verification verdict earned at that head no
+            // longer describes the code being merged. `prDataForLines` was just
+            // fetched, so the current head is already in hand and the check is
+            // free.
+            //
+            // Refuse rather than post-anyway: a stale inline comment on the
+            // wrong line is worse than no comment, and it is the author who can
+            // cheaply re-run.
+            const reviewedHead = analysisResult?.headSha
+                ?? analysisResult?.reviewSnapshot?.headSha
+                ?? null;
+            const currentHead = prDataForLines?.headSha ?? null;
+            if (reviewedHead && currentHead && reviewedHead !== currentHead) {
+                const session = reviewSessions.get(prUrl);
+                if (session) reviewSessions.delete(prUrl);
+                sendResponse({
+                    success: false,
+                    error: `The pull request moved since this review: it was reviewed at `
+                        + `${String(reviewedHead).slice(0, 8)} and its head is now `
+                        + `${String(currentHead).slice(0, 8)}. Nothing was posted — inline `
+                        + `comments would land on lines that have changed`
+                        + `${session ? ', and any host-agent verdicts no longer describe this code' : ''}`
+                        + `. Re-run the review to post against the current head.`,
+                    data: { headChanged: true, reviewedHead, currentHead },
+                });
+                return;
             }
 
             // ── Posting policy ────────────────────────────────────────────────
@@ -3222,8 +3618,107 @@ export function createPrReviewHandlers(svc) {
         }
     }
 
+    /**
+     * Hand the review session to a host agent. P1-8.
+     *
+     * An explicit export, not an automatic bridge: a browser extension cannot
+     * assume access to a local MCP host, so the user carries the payload across
+     * and the trust boundary stays visible. The returned object is exactly what
+     * `get_review_candidates` serves, so the host sees one schema either way.
+     */
+    async function handleExportReviewSession(message, sendResponse) {
+        const { prUrl, includeWithheld = false } = message.data || message.payload || {};
+        const session = reviewSessions.get(prUrl);
+        if (!session) {
+            sendResponse({
+                success: false,
+                error: 'No review session for that PR. Run a review first; sessions are built '
+                    + 'during the review and are tied to the head that was reviewed.',
+            });
+            return;
+        }
+        sendResponse({
+            success: true,
+            data: {
+                ...session,
+                withheld: includeWithheld ? session.withheld : undefined,
+            },
+        });
+    }
+
+    /**
+     * Take a host agent's verdicts back. P1-8.
+     *
+     * Every result is validated against the session it claims to answer —
+     * unknown ids, edited candidates, stale snapshots and uncited confirmations
+     * are refused with reasons rather than absorbed. Accepting a result
+     * establishes provenance, not correctness, and in shadow mode it changes
+     * nothing about what would be posted.
+     */
+    async function handleImportReviewVerification(message, sendResponse) {
+        const { prUrl, results = [] } = message.data || message.payload || {};
+        const session = reviewSessions.get(prUrl);
+        if (!session) {
+            sendResponse({ success: false, error: 'No review session for that PR.' });
+            return;
+        }
+
+        // Citations are checked against the files this review actually covered,
+        // so a verdict cannot cite a file nobody read.
+        const cached = reviewResultCache.get(prUrl);
+        const fileLines = new Map();
+        for (const f of cached?.data?.prFiles || []) {
+            if (f?.filename && Number.isFinite(Number(f.lines))) {
+                fileLines.set(f.filename, Number(f.lines));
+            }
+        }
+
+        const accepted = [];
+        const rejected = [];
+        for (const submitted of results) {
+            const check = validateVerificationResult(
+                session,
+                { ...submitted, reviewId: session.reviewId },
+                { fileLines: fileLines.size ? fileLines : null },
+            );
+            if (check.ok) accepted.push(check.result);
+            else rejected.push({ candidateId: submitted?.candidateId ?? null, errors: check.errors });
+        }
+
+        const applied = applyVerification(session, accepted, { shadow: session.shadow !== false });
+
+        // Live mode withholds refuted candidates from the cached result the UI
+        // reads. Shadow mode records and changes nothing, which is what makes
+        // the before/after ablation possible before this layer is trusted.
+        if (!applied.shadow && cached?.data?.verifiedFindings) {
+            const refuted = new Set(applied.refuted.map(c => c.candidateId));
+            cached.data.verifiedFindings = cached.data.verifiedFindings.filter(
+                (f, i) => !refuted.has(String(f.id ?? `c${i}`)),
+            );
+            reviewResultCache.set(prUrl, cached);
+        }
+
+        sendResponse({
+            success: true,
+            data: {
+                accepted: accepted.map(r => r.candidateId),
+                rejected,
+                shadow: applied.shadow,
+                stats: applied.stats,
+                blocksApproval: applied.blocksApproval,
+                note: 'Recorded. Nothing was posted and no pull request was approved. Schema, '
+                    + 'session binding and citations were checked mechanically, which establishes '
+                    + 'provenance and not correctness.',
+            },
+        });
+    }
+
     return {
         ANALYZE_PULL_REQUEST: (m, send) => handleAnalyzePullRequest(m, send),
+        // P1-8: the explicit export/import handoff. Neither posts a comment nor
+        // approves anything; publication stays a separate, authorized act.
+        EXPORT_REVIEW_SESSION: (m, send) => handleExportReviewSession(m, send),
+        IMPORT_REVIEW_VERIFICATION: (m, send) => handleImportReviewVerification(m, send),
         GET_PR_REVIEW_RESULT: (m, send) => handleGetPrReviewResult(m, send),
         // Auto-review is triggered from the content script (the on-page pill), so these
         // two must accept content-script messages. Both are server-gated on the

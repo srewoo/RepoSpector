@@ -42,6 +42,9 @@ describe('resolved provider model ids get their real context window', () => {
         ['mixtral-8x7b-32768', 32768],
         ['mistral-small-latest', 32000],
         ['qwen2.5-coder:32b', 32000],
+        // Whatever tag the user actually pulled resolves to the same window.
+        ['local:qwen2.5-coder', 32000],
+        ['local:qwen2.5-coder:7b', 32000],
         ['codestral-latest', 32000],
     ])('%s → %i', (id, expected) => {
         expect(tm.getModelLimit(id)).toBe(expected);

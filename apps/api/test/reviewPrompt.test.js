@@ -62,7 +62,11 @@ test('parseLLMReviewJson on garbage returns empty + flag', () => {
     assert.equal(r._parseError, true);
 });
 
-test('parseLLMReviewJson on empty input', () => {
-    assert.deepEqual(parseLLMReviewJson(''), { summary: '', findings: [] });
-    assert.deepEqual(parseLLMReviewJson(null), { summary: '', findings: [] });
+// Deliberately flipped for P0-1. This previously asserted that an empty
+// response parsed to a clean `{ summary: '', findings: [] }` — the same value
+// a model returns when it read the chunk and found nothing. The worker used
+// that to roll up an APPROVE on a chunk no model ever answered for.
+test('parseLLMReviewJson on empty input flags a parse failure, not a clean chunk', () => {
+    assert.deepEqual(parseLLMReviewJson(''), { summary: '', findings: [], _parseError: true });
+    assert.deepEqual(parseLLMReviewJson(null), { summary: '', findings: [], _parseError: true });
 });

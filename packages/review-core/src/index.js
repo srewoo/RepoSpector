@@ -19,6 +19,18 @@ export {
 } from './reviewSchema.js';
 
 export {
+    COMPLETENESS_VERSION, INCOMPLETE_VERDICT, INCOMPLETE_EVENT,
+    createCompleteness, mergeCompleteness, completenessReasons,
+    isComplete, describeCompleteness, governVerdict,
+} from './reviewCompleteness.js';
+
+// P2-2: the first runtime-neutral slice extracted behind the completeness
+// seam. Every gate, scanner and validator it uses arrives as an injected
+// adapter, so the extension, the worker and a test each supply their own.
+export { runFindingPipeline } from './findingPipeline.js';
+export { defendCandidates } from './candidateDefence.js';
+
+export {
     DEFAULT_THRESHOLDS as SKIP_THRESHOLDS,
     classifyChanges, evaluateSkipRules,
 } from './SkipRuleEngine.js';

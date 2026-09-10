@@ -182,20 +182,116 @@ function occursIn(lines, token) {
 }
 
 /**
+ * Does the finding's own quoted evidence appear in the diff it cites? P1-2.
+ *
+ * The verifier proves that the CITED LINE exists. It never checked the quote
+ * the model supplied, so a fabricated snippet — a plausible-looking line that
+ * is in no file — arrived downstream as `evidence`, cleared the precision
+ * gate's "has evidence" test, and was reported as an evidence-backed defect.
+ *
+ * Deliberately one-sided: a quote matches if ANY of its substantial lines is
+ * found in the patch. Models paraphrase and re-indent, and refuting a real
+ * finding over a reformatted quote is a worse error than accepting a partial
+ * match. Only a quote with nothing in common with the diff is called
+ * fabricated.
+ *
+ * @returns {'matched'|'fabricated'|'absent'} `absent` = nothing to judge
+ */
+export function quotedEvidenceStatus(finding, patch, fileSource = null) {
+    const quote = String(finding?.evidence ?? finding?.codeSnippet ?? '').trim();
+    if (!quote || (!patch && !fileSource)) return 'absent';
+
+    const normalize = (line) => String(line)
+        .replace(/^[+-]/, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    // Only a quote that PURPORTS to be a source citation can be checked against
+    // source. Scanners put a rule id or a tool message in this field
+    // ("from-scanner", "CWE-89"), and refuting those as fabricated code would
+    // delete real deterministic findings over a field that was never a quote.
+    const looksLikeCode = (l) => /[();{}[\]=<>.,:]|\s/.test(l);
+
+    const needles = quote
+        .split('\n')
+        .map(normalize)
+        // Short fragments match by accident; a brace or a `}` proves nothing.
+        .filter((l) => l.length >= 8 && looksLikeCode(l));
+    if (needles.length === 0) return 'absent';
+
+    // P1-2: checked against SOURCE where the file is available, and against the
+    // diff otherwise.
+    //
+    // Diff-only was wrong in both directions. A quote of the enclosing function
+    // — real code, correctly cited, simply outside the changed hunk — was
+    // called fabricated; and a quote that exists in no file at all went
+    // unchallenged whenever the diff happened not to cover it. The file is the
+    // thing a citation cites, so it is consulted first when we have it.
+    const haystack = [
+        ...String(fileSource ?? '').split('\n'),
+        ...String(patch ?? '').split('\n'),
+    ].map(normalize).filter(Boolean);
+
+    // Containment both ways, so a re-indented or partially-quoted line still
+    // matches — but only against a SUBSTANTIAL haystack line. Unqualified,
+    // `n.includes(h)` let a trailing `}` in the source "match" any long quote,
+    // which is how an invented snippet passed as real code.
+    const matched = needles.some((n) => haystack.some(
+        (h) => h.includes(n) || (h.length >= 8 && n.includes(h)),
+    ));
+    if (matched) return 'matched';
+    // Only the file can prove absence. Without it, "not in this diff" is a
+    // weaker claim than "nowhere in this code", so an unmatched quote is
+    // reported as unverified rather than as an invention.
+    return fileSource ? 'fabricated' : 'unverified';
+}
+
+/**
  * Assess one finding against the diff it claims to describe.
  *
  * @param {object} finding
  * @param {string} patch - unified diff for finding.file
  * @returns {{verdict:string, reason:string|null, citedLine:string|null, constructs:string[]}}
  */
-export function assessFinding(finding, patch) {
+export function assessFinding(finding, patch, fileSource = null) {
     const constructs = claimedConstructs(finding);
-    const base = { verdict: EVIDENCE.UNPROVEN, reason: null, citedLine: null, constructs };
+    const base = {
+        verdict: EVIDENCE.UNPROVEN, reason: null, citedLine: null, constructs,
+        citation: quotedEvidenceStatus(finding, patch, fileSource),
+    };
 
     if (!patch) return base;
 
     const { added, removed, byNewLine, addedNewLines, deletionAnchors } = partitionPatch(patch);
     const line = Number(finding?.line);
+
+    // GATE 0 — the finding quotes code that is not where it says it is. A
+    // model's confidence cannot repair this: the evidence it offered does not
+    // exist, so there is nothing to be confident about.
+    //
+    // Two strengths, because the two positions are not equally strong.
+    // `fabricated` means we HAD the file and the quote is in none of it, which
+    // is decisive. `unverified` means we had only the diff, so it refutes only
+    // when the finding's own cited line falls INSIDE that diff: the model
+    // pointed at a region we can see and quoted something that is not in it.
+    // Outside that region, "not in this diff" says nothing about whether the
+    // quote is real, and refuting on it deletes correct findings that cite the
+    // enclosing function (P1-2).
+    if (base.citation === 'fabricated') {
+        return {
+            ...base,
+            verdict: EVIDENCE.REFUTED,
+            reason: 'the quoted evidence does not appear anywhere in this file',
+        };
+    }
+    if (base.citation === 'unverified' && Number.isFinite(line) && byNewLine.has(line)) {
+        return {
+            ...base,
+            verdict: EVIDENCE.REFUTED,
+            reason: `the quoted evidence does not appear at or around line ${line}, which this `
+                + 'diff does show',
+        };
+    }
     const citedLine = Number.isFinite(line) ? (byNewLine.get(line) ?? null) : null;
     base.citedLine = citedLine;
 

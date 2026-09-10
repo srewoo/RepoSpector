@@ -35,6 +35,9 @@ import { filterGenuineProblems } from '../src/utils/genuineProblemGate.js';
 import { ExternalFindingsService } from '../src/services/ExternalFindingsService.js';
 import { buildFileContext, buildDeclarations, alignmentReport } from './lib/fileContext.js';
 import { graphFindingsForCase } from './lib/graphContext.js';
+import { createRetention, recordStage } from './lib/retention.js';
+import { buildManifest } from './lib/manifest.js';
+import { normalizeProductPath, PRODUCT_PATH } from './lib/productPaths.js';
 
 export function parseArgs(argv) {
     const args = {
@@ -53,6 +56,10 @@ export function parseArgs(argv) {
         // A full run is hours of LLM time. Resume is the difference between a
         // crash costing one case and costing the whole run.
         resume: false,
+        // P1-7: which shipped reviewer this run describes. Results from
+        // different paths are never pooled — `requireSinglePath` refuses.
+        productPath: PRODUCT_PATH.EXTENSION,
+        hostAgent: null,
     };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
@@ -70,6 +77,8 @@ export function parseArgs(argv) {
         else if (a === '--fail-level') args.failLevel = argv[++i];
         else if (a === '--no-scoring') args.scoreFindings = false;
         else if (a === '--no-precision-gate') args.precisionGate = false;
+        else if (a === '--product-path') args.productPath = normalizeProductPath(argv[++i]);
+        else if (a === '--host-agent') args.hostAgent = argv[++i];
         else if (a === '--help' || a === '-h') args.help = true;
         else throw new Error(`Unknown argument: ${a}`);
     }
@@ -190,6 +199,11 @@ export async function reviewOne(kase, { llm, settings, opts }) {
     let findings = buildCanonicalFindings(result.perFileFindings || [], staticFindings);
     const baseline = findings.length;
 
+    // P1-7: every stage that can remove a candidate records what it removed, so
+    // "precision improved" can be checked against "and it cost N real defects".
+    const retention = createRetention();
+    recordStage(retention, 'generated', [], findings);
+
     // Multi-finder. This was MISSING from the first version of this runner while
     // being ON by default in the shipped handler, so the 6-findings-per-5-PRs
     // figure it produced measured a pipeline nobody runs. Any eval that does not
@@ -203,12 +217,16 @@ export async function reviewOne(kase, { llm, settings, opts }) {
             maxRounds: opts.finderRounds,
             promptMode: opts.finderMode,
         });
+        const beforeFinder = findings;
         findings = [...findings, ...fres.findings];
+        recordStage(retention, 'multi-finder', beforeFinder, findings);
         finderAdded = fres.stats.added;
     }
     const generated = findings.length;
 
+    const beforeCitations = findings;
     findings = enforceCitations(findings).findings;
+    recordStage(retention, 'citations', beforeCitations, findings);
 
     const verifier = new FindingVerificationService({ llmService: llm });
     const verified = await verifier.verify(findings, {
@@ -216,6 +234,7 @@ export async function reviewOne(kase, { llm, settings, opts }) {
         settings,
         llmRefutation: false,   // shipped default: deterministic gates only
     });
+    recordStage(retention, 'verification', findings, verified.findings);
     findings = verified.findings;
 
     // The scorer, then the precision gate — the two shipped pipeline stages this
@@ -253,6 +272,7 @@ export async function reviewOne(kase, { llm, settings, opts }) {
     let precisionStats = null;
     if (opts.precisionGate) {
         const pres = filterGenuineProblems(findings, { minConfidence: 0.8, minScore: 7 });
+        recordStage(retention, 'precision-gate', findings, pres.findings);
         findings = pres.findings;
         precisionStats = pres.stats;
     }
@@ -294,6 +314,7 @@ export async function reviewOne(kase, { llm, settings, opts }) {
     // scored findings the extension would never have shown a reviewer, which
     // inflates recall and makes precision incomparable to the shipped product.
     const filtered = applyFilterMode(findings, prData.files || [], { mode: opts.filterMode });
+    recordStage(retention, 'diff-scope', findings, filtered.kept);
     findings = filtered.kept;
 
     // The merge gate. Recorded rather than acted on — the harness has no PR to
@@ -304,8 +325,27 @@ export async function reviewOne(kase, { llm, settings, opts }) {
     const policy = partitionForPosting(findings, { blockingOnlyInline: true, maxInline: 15 });
     const postedKeys = new Set(policy.inline.map(f => `${f.file || f.filePath}:${f.line}`));
 
+    // The posting policy is the last thing that decides what a reviewer sees;
+    // a candidate demoted to the summary is not a candidate they read inline.
+    recordStage(retention, 'posting-policy', findings, policy.inline);
+
     return {
         predictions: findings.map(f => toPrediction(f, postedKeys.has(`${f.file || f.filePath}:${f.line}`))),
+        // P1-7 — recorded per case so the report can attribute recall lost in
+        // gates, and so two runs can be compared with their confounds stated.
+        productPath: normalizeProductPath(opts.productPath),
+        retention,
+        // A run that could not read the whole change is not a run that found
+        // nothing; the report keeps the two apart (P0-1).
+        incomplete: !!(result.completeness && result.completeness.parseFailures > 0),
+        manifest: buildManifest({
+            productPath: opts.productPath,
+            model: settings.model,
+            provider: settings.provider,
+            opts,
+            contextCoverage: result.contextCoverage ?? null,
+            latencyMs: result.processingTime ?? null,
+        }),
         stats: {
             baseline,
             finderAdded,
@@ -379,6 +419,10 @@ async function main() {
             '  --fail-level <l>      none | info | low | medium | high | critical | any (default high)',
             '  --no-scoring          Skip the SuggestionScorer pass (A/B: the gate treats unscored findings as an outage, not a deletion)',
             '  --no-precision-gate   Skip filterGenuineProblems (A/B against the shipped default)',
+            '  --product-path <p>    extension | api | mcp-host — which shipped reviewer this run',
+            '                        describes. Results are never pooled across paths.',
+            '  --host-agent <name>   For --product-path mcp-host: the agent doing the reasoning.',
+            '                        Required for the figure to be reproducible.',
             '',
             'File context comes from the corpus. Populate it first:',
             '  node eval/fetch-content.js --corpus <file>',

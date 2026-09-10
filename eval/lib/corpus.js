@@ -56,7 +56,26 @@ export function validateCase(raw, index) {
         }
     });
 
-    return { id: raw.id, url: raw.url ?? null, predictions, adjudications, humanComments };
+    return {
+        id: raw.id,
+        url: raw.url ?? null,
+        predictions,
+        adjudications,
+        humanComments,
+        // P1-7: carried through rather than projected away. The benchmark report
+        // needs the case's shape (`prData`), what the run recorded
+        // (`runStats`, `manifest`, `retention`), and whether the run could read
+        // the whole change (`incomplete`). Dropping them here is why corpus
+        // coverage, stage retention and the incompleteness rate all read as
+        // empty no matter what the runner wrote.
+        ...(raw.prData !== undefined ? { prData: raw.prData } : {}),
+        ...(raw.runStats !== undefined ? { runStats: raw.runStats } : {}),
+        ...(raw.manifest !== undefined ? { manifest: raw.manifest } : {}),
+        ...(raw.retention !== undefined ? { retention: raw.retention } : {}),
+        ...(raw.incomplete !== undefined ? { incomplete: raw.incomplete } : {}),
+        ...(raw.productPath !== undefined ? { productPath: raw.productPath } : {}),
+        ...(raw.categories !== undefined ? { categories: raw.categories } : {}),
+    };
 }
 
 /**

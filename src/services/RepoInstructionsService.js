@@ -87,6 +87,8 @@ export class RepoInstructionsService {
      */
     constructor(options = {}) {
         this.files = options.files?.length ? options.files : [...DEFAULT_INSTRUCTION_FILES];
+        /** Ceiling on nested-directory probes for one review. */
+        this.maxNestedDirs = Number.isFinite(options.maxNestedDirs) ? options.maxNestedDirs : 12;
         this.maxLines = Number.isFinite(options.maxLines) ? options.maxLines : DEFAULT_MAX_LINES;
         this.ttlMs = Number.isFinite(options.ttlMs) ? options.ttlMs : DEFAULT_TTL_MS;
         /** @type {Map<string, {context: string|null, files: string[], fetchedAt: number}>} */
@@ -109,6 +111,64 @@ export class RepoInstructionsService {
      * @returns {Promise<{context: string|null, files: string[], fromCache: boolean}>}
      *          `context` is prompt-ready text, or null when the repo has none.
      */
+    /**
+     * Instruction files that govern the CHANGED paths, not just the root. P2-1.
+     *
+     * Default configuration discovered only root `AGENTS.md`/`CLAUDE.md`, so a
+     * monorepo's `services/billing/AGENTS.md` — the file with the one rule that
+     * would have caught the defect — was never read. Directories are derived
+     * from the change itself, so this costs at most one probe per touched
+     * directory and nothing at all on a single-package repo.
+     *
+     * Read from the DEFAULT BRANCH like the root files, for the same reason: a
+     * pull request must not be able to supply the rules it is reviewed against.
+     *
+     * @param {Object} repo   as `getInstructions`
+     * @param {string[]} changedPaths
+     * @returns {Promise<{files: Array<{path:string, text:string}>, failed: boolean}>}
+     */
+    async getScopedInstructions(repo = {}, changedPaths = [], options = {}) {
+        const root = await this.getInstructions(repo, options);
+        const files = (root.files || []).map((filename, i) => ({
+            path: filename,
+            text: root.rawFiles?.[i]?.text ?? '',
+        }));
+
+        const dirs = new Set();
+        for (const path of changedPaths) {
+            const parts = String(path ?? '').split('/');
+            // Every ancestor directory of a changed file, excluding the file.
+            for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/'));
+        }
+        if (dirs.size === 0) return { files, failed: false };
+
+        const { platform, owner, repo: name } = repo;
+        const apiBase = repo.apiBase
+            || (platform === 'github' ? githubApiBase() : gitlabApiBase());
+        const projectPath = repo.projectPath || `${owner}/${name}`;
+        let ref = null;
+        if (platform === 'gitlab') {
+            const branch = await this._defaultBranch({ projectPath, apiBase, token: repo.token });
+            if (!branch.name) return { files, failed: true };
+            ref = branch.name;
+        }
+
+        // Bounded: a 200-directory monorepo change must not become 400 probes.
+        const candidates = [...dirs].sort().slice(0, this.maxNestedDirs);
+        let failed = false;
+        await Promise.all(candidates.flatMap((dir) => this.files.map(async (filename) => {
+            const full = `${dir}/${filename}`;
+            const res = await this._fetchFile({
+                platform, owner, name, projectPath, apiBase, token: repo.token,
+                filename: full, ref,
+            });
+            if (res.failed) failed = true;
+            if (res.text) files.push({ path: full, text: res.text });
+        })));
+
+        return { files, failed: failed || dirs.size > this.maxNestedDirs };
+    }
+
     async getInstructions(repo = {}, options = {}) {
         const { platform, owner, repo: name } = repo;
         const empty = { context: null, files: [], fromCache: false };
@@ -122,7 +182,12 @@ export class RepoInstructionsService {
 
         const cached = this.cache.get(cacheKey);
         if (!options.force && cached && Date.now() - cached.fetchedAt < this.ttlMs) {
-            return { context: cached.context, files: cached.files, fromCache: true };
+            return {
+                context: cached.context,
+                files: cached.files,
+                rawFiles: cached.rawFiles ?? [],
+                fromCache: true,
+            };
         }
 
         let found, failed;
@@ -146,10 +211,18 @@ export class RepoInstructionsService {
             this.cache.set(cacheKey, {
                 context,
                 files: found.map(f => f.filename),
+                rawFiles: found.map(f => ({ path: f.filename, text: f.text })),
                 fetchedAt: Date.now(),
             });
         }
-        return { context, files: found.map(f => f.filename), fromCache: false };
+        // `rawFiles` carries the unrendered bodies so `getScopedInstructions`
+        // can scope them per path instead of re-fetching.
+        return {
+            context,
+            files: found.map(f => f.filename),
+            rawFiles: found.map(f => ({ path: f.filename, text: f.text })),
+            fromCache: false,
+        };
     }
 
     /**

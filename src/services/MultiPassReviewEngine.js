@@ -14,6 +14,7 @@ import {
     buildPRContextSummary,
     getLanguageRules
 } from '../utils/multiPassPrompts.js';
+import { createCompleteness } from '../utils/reviewCompleteness.js';
 
 /**
  * Multi-pass PR review engine.
@@ -129,6 +130,15 @@ export class MultiPassReviewEngine {
                 retryDelay: 2000
             });
 
+            // P0-1: hunks/files the diff budget refused to send are content this
+            // review never saw. Named in the prompt already, but the VERDICT has
+            // to know about them too — a file omitted for budget is not a file
+            // reviewed and found clean.
+            const budgetOmissions = [];
+            // What the measured prompt reserve turned out to be, per unit. A
+            // budget nobody measures is a guess with a number on it.
+            const promptFits = [];
+
             const results = await batchProcessor.processBatches(
                 [reviewUnits], // Single batch, concurrency handled by semaphore
                 async (unit) => {
@@ -141,15 +151,22 @@ export class MultiPassReviewEngine {
                     // fit are named rather than dropped silently, so the model cannot
                     // conclude that a caller was never updated. See utils/diffBudget.js.
                     const contextWindow = tokenManager.getModelLimit(settings.model);
-                    const fitted = fitFilesToBudget({
+                    // P1-5: the reserve for the non-diff sections was a flat 20%
+                    // of the window, which is not a measurement of anything. On a
+                    // unit with heavy RAG, graph and full-file context it
+                    // under-reserved and the response came back truncated — a
+                    // parse failure from a review that had all the context it
+                    // needed. On a bare unit it over-reserved and dropped hunks
+                    // that would have fitted. Fit once on the estimate, MEASURE
+                    // the assembled prompt, and re-fit against the real overhead
+                    // when the estimate was wrong.
+                    const fitWith = (promptTokens) => fitFilesToBudget({
                         files: unit.files,
                         contextWindowTokens: contextWindow,
-                        // Everything else in this prompt — preamble, rules, RAG,
-                        // graph slice, full-file context — measured once the prompt
-                        // is built would be circular, so charge a flat estimate of
-                        // the non-diff sections against the window.
-                        promptTokens: Math.round(contextWindow * 0.2),
+                        promptTokens,
                     });
+                    let reservedPromptTokens = Math.round(contextWindow * 0.2);
+                    let fitted = fitWith(reservedPromptTokens);
 
                     // Never review nothing. If even the first file does not fit, the
                     // unit is reviewed as-is: an over-long prompt that the provider
@@ -161,6 +178,19 @@ export class MultiPassReviewEngine {
                     const omittedFiles = fitted.included.length ? fitted.omitted : [];
 
                     if (omittedFiles.length) {
+                        for (const f of omittedFiles) {
+                            const removalsOnly = f.omittedBecause === 'no added lines';
+                            budgetOmissions.push({
+                                kind: removalsOnly ? 'removals-only' : 'diff-budget',
+                                detail: f.omittedBecause || 'omitted',
+                                file: f.filename ?? f.path ?? null,
+                                // Removals-only files are stripped by design today
+                                // (P1-1 changes that). Record the fact without
+                                // making every deletion downgrade the verdict; a
+                                // file dropped for BUDGET is a genuine gap.
+                                advisory: removalsOnly,
+                            });
+                        }
                         console.log(
                             `✂️  Diff budget: showing ${fitted.included.length}/${unit.files.length} `
                             + `file(s) of this unit (${fitted.stats.diffTokens} diff tokens, `
@@ -168,7 +198,7 @@ export class MultiPassReviewEngine {
                         );
                     }
 
-                    const prompt = buildPerFileReviewPrompt(unitForPrompt, {
+                    const buildPrompt = (forUnit, extraOmitted) => buildPerFileReviewPrompt(forUnit, {
                         prContext,
                         focusAreas,
                         ragChunks: this._getRAGChunksForUnit(ragByFile, unit),
@@ -192,6 +222,7 @@ export class MultiPassReviewEngine {
                         // coding agents — read from the default branch, so this is
                         // guidance that has itself passed review.
                         repoInstructions: context.repoInstructions || '',
+                        instructionScopes: context.instructionScopes || null,
                         graphContext: this._getGraphContextForUnit(context.graphContext, unit),
                         // Phase 2: the file itself and its test, plus what the
                         // change was supposed to do. Both are optional — a review
@@ -205,8 +236,35 @@ export class MultiPassReviewEngine {
                         // of the whole file being pasted in. See utils/dynamicContext.js.
                         declarationsByFile: context.declarationsByFile || null,
                         dynamicContext: context.dynamicContext || null,
-                        omittedFiles,
+                        omittedFiles: extraOmitted,
+                        omittedHunks: fitted.stats.omittedHunks,
                     });
+
+                    let prompt = buildPrompt(unitForPrompt, omittedFiles);
+
+                    // The measured overhead: everything in the assembled prompt
+                    // that is not this unit's diff text.
+                    const diffTokens = fitted.stats.diffTokens || 0;
+                    const measuredOverhead = Math.max(
+                        0, tokenManager.estimateTokens(prompt) - diffTokens,
+                    );
+                    // Re-fit only when the estimate was materially wrong, so the
+                    // common case still costs one build.
+                    if (Math.abs(measuredOverhead - reservedPromptTokens) > contextWindow * 0.02) {
+                        reservedPromptTokens = measuredOverhead;
+                        fitted = fitWith(reservedPromptTokens);
+                        const refitUnit = fitted.included.length
+                            ? { ...unit, files: fitted.included }
+                            : unit;
+                        const refitOmitted = fitted.included.length ? fitted.omitted : [];
+                        prompt = buildPrompt(refitUnit, refitOmitted);
+                        promptFits.push({
+                            unit: unit.primaryFile ?? null,
+                            estimatedOverhead: Math.round(contextWindow * 0.2),
+                            measuredOverhead,
+                            refitted: true,
+                        });
+                    }
 
                     const response = await this.llmService.streamChat(
                         [
@@ -334,7 +392,23 @@ export class MultiPassReviewEngine {
                 processingTime: Date.now() - startTime,
                 tokenUsage,
                 isMultiPass: true,
-                stats: { parseFailures }
+                stats: { parseFailures },
+                // P0-1: the same failure facts as `failedFiles`/`stats`, in the
+                // one shape every downstream path (orchestrator, adapter,
+                // handler, cache, API report) reads. `failedFiles` alone was
+                // routinely dropped by adapters; a contract that governs the
+                // verdict cannot be optional to carry.
+                completeness: createCompleteness({
+                    expectedUnits: reviewUnits.length,
+                    inspectedUnits: perFileFindings.length - parseFailures,
+                    parseFailures,
+                    failedUnits: failedFiles.map((f) => ({ unit: f, reason: 'unit-failed' })),
+                    omissions: budgetOmissions,
+                }),
+                contextCoverage: {
+                    promptFits,
+                    omittedHunks: budgetOmissions.filter(o => o.kind === 'diff-budget'),
+                },
             };
 
         } finally {

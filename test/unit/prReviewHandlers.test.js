@@ -48,10 +48,14 @@ describe('prReviewHandlers', () => {
             'CHECK_PR_FOR_UPDATES',
             'ENSURE_REPO_INDEXED',
             'EXPLAIN_HUNK',
+            // P1-8: the explicit export/import handoff for host-agent
+            // verification. Neither posts a comment nor approves a PR.
+            'EXPORT_REVIEW_SESSION',
             'FETCH_FULL_FILE',
             'GET_AUTO_REVIEW_SETTING',
             'GET_PR_REVIEW_RESULT',
             'GET_PR_SUMMARY',
+            'IMPORT_REVIEW_VERIFICATION',
             'MULTI_PASS_PR_REVIEW',
             'POST_INLINE_COMMENT',
             'POST_PR_REVIEW',

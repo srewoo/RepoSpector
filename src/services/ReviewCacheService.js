@@ -116,33 +116,54 @@ export class ReviewCacheService {
      *
      * @param {string} prUrl
      * @param {string|null} headSha - current head SHA of the PR
-     * @returns {Promise<{status:string, entry:Object|null, ageMs:number|null}>}
+     * @param {string|null} [fingerprint] - hash of everything else the review
+     *   depended on: base SHA, model, policy, instructions, index snapshot,
+     *   pipeline version (utils/reviewFingerprint.js). Freshness used to rest on
+     *   the head SHA ALONE, so a rebase, a model change, a lowered threshold or
+     *   an edited CLAUDE.md all returned the previous answer as the current one.
+     * @returns {Promise<{status:string, entry:Object|null, ageMs:number|null, staleReason:string|null}>}
      */
-    async lookup(prUrl, headSha) {
+    async lookup(prUrl, headSha, fingerprint = null) {
         const key = cacheKeyForUrl(prUrl);
-        if (!key) return { status: CACHE_STATUS.MISS, entry: null, ageMs: null };
+        if (!key) return { status: CACHE_STATUS.MISS, entry: null, ageMs: null, staleReason: null };
 
         const all = await this._readAll();
         const entry = all[key];
-        if (!entry) return { status: CACHE_STATUS.MISS, entry: null, ageMs: null };
+        if (!entry) return { status: CACHE_STATUS.MISS, entry: null, ageMs: null, staleReason: null };
 
         const ageMs = Date.now() - (entry.createdAt || 0);
         if (ageMs > this.ttlMs) {
             // Expired outright. Not even useful as priming — the codebase has
             // most likely moved on around it.
-            return { status: CACHE_STATUS.MISS, entry: null, ageMs };
+            return { status: CACHE_STATUS.MISS, entry: null, ageMs, staleReason: 'expired' };
         }
 
         // A missing SHA on either side means we cannot prove freshness. Treat as
         // stale rather than fresh: serving a possibly-outdated review as current
         // is a worse failure than paying for one more review.
-        const fresh = !!headSha && !!entry.headSha && headSha === entry.headSha;
+        const shaMatches = !!headSha && !!entry.headSha && headSha === entry.headSha;
+        if (!shaMatches) {
+            return { status: CACHE_STATUS.STALE, entry, ageMs, staleReason: 'head SHA moved' };
+        }
 
-        return {
-            status: fresh ? CACHE_STATUS.FRESH : CACHE_STATUS.STALE,
-            entry,
-            ageMs,
-        };
+        // Same rule for the fingerprint: unknown on either side is not proof of
+        // sameness. An entry stored before fingerprints existed has none, and
+        // must be treated as stale rather than grandfathered in as fresh.
+        const fingerprintMatches = !!fingerprint
+            && !!entry.fingerprint
+            && fingerprint === entry.fingerprint;
+        if (!fingerprintMatches) {
+            return {
+                status: CACHE_STATUS.STALE,
+                entry,
+                ageMs,
+                staleReason: entry.fingerprint
+                    ? 'the review inputs changed (base, model, policy, instructions or index)'
+                    : 'stored before review inputs were fingerprinted',
+            };
+        }
+
+        return { status: CACHE_STATUS.FRESH, entry, ageMs, staleReason: null };
     }
 
     /**
@@ -154,7 +175,7 @@ export class ReviewCacheService {
      * @param {Object} params.report - the VerdictReport / analysis result
      * @returns {Promise<boolean>} whether it was stored
      */
-    async store(prUrl, { headSha = null, report = null } = {}) {
+    async store(prUrl, { headSha = null, fingerprint = null, fingerprintParts = null, report = null } = {}) {
         const key = cacheKeyForUrl(prUrl);
         if (!key || !report) return false;
 
@@ -166,6 +187,10 @@ export class ReviewCacheService {
             key,
             prUrl,
             headSha,
+            fingerprint,
+            // Kept alongside the hash so a stale hit can SAY what changed
+            // rather than only that something did.
+            fingerprintParts,
             createdAt: Date.now(),
             payload: report,
         };

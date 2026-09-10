@@ -85,7 +85,12 @@ describe('filterGenuineProblems', () => {
         };
         const advisory = { ...breaking, severity: 'suggestion', confidence: 0.5 };
         const result = filterGenuineProblems([breaking, advisory]);
-        expect(result.findings).toEqual([{ ...breaking, blocking: true }]);
+        // `validationStatus` is added to every kept finding (P1-2): a finding
+        // that cleared a confidence threshold is not thereby evidence-backed,
+        // and the label says which it is instead of leaving it to be inferred.
+        expect(result.findings).toEqual([
+            { ...breaking, blocking: true, validationStatus: 'unvalidated' },
+        ]);
     });
 });
 

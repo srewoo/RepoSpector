@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -34,15 +35,33 @@ jobs:
       # Guards the MEASUREMENT code, not the reviewer's accuracy: the fixture's
       # predictions are hand-written. A real accuracy gate needs the private
       # corpus and runs locally — see eval/README.md.
+      # P2-2: the root suite explicitly excludes MCP and API, so until now CI
+      # covered one of three shipped packages. A package nobody tests in CI is a
+      # package whose regressions are found by users.
+      - name: MCP package tests
+        run: npm test --workspace @repospector/mcp --if-present || (cd packages/mcp && node --test test/)
+
+      - name: API package tests
+        run: cd apps/api && node --test test/
+
+      - name: Cross-adapter contract
+        run: npx jest test/integration/adapterContract.test.js --ci --runInBand
+
       - name: Eval harness self-check
         run: npm run eval:gate
 
       - name: Build extension
         run: npm run build
 
+      - name: Build MCP package
+        run: cd packages/mcp && node build.js
+
       - name: Bundle size budget
         run: node scripts/check-bundle-size.cjs
 
+      # A separate, opt-in job: a real accuracy run needs the private corpus and
+      # live model credentials, so it cannot gate every pull request. It exists
+      # so the benchmark is runnable on demand rather than only on a laptop.
       - name: Upload built extension
         if: success()
         uses: actions/upload-artifact@v4
@@ -50,3 +69,29 @@ jobs:
           name: dist-${{ github.sha }}
           path: dist/
           retention-days: 7
+
+  benchmark:
+    # Controlled real-review benchmark (P1-7). Not a gate: it needs the private
+    # corpus and live credentials, and its figures are lower bounds on a small
+    # sample. Run it deliberately, read the manifest diff before the numbers.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Review the corpus
+        env:
+          REPOSPECTOR_EVAL_KEY: ${{ secrets.REPOSPECTOR_EVAL_KEY }}
+        run: node eval/run.js --corpus eval/corpus/public-prs.json --resume --product-path extension
+      - name: Score
+        run: node eval/score.js --corpus eval/corpus/public-prs.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ github.sha }}
+          path: eval/results/
+          retention-days: 30
