@@ -206,7 +206,14 @@ test('no single similar_code chunk crowds out the others', { timeout: TIMEOUT },
 
     const localCtx = {
         config: {
-            repo: dir, maxFiles: 50, maxToolTokens: 8192, githubToken: null, gitlabToken: null,
+            // 4096, not 8192. This test is about behaviour UNDER PRESSURE, so
+            // the budget has to actually squeeze the section — and since
+            // `splitOversized` (f49acfc) caps every chunk at the chunker's
+            // budget, one huge file no longer yields one huge chunk. It yields
+            // four right-sized ones that fit in 8192 comfortably, nothing gets
+            // cut, and the "is a cut chunk marked?" assertion below had nothing
+            // to observe. The chunker got better and quietly disarmed the test.
+            repo: dir, maxFiles: 50, maxToolTokens: 4096, githubToken: null, gitlabToken: null,
         },
         indexer: null,
     };
@@ -234,6 +241,23 @@ test('no single similar_code chunk crowds out the others', { timeout: TIMEOUT },
     assert.ok(
         parsed.some((c) => c.truncated),
         'the oversized chunk should be marked truncated, not silently cut',
+    );
+
+    // The other half of the same property: a chunk is marked ONLY when it was
+    // actually cut. A budget with room to spare must leave every chunk whole
+    // and unmarked, or `truncated` stops meaning anything.
+    const roomy = await REVIEW_PR_TOOL.handler({ range: 'HEAD~1..HEAD' }, {
+        config: {
+            repo: dir, maxFiles: 50, maxToolTokens: 16384, githubToken: null, gitlabToken: null,
+        },
+        indexer: null,
+    });
+    const roomyPart = roomy.content[0].text.split('\n\n').find((p) => p.startsWith('similar_code:'));
+    const roomyChunks = JSON.parse(roomyPart.slice('similar_code:'.length).trim());
+    assert.ok(roomyChunks.length > 1, 'expected several chunks with a roomy budget too');
+    assert.ok(
+        roomyChunks.every((c) => !c.truncated),
+        'nothing should be marked truncated when the section fits',
     );
 });
 
