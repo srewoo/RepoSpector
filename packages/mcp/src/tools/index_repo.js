@@ -1,6 +1,16 @@
 import { getIndexer } from '../repo/indexer.js';
 import { resolveRepo, REPO_ARG } from '../repo/resolveRepo.js';
-import { pruneOrphans, enforceSizeCap } from '../repo/cache.js';
+import { pruneOrphans, enforceSizeCap, cacheFootprint } from '../repo/cache.js';
+
+/**
+ * Report the cache footprint once it is large enough to be worth a sentence.
+ *
+ * Indexes are never deleted unless asked, which is the right default — evicting
+ * a live snapshot costs a full re-index — but it was also entirely silent, and a
+ * real machine reached 2.5 GB across 452 snapshots before anyone noticed. This
+ * says so and names the two ways to act, without touching anything.
+ */
+const CACHE_REPORT_THRESHOLD_BYTES = 1024 * 1024 * 1024; // 1 GB
 
 /**
  * Build or rebuild the index for the configured repository.
@@ -58,6 +68,18 @@ async function maintainCache(args, ctx, indexer) {
         } catch (error) {
             notes.push(`Cache limit enforcement failed: ${error.message}`);
         }
+    } else {
+        // No cap configured: report, never evict.
+        try {
+            const { totalBytes, snapshots } = await cacheFootprint();
+            if (totalBytes >= CACHE_REPORT_THRESHOLD_BYTES) {
+                notes.push(
+                    `Index cache is ${mb(totalBytes)} across ${snapshots} snapshot(s) and is not `
+                    + 'capped. Pass max_cache_mb to evict least-recently-used indexes, or '
+                    + 'prune:true to drop those whose repository is gone.',
+                );
+            }
+        } catch { /* a footprint report is never worth failing an index build over */ }
     }
 
     return notes;

@@ -63,24 +63,33 @@ export function baseSpecOf(range) {
  */
 export async function buildProvenance({
     args = {}, repo, indexer, staticSource = null, budget = null, diffMode = null,
+    identity = null,
 } = {}) {
     const target = parseDiffTarget(args);
     const kind = target.error ? 'unknown' : target.kind;
 
     const spec = args.range ? String(args.range) : null;
-    const baseSpec = spec ? baseSpecOf(spec) : null;
-    const headSpec = spec ? headSpecOf(spec) : null;
 
-    const base = spec ? await revParse(repo, baseSpec) : null;
-    const head = spec ? await revParse(repo, headSpec) : null;
+    // P0-2: prefer the bundle's single resolved identity. Re-deriving base and
+    // head here is what left `target.base` / `target.head` null for every pull
+    // request — the one target kind where the reader most needs to see which
+    // two commits were actually compared — and reported a three-dot range's
+    // LEFT ENDPOINT as its base when the effective base is the merge base.
+    const baseSpec = identity?.baseSpec ?? (spec ? baseSpecOf(spec) : null);
+    const headSpec = identity?.headSpec ?? (spec ? headSpecOf(spec) : null);
 
-    const worktreeHead = await revParse(repo, 'HEAD');
-    let dirty = null;
-    try {
-        const { stdout } = await exec('git', ['status', '--porcelain'], { cwd: repo });
-        dirty = stdout.trim().length > 0;
-    } catch {
-        dirty = null;
+    const base = identity ? identity.effectiveBase : (spec ? await revParse(repo, baseSpec) : null);
+    const head = identity ? identity.headSha : (spec ? await revParse(repo, headSpec) : null);
+
+    const worktreeHead = identity?.worktree?.head ?? await revParse(repo, 'HEAD');
+    let dirty = identity?.worktree?.dirty ?? null;
+    if (dirty === null && !identity) {
+        try {
+            const { stdout } = await exec('git', ['status', '--porcelain'], { cwd: repo });
+            dirty = stdout.trim().length > 0;
+        } catch {
+            dirty = null;
+        }
     }
 
     const indexedCommit = typeof indexer?.indexedCommit === 'function'
@@ -101,8 +110,19 @@ export async function buildProvenance({
             // base's own commits inverted when the base has moved on; `a...b`
             // compares against the merge base, which is what a review means.
             diffMode,
+            // Which commit `base` actually is. A three-dot comparison's base is
+            // the merge base; the range's left endpoint is a different commit
+            // whenever the target branch has advanced.
+            baseResolvedFrom: identity?.effectiveBaseSource ?? null,
+            endpointBase: identity && identity.effectiveBase !== identity.baseSha
+                ? identity.baseSha
+                : undefined,
             ...(target.url ? { url: target.url } : {}),
         },
+        // Everything the bundle could NOT pin down. Sections that depend on a
+        // revision report themselves unavailable rather than answering about
+        // the worktree, so this is the reader's index of what is missing.
+        unresolved: identity?.unresolved?.length ? identity.unresolved : undefined,
         worktree: { head: worktreeHead, dirty },
         index: {
             commit: indexedCommit,

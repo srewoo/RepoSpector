@@ -166,10 +166,43 @@ test('the dependencies section states its own applicability', { timeout: TIMEOUT
     assert.match(body, /manifest|not applicable|no dependenc/i);
 });
 
-test('still authors no findings and no verdict', { timeout: TIMEOUT }, () => {
+test('authors findings, but still no verdict', { timeout: TIMEOUT }, () => {
+    // Deliberately flipped alongside review.test.js: `findings` is now a
+    // section this tool writes. `verdict` and `recommendation` remain
+    // forbidden — naming a defect is not deciding whether to merge.
     const labels = (bundle.match(/^[a-z_]+:/gm) || []).map((l) => l.slice(0, -1));
-    for (const forbidden of ['findings', 'verdict', 'review', 'summary', 'recommendation']) {
+    for (const forbidden of ['verdict', 'review', 'summary', 'recommendation']) {
         assert.ok(!labels.includes(forbidden), `bundle authored a '${forbidden}' section`);
+    }
+    assert.ok(labels.includes('findings'));
+});
+
+test('the findings section cannot present candidates as established', { timeout: TIMEOUT }, () => {
+    const body = section('findings');
+    assert.ok(body, 'no findings section');
+    const s = JSON.parse(body);
+
+    // Whatever else it says, it must state whether the reasoning pass ran.
+    assert.equal(typeof s.modelPass?.ran, 'boolean');
+    if (!s.modelPass.ran) {
+        // The property, not one phrasing of it: a reader must never be able to
+        // mistake an empty findings list for a clean change. The delegated
+        // wording ("their emptiness is not evidence the change is clean") says
+        // the same thing as the un-delegated one, so match both.
+        assert.match(s.note, /not evidence (that )?the change is clean/i);
+        assert.match(s.completeness, /Incomplete review/);
+
+        // A pass that did not run must either name where its result can still
+        // come from, or admit there is nowhere. Silence is the failure mode.
+        if (s.modelPass.delegated) {
+            assert.equal(s.modelPass.awaiting, 'submit_review_findings');
+            assert.ok(s.modelPass.reviewId, 'a delegated pass must name the id to submit against');
+            assert.match(s.note, /submit_review_findings/);
+        }
+    }
+    for (const f of s.findings || []) {
+        assert.ok(f.assertionLevel, 'every finding declares how strong a claim it is');
+        assert.notEqual(f.assertionLevel, 'validated', 'nothing here is validated in this review');
     }
 });
 

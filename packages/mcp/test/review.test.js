@@ -5,6 +5,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
+import { readdirSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import { REVIEW_PR_TOOL } from '../src/tools/review.js';
 
@@ -32,9 +33,19 @@ test('the bundle carries every declared section', { timeout: TIMEOUT }, async ()
     }
 });
 
-test('the bundle contains no generated findings and no verdict', { timeout: TIMEOUT }, async () => {
-    // The keyless invariant made observable: if a future change wires an LLM in,
-    // this test is what notices.
+test('the bundle authors findings but never a verdict, and stays keyless', { timeout: TIMEOUT }, async () => {
+    // Deliberately flipped. `review_pr` now authors a `findings` section:
+    // deterministic finders plus, where the client supports MCP sampling, a
+    // model pass run on the CLIENT's model. The old assertion did exactly the
+    // job its comment promised — it is what noticed the change — so it is
+    // narrowed rather than deleted.
+    //
+    // Two halves of the original invariant survive intact and are asserted
+    // below. The server is still KEYLESS: sampling borrows the caller's model,
+    // so no credential reaches this process. And it still authors no VERDICT:
+    // naming a defect is not deciding whether to merge, and the moment this
+    // tool ships a recommendation it has quietly become a second reviewer with
+    // no measured precision behind it.
     //
     // Scanning the whole bundle for phrases cannot express that. The bundle
     // carries evidence — retrieved source, diff hunks, real linter and
@@ -47,10 +58,26 @@ test('the bundle contains no generated findings and no verdict', { timeout: TIME
     const text = r.content[0].text;
 
     const labels = (text.match(/^[a-z_]+:/gm) || []).map((l) => l.slice(0, -1));
-    for (const forbidden of ['findings', 'verdict', 'review', 'summary', 'recommendation']) {
+    for (const forbidden of ['verdict', 'review', 'summary', 'recommendation']) {
         assert.ok(
             !labels.includes(forbidden),
-            `bundle authored a '${forbidden}' section — review_pr returns material, not conclusions`,
+            `bundle authored a '${forbidden}' section — review_pr may name defects, not decide merges`,
+        );
+    }
+    assert.ok(labels.includes('findings'), 'the findings section should now be present');
+
+    // Keyless, still. Asserted against the source rather than the output,
+    // because the output cannot show the absence of a credential.
+    const srcDir = path.join(import.meta.dirname, '..', 'src');
+    const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (
+        e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)]
+    ));
+    for (const file of walk(srcDir).filter((f) => f.endsWith('.js'))) {
+        const body = readFileSync(file, 'utf8');
+        assert.doesNotMatch(
+            body,
+            /process\.env\.[A-Z_]*API_KEY|apiKey\s*[:=]\s*['"]/,
+            `${path.relative(srcDir, file)} reads or hardcodes an API key — this server must stay keyless`,
         );
     }
 

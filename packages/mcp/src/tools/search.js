@@ -29,16 +29,52 @@ function knownSymbolNames(indexer) {
     return [...new Set(names)];
 }
 
+/**
+ * Ordering tiers, matching `reviewScope.reviewPriorityRank`: source outranks
+ * prose, prose outranks lockfiles and generated output.
+ *
+ * A retrieval hit in a changelog is almost never the answer to "how does this
+ * work" — `CHANGES.md` came back SECOND for a question about click's completion
+ * machinery, ahead of `shell_completion.py`. Retrieval score alone cannot see
+ * that, because a changelog genuinely does discuss the topic at length.
+ */
+function pathTier(filename) {
+    const name = String(filename || '');
+    if (/(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|composer\.lock|Gemfile\.lock|go\.sum)$/i.test(name)) return 3;
+    if (/(\.min\.(js|css)|\.map|\.snap)$/i.test(name)) return 3;
+    if (/(^|\/)(CHANGELOG|CHANGES|HISTORY|NEWS)(\.[a-z]+)?$/i.test(name)) return 3;
+    if (/\.(md|markdown|mdx|txt|rst|adoc|asciidoc|org)$/i.test(name)) return 2;
+    return 1;
+}
+
+/** Trim a snippet to a readable window, saying so when it cuts. */
+function windowed(content, maxLines) {
+    const lines = String(content).replace(/\s+$/, '').split('\n');
+    if (lines.length <= maxLines) return { text: lines.join('\n'), shown: lines.length, total: lines.length };
+    return {
+        text: lines.slice(0, maxLines).join('\n'),
+        shown: maxLines,
+        total: lines.length,
+    };
+}
+
 export const SEARCH_CODE_TOOL = {
     name: 'search_code',
     description:
         'Search the indexed repository for code relevant to a natural-language or keyword query. '
-        + 'Hybrid keyword + semantic retrieval. Returns ranked snippets with file paths and line spans.',
+        + 'Hybrid keyword + semantic retrieval. Returns ranked snippets with file paths, line '
+        + 'spans and relevance scores, each trimmed to a readable window.',
     inputSchema: {
         type: 'object',
         properties: {
             query: { type: 'string', description: 'What to look for.' },
             k: { type: 'integer', description: 'Maximum results (default 10).' },
+            max_lines: {
+                type: 'integer',
+                description: 'Lines of each snippet to show before trimming (default 60). '
+                    + 'Raise it to read more of a hit without a second call; the line span '
+                    + 'in the header tells you where to open the file yourself.',
+            },
             ...REPO_ARG,
         },
         required: ['query'],
@@ -47,6 +83,7 @@ export const SEARCH_CODE_TOOL = {
         const indexer = await getIndexer(ctx, resolveRepo(ctx, args));
         await indexer.ensureIndexed({});
         const limit = args.k || 10;
+        const maxLines = Math.max(5, args.max_lines || 60);
 
         // RAGService.retrieveContext(repoId, query, limit, options) returns a
         // FLAT ARRAY of chunk objects by default (formatOutput defaults to
@@ -55,13 +92,56 @@ export const SEARCH_CODE_TOOL = {
         // the chunks, so there is no top-level shape to fall back on.
         const chunks = await indexer.rag.retrieveContext(indexer.repoId, args.query, limit);
 
+        // Collapse hits whose spans overlap in the same file. The RAG layer
+        // dedupes per file by COUNT (maxChunksPerFile), which still returned
+        // `docs/shell-completion.md` twice — once at :1 and once at :146, the
+        // second inside the first — so the same prose was paid for twice.
+        const seen = [];
+        const deduped = [];
+        for (const c of chunks) {
+            const start = Number.isFinite(c.startLine) ? c.startLine : null;
+            const end = start != null ? start + String(c.content).split('\n').length - 1 : null;
+            const overlaps = start != null && seen.some(
+                (s) => s.file === c.filePath && start <= s.end && end >= s.start,
+            );
+            if (overlaps) continue;
+            if (start != null) seen.push({ file: c.filePath, start, end });
+            deduped.push({ ...c, _start: start, _end: end });
+        }
+
+        // Stable sort: keep retrieval order within a tier, demote prose and
+        // generated files below source.
+        const ordered = deduped
+            .map((c, i) => ({ c, i, tier: pathTier(c.filePath) }))
+            .sort((a, b) => (a.tier - b.tier) || (a.i - b.i))
+            .map(({ c }) => c);
+
+        if (ordered.length === 0) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: `No indexed content matched "${args.query}". `
+                        + 'Absence from this index is not absence from the repository: '
+                        + 'call repo_overview to check what was indexed, or index_repo if it may be stale.',
+                }],
+            };
+        }
+
         const capped = capList(
-            chunks,
+            ordered,
             (c) => {
                 // startLine is genuinely optional: RAGService.js sets it to
                 // `chunk.startLine ?? null` when building chunks.
-                const span = c.startLine != null ? `:${c.startLine}` : '';
-                return `--- ${c.filePath}${span}\n${String(c.content).trim()}`;
+                const span = c._start != null
+                    ? `:${c._start}-${c._end}`
+                    : '';
+                const raw = c.relevanceScore ?? c.score;
+                const score = Number.isFinite(raw) ? ` (score ${Number(raw).toFixed(3)})` : '';
+                const win = windowed(c.content, maxLines);
+                const note = win.shown < win.total
+                    ? `\n… ${win.total - win.shown} more lines in this chunk — open ${c.filePath} or raise max_lines`
+                    : '';
+                return `--- ${c.filePath}${span}${score}\n${win.text.trim()}${note}`;
             },
             ctx.config.maxToolTokens,
         );

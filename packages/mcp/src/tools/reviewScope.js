@@ -83,13 +83,93 @@ export function isFileDeletion(file) {
  * Code with comments and string bodies removed, for asking "is this DECLARED
  * here" without a mention in prose counting as one.
  */
+/**
+ * Blank out comments and string literals, leaving every code position intact.
+ *
+ * ONE pass, deliberately. This used to be three chained `.replace()` calls that
+ * stripped strings BEFORE line comments, and either order is wrong:
+ *
+ *   - strings first: an apostrophe in a comment (`// preserves the caller's
+ *     stack`) opens a phantom string that runs to the next quote anywhere in
+ *     the file, deleting the code between.
+ *   - comments first: a `//` inside a string (`'https://example.com'`) opens a
+ *     phantom comment that deletes the rest of the line.
+ *
+ * ky's `source/core/Ky.ts` contains both, and the string-first version reduced
+ * it from 41,382 characters to 13,687 — taking `const validateJsonWithSchema =`
+ * with it. `declares()` then could not find a symbol that was plainly still
+ * there, so `review_pr` reported a surviving function as REMOVED and
+ * `surviving_references` listed it as having no references left. Only a scanner
+ * that tracks one state at a time gets both cases right.
+ *
+ * Newlines inside removed spans are preserved so line numbers still align for
+ * the `'m'`-flagged callers.
+ */
 function codeOnly(text) {
-    return String(text || '')
-        .replace(/\/\*[\s\S]*?\*\//g, ' ')
-        .replace(/(['"`])(?:\\.|(?!\1)[\s\S])*?\1/g, '""')
-        .split('\n')
-        .map((line) => line.replace(/\/\/.*$/, ''))
-        .join('\n');
+    const src = String(text || '');
+    const n = src.length;
+    let out = '';
+    let i = 0;
+
+    while (i < n) {
+        const c = src[i];
+        const next = src[i + 1];
+
+        // Line comment: drop to the newline, which is kept so lines still align.
+        if (c === '/' && next === '/') {
+            while (i < n && src[i] !== '\n') i += 1;
+            continue;
+        }
+
+        // Block comment: drop it, preserving the newlines it spanned.
+        if (c === '/' && next === '*') {
+            i += 2;
+            while (i < n && !(src[i] === '*' && src[i + 1] === '/')) {
+                if (src[i] === '\n') out += '\n';
+                i += 1;
+            }
+            i = Math.min(i + 2, n);
+            out += ' ';
+            continue;
+        }
+
+        // String literal. `"` and `'` cannot span a newline, so an unterminated
+        // one is a stray quote — a apostrophe the scanner reached through code,
+        // or a quote inside a regex literal. Bail at the newline and emit the
+        // opening quote verbatim rather than swallowing the rest of the file.
+        if (c === '"' || c === "'" || c === '`') {
+            const quote = c;
+            const multiline = quote === '`';
+            let j = i + 1;
+            let closed = false;
+            let spanned = '';
+            while (j < n) {
+                if (src[j] === '\\') { j += 2; continue; }
+                if (src[j] === quote) { closed = true; break; }
+                if (src[j] === '\n') {
+                    if (!multiline) break;
+                    spanned += '\n';
+                }
+                j += 1;
+            }
+            if (!closed) {
+                out += quote;
+                i += 1;
+                continue;
+            }
+            // Collapse to an empty literal: the VALUE never matters here, but a
+            // declaration's follow character (`=`, `(`, `:`) on the same line
+            // must survive, so the quotes themselves are kept.
+            out += `""${spanned}`;
+            i = j + 1;
+            continue;
+        }
+
+        out += c;
+        i += 1;
+    }
+
+    return out;
 }
 
 /**

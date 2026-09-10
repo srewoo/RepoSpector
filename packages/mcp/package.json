@@ -1,6 +1,6 @@
 {
   "name": "repospector-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "RepoSpector as an MCP server — repository graph and retrieval context for Claude and Codex. No API key.",
   "type": "module",
   "license": "MIT",

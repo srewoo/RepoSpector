@@ -36,7 +36,12 @@ export function createServer(config) {
     );
 
     // Shared per-process context. Tools receive it and may populate lazily.
-    const ctx = { config, indexer: null };
+    //
+    // `server` is on here so a tool can ask the CLIENT to run a completion
+    // (MCP sampling). That is what lets `review_pr` name defects without this
+    // process ever holding an API key: the user's own session model answers.
+    // Tools must treat it as optional — many clients do not implement sampling.
+    const ctx = { config, indexer: null, server };
 
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: TOOLS.map(({ name, description, inputSchema }) => ({

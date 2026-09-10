@@ -23,7 +23,12 @@ export const IMPACT_OF_CHANGE_TOOL = {
 
         // safetyCheck -> ImpactAnalyzer.quickSafetyCheck: {safe, reason, risk?}
         // when the pipeline has an impactAnalyzer, else null (no graph built).
-        const safety = indexer.pipeline.safetyCheck(args.symbol);
+        //
+        // `depth` is forwarded: it used to reach only the untested-blast-radius
+        // call below, so asking for depth 4 changed half the answer and left
+        // the safety verdict computed at a hardcoded 3.
+        const depth = args.depth || 2;
+        const safety = indexer.pipeline.safetyCheck(args.symbol, { maxDepth: depth });
         // getUntestedInBlastRadius -> ImpactAnalyzer.findUntestedInBlastRadius:
         // always {found, untested, ...} when an impactAnalyzer exists — even
         // for an unknown symbol it returns {found: false, untested: []}, never
@@ -67,19 +72,48 @@ export const REPO_OVERVIEW_TOOL = {
         // {nodeCount, relationshipCount, nodesByLabel, relationshipsByType}.
         const stats = indexer.pipeline.getStats() || {};
         const last = indexer.lastBuild();
+        const parser = indexer.parserMode();
         const lines = [
             `Repository: ${indexer.repoId}`,
             `Path: ${resolveRepo(ctx, args)}`,
             `Graph: ${stats.nodeCount ?? '?'} nodes, ${stats.relationshipCount ?? '?'} edges`,
-            `Parser: ${indexer.parserMode()}`,
+            `Parser: ${parser}`,
         ];
-        if (indexer.parserMode() === 'regex-fallback') {
+        if (parser === 'regex-fallback') {
             lines.push(
                 'Tree-sitter was unavailable, so symbols came from regex extraction — usable but '
                 + 'less precise for multi-line signatures and call targets.',
             );
         }
-        if (last) lines.push(`Last build: ${last.files} files indexed, ${last.skipped} skipped`);
+        if (parser === 'unknown') {
+            // `unknown` is the ABSENCE of a record, not a determination that the
+            // parser was poor. Snapshots written before parser-mode tracking
+                // existed carry no `parser-mode.txt`, and the warm-restore path
+            // never loads tree-sitter, so this printed a bare "unknown" that
+            // read as a finding about the repository — on RepoSpector's own
+            // index, which is exactly where it is least reassuring.
+            lines.push(
+                'Not recorded: this snapshot predates parser tracking, so which extractor built it '
+                + 'cannot be recovered. Run index_repo with force:true to rebuild and label it.',
+            );
+        }
+        if (last) {
+            lines.push(`Last build: ${last.files} files indexed, ${last.skipped} skipped`);
+        } else {
+            // A warm restore has no `lastBuild`, and dropping the line entirely
+            // made a healthy restored index look like a failed build. Report
+            // what the loaded graph does know instead of going quiet.
+            const fileNodes = stats.nodesByLabel?.File;
+            lines.push(
+                `Restored from snapshot (no build this session)${
+                    Number.isFinite(fileNodes) ? `, ${fileNodes} files in the graph` : ''
+                }.`,
+            );
+        }
+        const commit = typeof indexer.indexedCommit === 'function'
+            ? await indexer.indexedCommit().catch(() => null)
+            : null;
+        if (commit) lines.push(`Index built from commit: ${commit}`);
         lines.push(`Snapshot: ${indexer.snapshotPath}`);
 
         return { content: [{ type: 'text', text: lines.join('\n') }] };

@@ -204,6 +204,17 @@ export function renderDiffFiles(files, indexer, maxToolTokens) {
     const render = ({ file, window }) => {
         const neighbours = graphAnnotationForFile(indexer, file.filename);
         const patch = window?.patch || file.patch || '';
+        // A file git considers binary has no textual hunks, so it rendered as a
+        // bare `--- path` header with nothing under it — indistinguishable from
+        // a bug that dropped the patch. Say which it is: RepoSpector's own
+        // `src/utils/sarifExport.js` is treated as binary and appeared blank in
+        // a real review.
+        if (!patch.trim()) {
+            const reason = file.binary === true || /^Binary files /m.test(String(file.rawPatch || ''))
+                ? 'binary file — git reports no textual diff'
+                : 'no textual hunks in this change (mode change, rename, or empty patch)';
+            return `--- ${file.filename}\n[${reason}]${neighbours}`;
+        }
         return `--- ${file.filename}\n${patch}${neighbours}`;
     };
 

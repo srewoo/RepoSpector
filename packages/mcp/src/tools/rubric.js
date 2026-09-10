@@ -1,3 +1,5 @@
+import { delegationInstruction } from './delegation.js';
+
 /**
  * Review instructions for the `review_pr` bundle.
  *
@@ -13,8 +15,15 @@
  * a review produced here and one produced in the extension judge the same
  * things.
  */
-export function buildRubric() {
-    return [
+/**
+ * @param {{reviewId?: string|null}} [opts] When a delegated-review session was
+ *   opened for this bundle, its id is passed here and the rubric gains the
+ *   closing instruction that tells the host where to send its conclusions.
+ *   Omitted when no session could be opened, so the rubric never names a call
+ *   that would fail.
+ */
+export function buildRubric(opts = {}) {
+    const body = [
         'Review the changes in this bundle. Report only defects you can point at.',
         '',
         'Judge, in this order:',
@@ -41,6 +50,11 @@ export function buildRubric() {
         '- covering_tests: coverage of THIS change — tests covering the touched',
         '  symbols, and the test files it deletes or modifies. `repoWide` is',
         '  background. An "untested" symbol may only be one the graph could not link.',
+        '- findings: the only section that makes a CLAIM. Deterministic findings carry',
+        '  a rule id and are reproducible; model-generated ones are candidates a model',
+        '  asserted and nothing checked — try to refute each against the source before',
+        '  repeating it. When `modelPass.ran` is false the reasoning check did not run,',
+        '  which is not evidence that the change is clean.',
         '- similar_code: comparable code retrieved for the touched symbols and paths,',
         '  so you can judge whether the change follows conventions already in use.',
         '- prior_findings: normally the issues raised before on this repository. This',
@@ -67,4 +81,8 @@ export function buildRubric() {
         '',
         'Do not report style preferences, and do not restate what the diff does.',
     ].join('\n');
+
+    return opts?.reviewId
+        ? `${body}\n${delegationInstruction(opts.reviewId)}`
+        : body;
 }

@@ -151,6 +151,34 @@ async function lastUsed(dir) {
  * @returns {Promise<{evicted: Array<{dir: string, repo: string|null, bytes: number}>,
  *   freedBytes: number, totalBytes: number, maxBytes: number}>}
  */
+/**
+ * Total size of the index cache, and how many snapshots it holds.
+ *
+ * Read-only, and deliberately separate from `enforceSizeCap`: the default of
+ * "unlimited" is a considered choice — evicting a live snapshot costs a full
+ * re-index — but nothing ever TOLD anyone the cache was growing, so a real
+ * machine reached 2.5 GB across 452 snapshots without a word. Visibility is the
+ * missing half of that decision, not eviction.
+ *
+ * @returns {Promise<{totalBytes: number, snapshots: number}>}
+ */
+export async function cacheFootprint({ base = INDEX_BASE_DIR } = {}) {
+    let entries;
+    try {
+        entries = await fs.readdir(base, { withFileTypes: true });
+    } catch {
+        return { totalBytes: 0, snapshots: 0 };
+    }
+    let totalBytes = 0;
+    let snapshots = 0;
+    for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        snapshots += 1;
+        totalBytes += await dirSize(path.join(base, entry.name)).catch(() => 0);
+    }
+    return { totalBytes, snapshots };
+}
+
 export async function enforceSizeCap({
     base = INDEX_BASE_DIR, maxBytes, keep = [], dryRun = false,
 }) {

@@ -107,7 +107,10 @@ export async function resolveReviewRev(args = {}, repo, opts = {}) {
  * @returns {Promise<{files: Array<{path: string, content: string, lineNumbers?: number[]}>, source: {kind: string, rev: string|null, reason: string, missing?: string[], skipped?: Array<object>}}>}
  */
 export async function filesForStaticAnalysis(args, repo, diffFiles = [], opts = {}) {
-    const source = await resolveReviewRev(args, repo, opts);
+    // P0-2: when the caller has already resolved the review's revision identity,
+    // use it. Re-resolving per section is what let two sections in one bundle
+    // describe two different commits.
+    const source = opts.source ?? await resolveReviewRev(args, repo, opts);
 
     // `readRepoFiles` filtered by `isIndexableCodeFile`, so lockfiles, minified
     // bundles and binaries never reached the analyzers. Reading blobs at a

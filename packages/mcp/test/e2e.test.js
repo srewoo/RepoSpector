@@ -1,8 +1,24 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+/** Every server this file spawns, so none can outlive the run. */
+const spawned = [];
+after(() => { for (const c of spawned) { try { c.kill(); } catch { /* already gone */ } } });
+
+/**
+ * The wire contract, in one place. It was written out twice, so adding a tool
+ * failed here in two spots with a diff of names and no statement of intent —
+ * and the count in the test's own title went stale the first time it changed.
+ * Sorted, because `tools/list` order is not part of the contract.
+ */
+const EXPECTED_TOOLS = [
+    'find_callers', 'get_diff_context', 'get_review_candidates', 'get_symbol',
+    'impact_of_change', 'index_repo', 'repo_overview', 'review_pr',
+    'search_code', 'submit_review_findings', 'submit_review_verification',
+];
 
 const TIMEOUT = 300000;
 
@@ -32,7 +48,7 @@ function client(entry, args = ['--repo', PKG]) {
             if (line) { try { responses.push(JSON.parse(line)); } catch { /* not a frame */ } }
         }
     });
-    return {
+    const api = {
         child,
         responses,
         send(msg) { child.stdin.write(`${JSON.stringify(msg)}\n`); },
@@ -47,9 +63,17 @@ function client(entry, args = ['--repo', PKG]) {
         },
         kill() { child.kill(); },
     };
+    // Every spawned server is registered for teardown. Each test kills its own
+    // client on the happy path, but a FAILED assertion skips that line and
+    // leaves the child running — and `node --test` then waits on a process that
+    // never exits, so a one-line assertion failure presents as a hang of the
+    // whole package suite. That is how the tool-list assertion below stalled
+    // the run rather than reporting a diff.
+    spawned.push(api);
+    return api;
 }
 
-test('all eight tools are advertised over the wire', { timeout: TIMEOUT }, async () => {
+test('every registered tool is advertised over the wire', { timeout: TIMEOUT }, async () => {
     const c = client(SRC_ENTRY);
     c.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {
         protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'e2e', version: '0' } } });
@@ -58,10 +82,7 @@ test('all eight tools are advertised over the wire', { timeout: TIMEOUT }, async
     const list = await c.waitFor(2);
 
     const names = list.result.tools.map((t) => t.name).sort();
-    assert.deepEqual(names, [
-        'find_callers', 'get_diff_context', 'get_symbol', 'impact_of_change',
-        'index_repo', 'repo_overview', 'review_pr', 'search_code',
-    ]);
+    assert.deepEqual(names, EXPECTED_TOOLS);
     // Every tool must carry a schema, or a client cannot call it.
     for (const t of list.result.tools) {
         assert.equal(t.inputSchema.type, 'object', `${t.name} has no object schema`);
@@ -128,9 +149,6 @@ test('the built dist/index.js completes a real stdio handshake', { timeout: TIME
     c.send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     const list = await c.waitFor(2);
     const names = list.result.tools.map((t) => t.name).sort();
-    assert.deepEqual(names, [
-        'find_callers', 'get_diff_context', 'get_symbol', 'impact_of_change',
-        'index_repo', 'repo_overview', 'review_pr', 'search_code',
-    ]);
+    assert.deepEqual(names, EXPECTED_TOOLS);
     c.kill();
 });

@@ -49,8 +49,15 @@ test('every snippet is headed by a real file path, never undefined', { timeout: 
     assert.ok(headers.length > 0, 'expected at least one snippet header');
     for (const h of headers) {
         assert.doesNotMatch(h, /undefined|unknown/, `snippet header lost its path: ${h}`);
-        // `--- path/to/file.js` or `--- path/to/file.js:42` once line spans land.
-        assert.match(h, /^--- \S+\.\w+(:\d+)?$/, `not a file path: ${h}`);
+        // `--- path/to/file.js`, optionally `:start-end` now that line spans
+        // landed, optionally ` (score 0.123)`. The span and the score are what
+        // let a reader open the hit and judge it without a second call; the
+        // path itself is what this test is actually guarding.
+        assert.match(
+            h,
+            /^--- \S+\.\w+(:\d+(-\d+)?)?( \(score \d+\.\d+\))?$/,
+            `not a file path: ${h}`,
+        );
     }
     assert.ok(headers.some(h => h.includes('auth.js')), `expected auth.js among ${headers}`);
 });

@@ -31,7 +31,9 @@ test('every tool advertises the repo argument', () => {
             `${t.name} does not accept a per-call repo`,
         );
     }
-    assert.equal(TOOLS.length, 8);
+    // Grows with the registry; kept as an exact count so a tool added without
+    // the repo argument fails here rather than in a user's multi-repo session.
+    assert.equal(TOOLS.length, 11);
     assert.ok(REPO_ARG.repo.description.length > 0);
 });
 
