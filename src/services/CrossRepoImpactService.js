@@ -82,7 +82,7 @@ export class CrossRepoImpactService {
 
         for (const repo of linkedRepos) {
             if (!repo.repoId) { needsIndexing.push(repo); continue; }
-            onProgress?.({ phase: 'cross-repo', message: `Checking ${repo.repoId}...` });
+            onProgress?.({ phase: 'cross-repo', message: `Cross-repo impact: checking ${repo.repoId}...` });
 
             let indexed = this.isRepoIndexed ? await this.isRepoIndexed(repo.repoId) : false;
 

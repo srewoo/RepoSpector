@@ -63,6 +63,9 @@ export class ReviewCrossRepoService {
             // separately so "checked 3 repos" can be traced to whether the user
             // declared them or we inferred them.
             discoveredRepos: 0,
+            // Indexed repos discovery rejected as out-of-namespace. Non-zero here
+            // explains a surprising "no cross-repo impact" without a silent skip.
+            discoveryFiltered: 0,
             linkedReposChecked: 0,
             linkedReposSkipped: 0,
             graphsEmpty: 0,
@@ -75,7 +78,55 @@ export class ReviewCrossRepoService {
     }
 
     /**
-     * Repos other than this one that already have an index locally.
+     * Parse a repoId into the { host, owner } scope used to decide relatedness.
+     *
+     * repoIds arrive in several shapes — `gh:acme/api`, `acme/api`,
+     * `mindtickle/supportops/hermes`, and bare numeric GitLab project ids. Only
+     * the ones that carry an owner/namespace segment can be related to anything;
+     * a bare id (`12345`) is deliberately unparseable, because there is nothing
+     * in it that could prove it belongs to the same org as the repo under review.
+     *
+     * @param {string} repoId
+     * @returns {{host:string, owner:string}|null} null when no owner can be read
+     */
+    static scopeOf(repoId) {
+        const raw = String(repoId ?? '').trim();
+        if (!raw) return null;
+        // `gh:acme/api` / `gitlab.com:acme/api` — everything before the first
+        // colon is the host/provider tag, the rest is the namespace path.
+        const colon = raw.indexOf(':');
+        const host = colon > 0 ? raw.slice(0, colon).toLowerCase() : '';
+        const path = colon > 0 ? raw.slice(colon + 1) : raw;
+        const segments = path.split('/').filter(Boolean);
+        // Needs at least owner + name; a single segment carries no owner.
+        if (segments.length < 2) return null;
+        return { host, owner: segments[0].toLowerCase() };
+    }
+
+    /**
+     * Does a discovered repo belong to the same org as the repo under review?
+     *
+     * Discovery's whole premise — "you indexed two repos, so you work across
+     * both" — is false across organisations. Without this gate every repo in the
+     * local index was walked on every review, so an MR on
+     * `mindtickle/supportops/hermes` checked a personal `srewoo/speeDB`, paid a
+     * graph load for it, and could promote a bare symbol-name collision into a
+     * `blocking` cross-repo finding against a repo that has never depended on it.
+     *
+     * The host is only compared when BOTH ids carry one — half the stores tag it
+     * and half do not, and a missing tag is not evidence of a different host.
+     */
+    static _sameOrg(currentRepoId, candidateRepoId) {
+        const a = ReviewCrossRepoService.scopeOf(currentRepoId);
+        const b = ReviewCrossRepoService.scopeOf(candidateRepoId);
+        if (!a || !b) return false;               // cannot prove relatedness
+        if (a.host && b.host && a.host !== b.host) return false;
+        return a.owner === b.owner;
+    }
+
+    /**
+     * Repos other than this one that already have an index locally AND share the
+     * current repo's owner/namespace (see `_sameOrg`).
      *
      * Capped, because every discovered repo costs a graph load and a symbol scan
      * on the review's critical path. Someone who has indexed twenty repos does
@@ -91,7 +142,7 @@ export class ReviewCrossRepoService {
         try {
             const ids = await this._listIndexedRepos();
             const current = String(currentRepoId ?? '');
-            return (ids || [])
+            const candidates = (ids || [])
                 // The real store (`VectorStore.getAllRepoIds`) hands back
                 // `{repoId, chunksCount}` objects, not bare strings — only the
                 // test doubles returned strings, so this path shipped comparing
@@ -100,7 +151,20 @@ export class ReviewCrossRepoService {
                 // as "Checking [object Object]...". Normalise both shapes here.
                 .map(entry => (entry && typeof entry === 'object' ? entry.repoId : entry))
                 .map(id => String(id ?? ''))
-                .filter(id => id && id !== current)
+                .filter(id => id && id !== current);
+
+            // Same-org gate. Anything outside the current repo's owner/namespace
+            // is not an implicit workspace member, it is just another repo that
+            // happens to be in this browser's index.
+            const related = candidates.filter(id => ReviewCrossRepoService._sameOrg(current, id));
+            const rejected = candidates.length - related.length;
+            if (rejected > 0) {
+                this._stats.discoveryFiltered = rejected;
+                console.log(`🔗 Cross-repo: ignored ${rejected} indexed repo(s) outside `
+                    + `${current}'s namespace (declare them in .repospector.yaml to include them)`);
+            }
+
+            return related
                 .slice(0, max)
                 .map(repoId => ({ repoId, url: null, discovered: true }));
         } catch (e) {
@@ -237,7 +301,7 @@ export class ReviewCrossRepoService {
             indexRepo: this.indexRepo
         });
 
-        onProgress?.({ phase: 'cross-repo', message: `Checking ${links.length} linked repo(s) for impact...` });
+        onProgress?.({ phase: 'cross-repo', message: `Cross-repo impact: checking ${links.length} linked repo(s)...` });
         const res = await resolver.analyze({ changedSymbols, linkedRepos: links, autoIndex, onProgress });
 
         this._stats.dependentRepos = res.dependents?.length || 0;

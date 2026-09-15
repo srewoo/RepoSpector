@@ -131,7 +131,9 @@ describe('discovery fallback', () => {
         expect(messages.join(' ')).not.toContain('[object Object]');
     });
 
-    it('coerces a numeric repoId (GitLab project ids) to a string', async () => {
+    it('coerces a numeric repoId (GitLab project ids) to a string without crashing', async () => {
+        // A bare numeric id carries no owner, so discovery cannot prove it is
+        // related to anything and skips it. It must skip, not throw.
         const svc = makeService({
             indexedRepos: [{ repoId: 12345, chunksCount: 7 }],
             graphs: { '12345': graphWith({ save: [{ filePath: 'a.js' }] }) },
@@ -139,7 +141,90 @@ describe('discovery fallback', () => {
         const out = await svc.run({
             prData: PR_DATA, customConfig: {}, currentRepoId: 'gh:acme/api',
         });
-        expect(out.dependents.map(d => d.repoId)).toEqual(['12345']);
+        expect(out).toBeNull();
+    });
+
+    describe('same-org gate', () => {
+        // The bug: an MR on mindtickle/supportops/hermes printed
+        // "Checking srewoo/speeDB..." and walked a personal repo in a different
+        // organisation, purely because both were in the local index.
+        it('ignores indexed repos outside the current repo owner', async () => {
+            const svc = makeService({
+                indexedRepos: ['mindtickle/supportops/hermes', 'srewoo/speeDB'],
+                graphs: {
+                    // speeDB would have "referenced" the symbol by bare name.
+                    'srewoo/speeDB': graphWith({ save: [{ filePath: 'src/db.js' }] }),
+                },
+            });
+
+            const messages = [];
+            const out = await svc.run({
+                prData: PR_DATA,
+                customConfig: {},
+                currentRepoId: 'mindtickle/supportops/hermes',
+                onProgress: (p) => messages.push(p.message),
+            });
+
+            expect(out).toBeNull();
+            expect(messages.join(' ')).not.toContain('speeDB');
+        });
+
+        it('still walks sibling repos under the same owner', async () => {
+            const svc = makeService({
+                indexedRepos: ['mindtickle/supportops/hermes', 'mindtickle/platform/api', 'srewoo/speeDB'],
+                graphs: {
+                    'mindtickle/platform/api': graphWith({ save: [{ filePath: 'src/app.js' }] }),
+                    'srewoo/speeDB': graphWith({ save: [{ filePath: 'src/db.js' }] }),
+                },
+            });
+
+            const out = await svc.run({
+                prData: PR_DATA,
+                customConfig: {},
+                currentRepoId: 'mindtickle/supportops/hermes',
+            });
+
+            expect(out.stats.discoveredRepos).toBe(1);
+            expect(out.stats.discoveryFiltered).toBe(1);
+            expect(out.dependents.map(d => d.repoId)).toEqual(['mindtickle/platform/api']);
+        });
+
+        it('treats the same owner on different hosts as unrelated', async () => {
+            const svc = makeService({
+                indexedRepos: ['gl:acme/web'],
+                graphs: { 'gl:acme/web': graphWith({ save: [{ filePath: 'a.js' }] }) },
+            });
+            const out = await svc.run({
+                prData: PR_DATA, customConfig: {}, currentRepoId: 'gh:acme/api',
+            });
+            expect(out).toBeNull();
+        });
+
+        it('compares owners case-insensitively', async () => {
+            const svc = makeService({
+                indexedRepos: ['gh:Acme/web'],
+                graphs: { 'gh:Acme/web': graphWith({ save: [{ filePath: 'a.js' }] }) },
+            });
+            const out = await svc.run({
+                prData: PR_DATA, customConfig: {}, currentRepoId: 'gh:acme/api',
+            });
+            expect(out.dependents.map(d => d.repoId)).toEqual(['gh:Acme/web']);
+        });
+
+        it('never filters a DECLARED workspace by owner', async () => {
+            // An explicit .repospector.yaml is the user stating the relationship;
+            // cross-org is legitimate there.
+            const svc = makeService({
+                indexedRepos: [],
+                graphs: { 'other-org/consumer': graphWith({ save: [{ filePath: 'a.js' }] }) },
+            });
+            const out = await svc.run({
+                prData: PR_DATA,
+                customConfig: { workspace: { repos: ['https://github.com/other-org/consumer'] } },
+                currentRepoId: 'mindtickle/supportops/hermes',
+            });
+            expect(out.dependents.map(d => d.repoId)).toEqual(['other-org/consumer']);
+        });
     });
 
     it('survives a store that cannot list repos', async () => {
