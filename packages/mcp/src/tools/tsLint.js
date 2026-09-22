@@ -41,11 +41,14 @@ async function getEngine() {
 
 /**
  * @param {Array<{path: string, content: string}>} files
- * @returns {Promise<{findings: Array<object>, filesParsed: number}>}
+ * @returns {Promise<{findings: Array<object>, filesParsed: number, unparsed: string[]}>}
  */
 export async function lintTypeScript(files = []) {
-    const applicable = files.filter((f) => f?.content && /\.tsx?$/i.test(f.path || ''));
-    if (applicable.length === 0) return { findings: [], filesParsed: 0 };
+    // JS as well as TS: the acorn engine claims `.js/.jsx/.mjs/.cjs` but cannot
+    // parse Flow annotations, and returns `ok: false` rather than saying so — so
+    // a Flow-annotated .js got neither a parsed analysis nor a reported gap.
+    const applicable = files.filter((f) => f?.content && /\.(tsx?|jsx?|mjs|cjs)$/i.test(f.path || ''));
+    if (applicable.length === 0) return { findings: [], filesParsed: 0, unparsed: [] };
 
     let lint;
     try {
@@ -53,16 +56,19 @@ export async function lintTypeScript(files = []) {
     } catch {
         // No grammar available. `filesParsed: 0` is what makes this
         // distinguishable from a clean pass.
-        return { findings: [], filesParsed: 0 };
+        return { findings: [], filesParsed: 0, unparsed: [] };
     }
 
     const findings = [];
+    const unparsed = [];
     let filesParsed = 0;
     for (const file of applicable) {
         try {
-            if (!lint.supports(file.path)) continue;
+            if (!lint.supports(file.path)) { unparsed.push(file.path); continue; }
             const result = await lint.analyze(file.content, { filePath: file.path });
-            if (!result?.ok) continue;
+            // A file the parser could not read is NOT a file with no defects.
+            // Counting it as either would let an unavailable check read as a pass.
+            if (!result?.ok) { unparsed.push(file.path); continue; }
             filesParsed += 1;
             for (const finding of result.findings || []) {
                 findings.push({
@@ -76,9 +82,10 @@ export async function lintTypeScript(files = []) {
             // One unparseable file must not fail the section; the engine
             // already returns `ok: false` for a parse failure, and this covers
             // anything it throws instead.
+            unparsed.push(file.path);
         }
     }
-    return { findings, filesParsed };
+    return { findings, filesParsed, unparsed };
 }
 
 export default { lintTypeScript };

@@ -41,12 +41,31 @@ export function buildFileContext(kase) {
             continue;
         }
 
+        // The PROMPT cap, applied here rather than at fetch time.
+        //
+        // These are two different budgets and conflating them cost 4x tokens for
+        // no recall: the 60 kB limit exists to bound what goes into a prompt, but
+        // the cache it was applied to is also what the AST parser reads — and a
+        // parser spends no tokens. Raising the fetch cap so the parser could see
+        // whole files therefore sent whole 3 MB files into the prompt as well.
+        //
+        // So the cache now holds the complete file for the parser, and the prompt
+        // view is capped here. `truncated` stays honest either way, so
+        // `dynamicContext` still refuses to expand into content that stops
+        // mid-file.
+        const PROMPT_MAX_BYTES = 60_000;
+        const promptContent = fullContent.length > PROMPT_MAX_BYTES
+            ? fullContent.slice(0, PROMPT_MAX_BYTES)
+            : fullContent;
+
         const entry = {
-            fullContent,
-            // The fetcher caps at 60 kB, the same cap the service applies. A file
-            // at exactly the cap is assumed truncated: claiming otherwise would
-            // let `dynamicContext` expand into content that stops mid-file.
-            truncated: fullContent.length >= 60_000,
+            fullContent: promptContent,
+            // `>=`, not `>`: a file sitting exactly on the cap may have been cut
+            // there by the fetcher too, and that is not recoverable from the
+            // cached bytes. Claiming it is complete would let `dynamicContext`
+            // expand into content that stops mid-file, so the conservative
+            // answer is the correct one.
+            truncated: fullContent.length >= PROMPT_MAX_BYTES,
             testPath: null,
             testContent: null,
             testFileMissing: false,

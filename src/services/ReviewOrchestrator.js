@@ -29,6 +29,7 @@ import {
 import { liftEngineFindings } from './engineContract.js';
 import { normalizeFindingKeys } from './FindingsNormalizer.js';
 import { parsePatchHunks } from '../utils/patchLines.js';
+import { anchorFindings } from '../utils/anchorFindings.js';
 import { createCompleteness, mergeCompleteness } from '../utils/reviewCompleteness.js';
 
 /** Wall-clock cap per chunk. */
@@ -351,9 +352,26 @@ export class ReviewOrchestrator {
         // ── 5. Filter both phases to the MR's actual changed hunks ──────
         // Built from the files that were actually reviewed, so a partial run cannot
         // admit a finding on a file it never read.
-        const allow = buildAssignedHunks(toParsedFiles(effectivePrData.files));
+        const parsedFiles = toParsedFiles(effectivePrData.files);
+
+        // Re-derive each finding's position from the code it quoted, BEFORE the
+        // hunk filter judges that position. Order matters: the filter drops a
+        // finding whose line sits outside the diff and snaps one that lands
+        // within ±3 of a changed line, so a drifted line number is either lost
+        // or silently relocated onto unrelated code. Anchoring first means both
+        // decisions are made about where the finding actually points.
+        const anchored = anchorFindings(deepFindings.filter(Boolean), parsedFiles);
+        if (anchored.stats.moved || anchored.stats.relocated || anchored.stats.unmatched) {
+            console.log(
+                `[Anchor] ${anchored.stats.anchored} anchored (${anchored.stats.moved} line(s) corrected), `
+                + `${anchored.stats.relocated} re-filed to another file, `
+                + `${anchored.stats.unmatched} unmatched, ${anchored.stats.unevidenced} quoted no code`,
+            );
+        }
+
+        const allow = buildAssignedHunks(parsedFiles);
         const deepFiltered = filterToAssignedHunks(
-            deepFindings.filter(Boolean),
+            anchored.findings,
             allow,
             options.normalization,
         );

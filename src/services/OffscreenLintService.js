@@ -1,5 +1,5 @@
 /**
- * OffscreenLintService — service-worker-side client for Python/Go AST linting.
+ * OffscreenLintService — service-worker-side client for AST linting.
  *
  * The tree-sitter WASM runtime can't load in the MV3 service worker, so the real
  * py/go lint engine runs in the shared offscreen document (same place as the code
@@ -12,14 +12,19 @@
 
 const BATCH_SIZE = 30;
 const MESSAGE_TIMEOUT_MS = 120000;
-const PY_GO = /\.(py|pyw|go|ts|tsx)$/i;
+// Extended to the JS family once TreeSitterLintEngine gained JavaScript queries.
+// The acorn engine in the worker cannot parse Flow or TypeScript annotations and
+// returns `ok: false` for them, which the caller could not distinguish from a
+// clean file — a planted `==` in a @flow-annotated .js went unreported although
+// the eqeqeq rule was written and working.
+const PY_GO = /\.(py|pyw|go|ts|tsx|js|jsx|mjs|cjs)$/i;
 
 export class OffscreenLintService {
     constructor() {
         this.messageId = 300000; // distinct id space from embeddings/graph parser
     }
 
-    /** True for files this engine handles (Python/Go). */
+    /** True for files this engine handles (Python, Go, TypeScript, JavaScript). */
     static handles(filename) {
         return PY_GO.test(filename || '');
     }

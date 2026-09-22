@@ -5,6 +5,8 @@ import {
 } from '../../../../src/utils/deterministicAdmission.js';
 import { createCompleteness, describeCompleteness } from '../../../../src/utils/reviewCompleteness.js';
 import { AWAITING_CALL } from './delegation.js';
+import { anchorFindings } from '../../../../src/utils/anchorFindings.js';
+import { parsedFilesFrom } from './anchor.js';
 
 /**
  * findings — `review_pr` stops at evidence and starts naming defects.
@@ -44,7 +46,13 @@ An empty findings list is a valid and often correct answer.
 
 Respond with JSON only:
 {"findings":[{"file":"path","line":123,"severity":"critical|high|medium|low",
-"title":"one line","description":"what breaks, and the trigger","evidence":"the exact line from the diff"}]}`;
+"title":"one line","description":"what breaks, and the trigger","evidence":"the exact line from the diff"}]}
+
+\`evidence\` must be the changed line — or the few consecutive lines — the finding
+is about, copied VERBATIM from the diff, without the leading +/- marker. The
+finding is positioned by matching that text against the diff, and the match is
+trusted over your \`line\` number. Reworded, reindented or remembered evidence
+matches nothing and leaves the finding unpositioned.`;
 
 /**
  * Deterministic findings — Option A. No model, no key, no network.
@@ -181,7 +189,7 @@ export async function buildFindingsSection({
         ? await modelFindings(server, { hunks, context })
         : { findings: [], available: false, reason: sampling.reason, model: null, raw: null };
 
-    const modelFound = (model.findings || []).map((f) => ({
+    const modelFound = anchorFindings((model.findings || []).map((f) => ({
         file: f.file ?? f.filePath ?? null,
         line: f.line ?? null,
         severity: f.severity ?? 'medium',
@@ -193,7 +201,7 @@ export async function buildFindingsSection({
         // host agent reading this bundle is expected to try to refute it.
         assertionLevel: 'model-asserted',
         validationStatus: 'unvalidated',
-    }));
+    })), parsedFilesFrom(diffFiles)).findings;
 
     // A pass that could not run is an incomplete review, and the contract says
     // so in the same vocabulary the extension uses.

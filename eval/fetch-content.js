@@ -44,12 +44,33 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 
 /** Mirrors ReviewFileContextService.DEFAULTS — see the header. */
-const CAPS = Object.freeze({
+const CAPS = {
     maxFiles: 12,
     maxBytesPerFile: 60_000,
     maxTotalBytes: 400_000,
     concurrency: 4,
-});
+};
+
+/**
+ * `--max-bytes` raises the per-file cache cap.
+ *
+ * The production cap exists to bound PROMPT TOKENS. An AST parser spends no
+ * tokens — it reads the file and throws it away — so applying the prompt budget
+ * to the parser's input buys nothing and costs coverage: a defect past byte
+ * 60,000 of a large file is invisible to the AST layer, which then reports no
+ * findings, which reads downstream as a clean file. Measured: a planted `==` at
+ * line 3807 of a 3 MB `checker.ts` was unreachable because the cached copy
+ * stopped at line ~1500.
+ *
+ * Raising it here changes what the PARSER can see. Prompt assembly still applies
+ * its own budget downstream (reviewContextBudget / ReviewFileContextService), so
+ * a bigger cache does not mean a bigger prompt.
+ */
+function applyMaxBytes(n) {
+    if (!Number.isFinite(n) || n <= 0) return;
+    CAPS.maxBytesPerFile = n;
+    CAPS.maxTotalBytes = Math.max(CAPS.maxTotalBytes, n * CAPS.maxFiles);
+}
 
 /** Same exclusions ReviewFileContextService applies. */
 const SKIP_EXT = /\.(lock|min\.js|min\.css|map|svg|png|jpe?g|gif|ico|woff2?|ttf|eot|pdf|zip|gz|jar|class|pyc|so|dylib|dll|exe|bin|wasm)$/i;
@@ -64,6 +85,7 @@ function parseArgs(argv) {
         else if (a === '--only') args.only = argv[++i];
         else if (a === '--limit') args.limit = Number(argv[++i]);
         else if (a === '--force') args.force = true;
+        else if (a === '--max-bytes') args.maxBytes = Number(argv[++i]);
         else if (a === '--help' || a === '-h') args.help = true;
         else throw new Error(`Unknown argument: ${a}`);
     }
@@ -120,6 +142,7 @@ async function fetchFile(repo, sha, path, token) {
 
 async function main() {
     const args = parseArgs(process.argv.slice(2));
+    applyMaxBytes(args.maxBytes);
     if (args.help) {
         console.log([
             'Usage: node eval/fetch-content.js [options]',

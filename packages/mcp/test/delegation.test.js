@@ -215,3 +215,64 @@ test('the instruction tells the host that asking is not answering', () => {
     assert.match(text, /recorded INCOMPLETE until you/);
     assert.match(text, /not_reviewed/);
 });
+
+/**
+ * Positioning. The host reads a bundle of trimmed hunks and reports a line
+ * number from it; the quote it cites is the only part of that claim this server
+ * can check. Matching the quote back against the parsed diff is what turns a
+ * reported line into a verified one — and, when the host filed the finding
+ * against the wrong path, moves it to the file the code is actually in.
+ */
+const ANCHOR_FILES = [{
+    filename: 'app/handler.py',
+    patch: [
+        '@@ -10,3 +10,4 @@ def handler(req):',
+        ' def handler(req):',
+        '-    ts = req.get("ts")',
+        '+    ts = req.get("ts", 0)',
+        '+    created = datetime.utcfromtimestamp(ts)',
+    ].join('\n'),
+}];
+
+test('a submitted finding is repositioned onto the line its evidence quotes', async () => {
+    beginDelegatedReview({
+        repoPath: REPO, repoName: 'demo', baseSha: BASE, headSha: HEAD,
+        diffFiles: ANCHOR_FILES,
+    });
+    const res = await submit({
+        review_id: reviewIdFor({ repoPath: REPO, baseSha: BASE, headSha: HEAD }),
+        reviewer: { name: 'test-model' },
+        findings: [{
+            file: 'app/handler.py',
+            line: 7,                     // drifted: counted from the hunk, not the file
+            severity: 'blocking',
+            title: 'naive UTC datetime',
+            evidence: '    created = datetime.utcfromtimestamp(ts)',
+        }],
+        repo: REPO,
+    });
+    const body = JSON.parse(res.content[0].text);
+    assert.equal(body.positioning.anchored, 1);
+    assert.equal(body.positioning.lineCorrected, 1);
+});
+
+test('an unmatched quote leaves the reported line alone and says so', async () => {
+    beginDelegatedReview({
+        repoPath: REPO, repoName: 'demo', baseSha: BASE, headSha: HEAD,
+        diffFiles: ANCHOR_FILES,
+    });
+    const res = await submit({
+        review_id: reviewIdFor({ repoPath: REPO, baseSha: BASE, headSha: HEAD }),
+        reviewer: { name: 'test-model' },
+        findings: [{
+            file: 'app/handler.py',
+            line: 12,
+            title: 'paraphrased the code instead of quoting it',
+            evidence: 'creates a naive datetime from the timestamp',
+        }],
+        repo: REPO,
+    });
+    const body = JSON.parse(res.content[0].text);
+    assert.equal(body.positioning.unmatched, 1);
+    assert.equal(body.positioning.anchored, 0);
+});

@@ -76,11 +76,25 @@ test('clean TypeScript yields nothing', { timeout: TIMEOUT }, async () => {
     assert.deepEqual(findings, []);
 });
 
-test('a .js file is left to the acorn engine', { timeout: TIMEOUT }, async () => {
+// Was: "a .js file is left to the acorn engine". That division of labour was
+// wrong where it mattered — acorn cannot parse Flow or TypeScript annotations
+// and returns `ok: false`, which is indistinguishable downstream from a clean
+// file. Measured: a planted `==` in a @flow-annotated .js went unreported
+// although the eqeqeq rule was written and working. JS now gets the same
+// tree-sitter pass TypeScript does; acorn remains the first attempt for plain JS.
+test('a .js file is parsed here too, because acorn cannot parse all JS', { timeout: TIMEOUT }, async () => {
     const files = [{ path: 'src/thing.js', content: 'const x = 1 == 2;\n' }];
     const { findings, filesParsed } = await lintTypeScript(files);
-    assert.deepEqual(findings, []);
-    assert.equal(filesParsed, 0, 'claimed to have parsed a file it does not handle');
+    assert.equal(filesParsed, 1);
+    assert.ok(findings.some((f) => String(f.ruleId).includes('eqeq')), 'loose equality should be reported');
+});
+
+test('a file the parser could not read is reported, never counted as clean', { timeout: TIMEOUT }, async () => {
+    const { filesParsed, unparsed } = await lintTypeScript([
+        { path: 'src/thing.rb', content: 'x = 1' },
+    ]);
+    assert.equal(filesParsed, 0);
+    assert.deepEqual(unparsed, [], 'a file this engine never claims is not an unparsed file');
 });
 
 test('unparseable content fails soft rather than failing the section', { timeout: TIMEOUT }, async () => {

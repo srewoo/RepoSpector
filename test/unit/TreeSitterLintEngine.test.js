@@ -151,10 +151,15 @@ describe('TreeSitterLintEngine — TypeScript', () => {
 });
 
 describe('TreeSitterLintEngine — scope', () => {
-    it('does not support JS (handled by the acorn engine)', async () => {
-        expect(engine.supports('a.js')).toBe(false);
-        const r = await engine.analyze('eval(x)', { filePath: 'a.js' });
-        expect(r.ok).toBe(false);
+    // Was: "does not support JS (handled by the acorn engine)". That assumption
+    // was wrong in the one case that mattered — acorn cannot parse Flow or
+    // TypeScript annotations and returns `ok: false`, which reads downstream as
+    // a clean file. A planted `==` in a @flow-annotated .js went unreported
+    // although the eqeqeq rule was written and working, so JS now gets the same
+    // tree-sitter queries TypeScript does.
+    it('supports JS, because the acorn engine cannot parse all of it', async () => {
+        expect(engine.supports('a.js')).toBe(true);
+        expect(engine.supports('a.jsx')).toBe(true);
     });
     it('does support TypeScript now', () => {
         expect(engine.supports('a.ts')).toBe(true);

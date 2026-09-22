@@ -236,7 +236,18 @@ const TS = [
     { q: '(catch_clause body: (statement_block) @body) @c', report: 'c', handle: (m) => (m.body && m.body.namedChildCount === 0 ? 'ts/no-empty-catch' : null) }
 ];
 
-const QUERIES = { python: PY, go: GO, typescript: TS };
+// JavaScript reuses the TypeScript query set. Every node type the TS rules
+// match — call_expression, member_expression, pair, variable_declarator,
+// binary_expression, debugger_statement, catch_clause — exists in the
+// tree-sitter JavaScript grammar under the same name, so the queries are
+// grammar-portable as written.
+//
+// Without this entry `supports()` returned false for every .js/.jsx file and
+// the engine reported `ok: false, findings: []` — indistinguishable downstream
+// from "this file is clean". Measured cost: a planted `==` defect in a Flow
+// file went unreported although `ts/eqeqeq` was written and working, because
+// the only other JS analyser (acorn) cannot parse Flow or TypeScript at all.
+const QUERIES = { python: PY, go: GO, typescript: TS, javascript: TS };
 
 export class TreeSitterLintEngine {
     /** @param {Object} opts - { parser: TreeSitterParser } */

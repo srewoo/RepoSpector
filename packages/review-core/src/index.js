@@ -47,3 +47,7 @@ export {
 export { ReviewOrchestrator } from './ReviewOrchestrator.js';
 
 export { liftEngineFindings } from './engineContract.js';
+
+// Evidence-anchored positioning: shared by the extension orchestrator and the
+// MCP server so a finding is placed the same way whichever runs the review.
+export { anchorFindings, locateInHunks } from './anchorFindings.js';

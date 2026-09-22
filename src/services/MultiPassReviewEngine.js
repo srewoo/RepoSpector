@@ -15,6 +15,7 @@ import {
     getLanguageRules
 } from '../utils/multiPassPrompts.js';
 import { createCompleteness } from '../utils/reviewCompleteness.js';
+import { runReviewPlan } from '../utils/reviewPlan.js';
 
 /**
  * Multi-pass PR review engine.
@@ -138,6 +139,7 @@ export class MultiPassReviewEngine {
             // What the measured prompt reserve turned out to be, per unit. A
             // budget nobody measures is a guess with a number on it.
             const promptFits = [];
+            const planned = [];
 
             const results = await batchProcessor.processBatches(
                 [reviewUnits], // Single batch, concurrency handled by semaphore
@@ -198,8 +200,9 @@ export class MultiPassReviewEngine {
                         );
                     }
 
-                    const buildPrompt = (forUnit, extraOmitted) => buildPerFileReviewPrompt(forUnit, {
+                    const buildPrompt = (forUnit, extraOmitted, plan = '') => buildPerFileReviewPrompt(forUnit, {
                         prContext,
+                        reviewPlan: plan,
                         focusAreas,
                         ragChunks: this._getRAGChunksForUnit(ragByFile, unit),
                         staticFindings: this._getStaticFindingsForUnit(findingsByFile, unit),
@@ -240,7 +243,19 @@ export class MultiPassReviewEngine {
                         omittedHunks: fitted.stats.omittedHunks,
                     });
 
-                    let prompt = buildPrompt(unitForPrompt, omittedFiles);
+                    // Plan pass: on a large unit, name and rank the risks first,
+                    // then hand that list to the review as an agenda. Gated on
+                    // size and fail-open — '' means the review runs exactly as
+                    // it did before. See utils/reviewPlan.js.
+                    const reviewPlan = options.reviewPlan === false ? '' : await runReviewPlan({
+                        llmService: this.llmService,
+                        unit: unitForPrompt,
+                        settings,
+                        prContext,
+                    });
+                    if (reviewPlan) planned.push(unit.primaryFile ?? unit.files[0]?.filename ?? null);
+
+                    let prompt = buildPrompt(unitForPrompt, omittedFiles, reviewPlan);
 
                     // The measured overhead: everything in the assembled prompt
                     // that is not this unit's diff text.
@@ -257,7 +272,7 @@ export class MultiPassReviewEngine {
                             ? { ...unit, files: fitted.included }
                             : unit;
                         const refitOmitted = fitted.included.length ? fitted.omitted : [];
-                        prompt = buildPrompt(refitUnit, refitOmitted);
+                        prompt = buildPrompt(refitUnit, refitOmitted, reviewPlan);
                         promptFits.push({
                             unit: unit.primaryFile ?? null,
                             estimatedOverhead: Math.round(contextWindow * 0.2),
@@ -336,6 +351,7 @@ export class MultiPassReviewEngine {
             });
 
             console.log(`📋 Multi-pass: ${perFileFindings.length} successful, ${failedFiles.length} failed`);
+            if (planned.length) console.log(`🗺️  Review plan: ${planned.length}/${reviewUnits.length} unit(s) planned before review`);
 
             // A credential failure is not a "failed file" — it is the whole
             // review failing, and it must not be absorbed into `failedFiles`.

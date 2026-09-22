@@ -13,6 +13,7 @@ import { buildFindingsSection } from './findings.js';
 import { beginDelegatedReview } from './delegation.js';
 import { applyPremiseGate, renderStaticSection } from './staticFindings.js';
 import { lintTypeScript } from './tsLint.js';
+import { promoteIntroducedFindings } from '../../../../src/utils/changedLineSeverity.js';
 import { buildRubric } from './rubric.js';
 import {
     capText, estimateTokens, allocateTokens, renderJsonSection,
@@ -112,6 +113,12 @@ export async function runStaticAnalysis(diffFiles, ctx, repo, args = {}, opts = 
         raw.findings = [...(raw.findings || []), ...tsFindings];
         raw.totalFindings = raw.findings.length;
     }
+
+    // A loose comparison this change INTRODUCED is a behavioural change, not the
+    // style note the same rule produces for pre-existing code. Severity is
+    // decided by whether the line is added; see utils/changedLineSeverity.js.
+    const promotedLint = promoteIntroducedFindings(raw.findings || [], diffFiles);
+    raw.findings = promotedLint.findings;
 
     // The premise gate: a rule whose own construct is absent where it fired is
     // mis-mapped, not a defect. This module had one caller in the extension and
@@ -336,6 +343,7 @@ export const REVIEW_PR_TOOL = {
                 repoName: indexer?.repoId ?? null,
                 baseSha: identity.baseSha ?? null,
                 headSha: identity.headSha ?? null,
+                diffFiles,
             });
         } catch { delegated = null; }
         const reviewId = delegated?.reviewId ?? null;

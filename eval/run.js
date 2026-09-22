@@ -34,6 +34,7 @@ import { SuggestionScorer } from '../src/services/SuggestionScorer.js';
 import { filterGenuineProblems } from '../src/utils/genuineProblemGate.js';
 import { ExternalFindingsService } from '../src/services/ExternalFindingsService.js';
 import { buildFileContext, buildDeclarations, alignmentReport } from './lib/fileContext.js';
+import { promoteIntroducedFindings } from '../src/utils/changedLineSeverity.js';
 import { graphFindingsForCase } from './lib/graphContext.js';
 import { createRetention, recordStage } from './lib/retention.js';
 import { buildManifest } from './lib/manifest.js';
@@ -165,8 +166,49 @@ export async function reviewOne(kase, { llm, settings, opts }) {
     // not into staticFindings — matching where the shipped handler's
     // `3a-graph` block appends them (after `verifier.verify()`).
     const graph = opts.graphFindings !== false ? graphFindingsForCase(kase) : { findings: [], stats: null };
+    // Tree-sitter AST lint. The extension gets this through the offscreen
+    // document (OffscreenLintService); the harness has no offscreen document, so
+    // it uses the Node parser the MCP package already builds from the same wasm
+    // grammars. Without it the harness measured a reviewer whose AST layer was
+    // inert on every TypeScript and Flow file — which is precisely the gap this
+    // corpus was failing to detect.
+    let astLint = { findings: [], filesParsed: 0 };
+    try {
+        const files = (prData.files || [])
+            // Straight from the corpus cache, not `fileContext`: that map is gated
+            // on patch/content alignment and is empty for exactly the large,
+            // stale-content files whose AST layer this is meant to restore.
+            .map(f => ({
+                path: f.filename,
+                content: (typeof kase.fileContents?.[f.filename] === 'string'
+                    ? kase.fileContents[f.filename]
+                    : kase.fileContents?.[f.filename]?.content) ?? f.fullContent ?? '',
+            }))
+            .filter(f => f.content);
+        // Imported lazily: this module pulls in the Node tree-sitter parser,
+        // and a static import puts it in Jest's path for every suite that loads
+        // this file — where it sits outside the Babel transform and fails to
+        // parse. Nothing needs it until a case is actually reviewed.
+        const { lintTypeScript } = await import('../packages/mcp/src/tools/tsLint.js');
+        astLint = await lintTypeScript(files);
+    } catch (e) {
+        console.warn(`  tree-sitter lint unavailable: ${e?.message}`);
+    }
+    // A rule whose defect-ness depends on the line being NEW. See
+    // utils/changedLineSeverity.js — without this the AST layer detects the
+    // introduced `==` and `genuineProblemGate` then drops it as low severity.
+    const promotedLint = promoteIntroducedFindings(astLint.findings, prData.files);
+    astLint = { ...astLint, findings: promotedLint.findings };
+    if (promotedLint.promoted) {
+        console.log(`  ⬆️  ${promotedLint.promoted} static finding(s) promoted: introduced by this change`);
+    }
+    if (astLint.unparsed?.length) {
+        console.log(`  🌳 AST lint: ${astLint.filesParsed} parsed, ${astLint.unparsed.length} unparsed (${astLint.unparsed.slice(0, 3).join(', ')})`);
+    }
+
     const staticFindings = [
         ...staticResult.findings,
+        ...astLint.findings,
         ...(external?.findings || []),
     ];
 

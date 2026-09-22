@@ -62,6 +62,7 @@ import {
 import { shouldExplore } from '../../utils/modelCapabilities.js';
 import { LLMService } from '../../services/LLMService.js';
 import { OffscreenLintService } from '../../services/OffscreenLintService.js';
+import { promoteIntroducedFindings } from '../../utils/changedLineSeverity.js';
 import { ReviewCrossRepoService } from '../../services/ReviewCrossRepoService.js';
 import { buildBrief } from '../../services/MRChunker.js';
 import { StandardsSyncService, mergeStandards } from '../../services/StandardsSyncService.js';
@@ -1697,10 +1698,12 @@ export function createPrReviewHandlers(svc) {
                 console.log(`🧠 Code-graph context injected for ${Object.keys(graphContextObj.byFile).length} files`);
             }
 
-            // Real Python/Go AST lint (tree-sitter, runs in the offscreen doc). JS is
-            // already covered by the acorn engine inside StaticAnalysisService. This
-            // closes the measured py/go regex gap. Best-effort: merges into the static
-            // findings, never fatal.
+            // Real AST lint (tree-sitter, runs in the offscreen doc) for Python, Go,
+            // TypeScript and now the JS family. JS used to be left to the acorn engine
+            // inside StaticAnalysisService on the assumption it was covered — but acorn
+            // cannot parse Flow or TypeScript annotations and returns `ok: false`, which
+            // reads downstream exactly like a clean file. Best-effort: merges into the
+            // static findings, never fatal.
             try {
                 const astLintFiles = (prData.files || [])
                     .filter(f => f.fullContent && OffscreenLintService.handles(f.filename))
@@ -1723,6 +1726,15 @@ export function createPrReviewHandlers(svc) {
                         for (const fnd of findings) { staticResult.findings.push(fnd); added++; }
                     }
                     if (added) {
+                        // Same rule, severity decided by whether this change wrote
+                        // the line. See utils/changedLineSeverity.js.
+                        const promotedLint = promoteIntroducedFindings(
+                            staticResult.findings, prData.files,
+                        );
+                        staticResult.findings = promotedLint.findings;
+                        if (promotedLint.promoted) {
+                            console.log(`⬆️  ${promotedLint.promoted} static finding(s) promoted: introduced by this change`);
+                        }
                         staticResult.totalFindings = staticResult.findings.length;
                         console.log(`🌳 Tree-sitter AST lint: ${added} findings (py/go replace regex, ts union)`);
                     }

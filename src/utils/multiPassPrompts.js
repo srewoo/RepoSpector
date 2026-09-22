@@ -331,6 +331,7 @@ Report every real issue found in Steps 1-2. Each finding MUST have:
   "description": "Line 47 calls datetime.utcfromtimestamp(ts) which returns a naive UTC datetime. This is deprecated and will be removed. It also causes timezone bugs when compared with timezone-aware datetimes.",
   "impact": "Will emit DeprecationWarning in Python 3.12+ and break in future Python versions. Timezone-naive comparison bugs possible.",
   "suggestion": "Replace with: datetime.fromtimestamp(ts, tz=timezone.utc)",
+  "evidence": "        created = datetime.utcfromtimestamp(ts)",
   "confidence": 0.95
 }
 \`\`\`
@@ -341,6 +342,20 @@ Confidence is a claim about proof, not a hedge. Use 0.9+ when the shown lines pr
 Focus on CHANGED lines (+ lines), but use context lines to understand intent.
 Every diff is presented as numbered hunks: the number at the start of each line
 in \`__new hunk__\` IS that line's number in the file. Report it verbatim.
+
+## Evidence (required — this is how your finding gets positioned)
+Every finding MUST carry an \`evidence\` field holding the changed line — or the
+few consecutive lines — the finding is about, copied VERBATIM out of the diff.
+Copy the code exactly as it appears, WITHOUT the leading line number and without
+the \`+\`/\`-\` diff marker. Quote only the lines the defect is in, not the
+surrounding context.
+
+The reviewer locates your finding by matching that text against the diff, and
+trusts the match over your \`line\` number. Evidence that was reworded, retyped
+from memory, reindented, or taken from a file other than the one you named
+matches nothing, and the finding is then reported at an unverified position or
+dropped. If you cannot quote the line, you are not looking at it — omit the
+finding.
 If the code is clean or no defect can be proven from the supplied evidence, return an empty findings array.`;
 
 export const AGGREGATION_SYSTEM_PROMPT = `You are RepoSpector performing the final synthesis of a multi-pass Pull Request review. You received structured per-file findings from individual file reviews.
@@ -394,6 +409,7 @@ export function buildPerFileReviewPrompt(unit, context = {}) {
         staticFindings,
         languageRules,
         conventionBlock = '',
+        reviewPlan = '',
         standardsText = '',
         // The repo's own AGENTS.md / CLAUDE.md, pre-rendered and sanitised by
         // RepoInstructionsService. Absent for repos that carry neither.
@@ -550,6 +566,29 @@ ${String(conventionBlock).trim()}
     // code-graph slice for these files, and the diff itself. They start a
     // new part so the shared preamble above can carry the cache breakpoint.
     let rest = '';
+
+    // ── Section 2b: the review plan, when one was produced ──
+    //
+    // An agenda, not evidence. It is placed BEFORE the static findings and the
+    // diff so it is read as "check these", and it says so explicitly — a ranked
+    // risk list is exactly the shape a model will happily convert into findings
+    // it has not verified, which would trade the precision this reviewer is
+    // built around for recall it has not earned.
+    if (reviewPlan && String(reviewPlan).trim()) {
+        rest += `\n---\n\n## Review Plan (agenda — NOT findings)
+
+A cheaper planning pass produced the ranked risk list below. Every entry is a
+question to answer against the diff, not a defect to report. Confirm each one
+in the code before it becomes a finding, and discard the ones the diff does not
+support. Items are not evidence, and their severity is a guess made without the
+full context you now have.
+
+Say nothing about an item you could not confirm. Reporting a plan item you did
+not verify is the single worst outcome of this section existing.
+
+${String(reviewPlan).trim().slice(0, 4000)}
+`;
+    }
 
     // ── Section 3: Static analysis findings (if any) ──
     if (staticFindings && staticFindings.length > 0) {
@@ -793,6 +832,7 @@ Respond with ONLY a JSON object. No markdown fences. No text before or after.
       "id": "F1",
       "file": "filename_where_issue_is",
       "line": 42,                        // COPY the number shown in __new hunk__; do not count lines
+      "evidence": "the exact line(s) from the diff, verbatim, no line number, no +/- marker",
       "severity": "critical | high | medium | low",
       "type": "security | bug | performance | style | deprecated",
       "cwe": "CWE-ID or null",
@@ -825,7 +865,9 @@ IMPORTANT REMINDERS:
 - Check every function call against the deprecated list above. Each deprecated call = one finding.
 - If a filter/query/condition changed, report what behavior changed and whether it's intentional.
 - "missing tests" go in testCoverage, NEVER in findings.
-- Every finding needs a specific line number and a concrete fix.
+- Every finding needs a specific line number, a verbatim \`evidence\` quote of the
+  line(s) it is about, and a concrete fix. The quote is what positions the
+  finding; a finding that quotes nothing cannot be placed.
 - The line number MUST be one printed in the \`__new hunk__\` gutter for that file.
   Do not compute it, do not offset it, do not cite a line from \`__old hunk__\`.
 - Escalate sparingly. \`needsHumanReview\` is for a question the diff genuinely
