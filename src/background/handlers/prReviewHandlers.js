@@ -1704,12 +1704,24 @@ export function createPrReviewHandlers(svc) {
             // cannot parse Flow or TypeScript annotations and returns `ok: false`, which
             // reads downstream exactly like a clean file. Best-effort: merges into the
             // static findings, never fatal.
+            let astLintUnavailable = null;
             try {
                 const astLintFiles = (prData.files || [])
                     .filter(f => f.fullContent && OffscreenLintService.handles(f.filename))
                     .map(f => ({ path: f.filename, content: f.fullContent }));
                 if (astLintFiles.length) {
-                    const lintMap = await new OffscreenLintService().lintFiles(astLintFiles);
+                    const lintResult = await new OffscreenLintService().lintFiles(astLintFiles);
+                    const lintMap = lintResult.findingsByFile;
+                    // An AST pass that could not run is not an AST pass that found
+                    // nothing. Recorded so the review reports a missing check
+                    // rather than letting its silence read as a clean result.
+                    if (lintResult.unavailable) {
+                        astLintUnavailable = lintResult.unavailable;
+                        console.warn(
+                            `🌳 Tree-sitter AST lint did NOT run for ${lintResult.filesSubmitted} file(s): `
+                            + `${lintResult.unavailable}. Those files were covered by the regex layer only.`,
+                        );
+                    }
                     let added = 0;
                     for (const [filePath, findings] of lintMap) {
                         // Python/Go: the tree-sitter engine fully covers these languages
@@ -1740,7 +1752,17 @@ export function createPrReviewHandlers(svc) {
                     }
                 }
             } catch (e) {
-                console.warn('Python/Go AST lint (non-fatal):', e?.message);
+                astLintUnavailable = e?.message || 'AST lint threw';
+                console.warn('AST lint (non-fatal):', e?.message);
+            }
+            if (astLintUnavailable) {
+                // Surfaced on the review itself, not only in the console: the
+                // reviewer needs to know a check was missing when they read a
+                // section that looks clean.
+                staticResult.unavailableChecks = [
+                    ...(staticResult.unavailableChecks || []),
+                    { name: 'tree-sitter AST lint', reason: astLintUnavailable, required: false },
+                ];
             }
 
             console.log(`📊 Static analysis found ${staticResult.totalFindings} issues`);

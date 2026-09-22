@@ -6,8 +6,14 @@
  * graph and embeddings). This client ensures that document exists, ships file
  * contents in batches, and returns findings per file.
  *
- * Best-effort: any failure resolves to an empty map so review continues on the
- * regex layer — the AST lint is a progressive enhancement, never required.
+ * Best-effort: any failure still lets review continue on the regex layer — the
+ * AST lint is a progressive enhancement, never required.
+ *
+ * But "it ran and found nothing" and "it never ran" are different facts, and
+ * returning a bare empty map for both made them indistinguishable to the caller.
+ * That is the failure this project exists to stop: an unavailable check reading
+ * as a clean one. So every abandonment path now names itself in `unavailable`,
+ * and the caller reports it instead of inferring silence.
  */
 
 const BATCH_SIZE = 30;
@@ -31,19 +37,27 @@ export class OffscreenLintService {
 
     /**
      * @param {Array<{path:string, content:string}>} files
-     * @returns {Promise<Map<string, Array>>} filePath → findings (empty map on any failure)
+     * @returns {Promise<{findingsByFile: Map<string, Array>, unavailable: string|null, filesSubmitted: number}>}
+     *   `unavailable` is null when the pass actually ran. When it is set, an empty
+     *   `findingsByFile` means the check did not happen — never that the files are clean.
      */
     async lintFiles(files) {
         const out = new Map();
-        if (typeof chrome === 'undefined' || !chrome.offscreen) return out;
+        const done = (unavailable = null, filesSubmitted = 0) =>
+            ({ findingsByFile: out, unavailable, filesSubmitted });
+
+        if (typeof chrome === 'undefined' || !chrome.offscreen) {
+            return done('no offscreen API available in this context');
+        }
 
         const parseable = (files || []).filter(f => f && f.content && OffscreenLintService.handles(f.path));
-        if (parseable.length === 0) return out;
+        // Nothing to do is not an outage: there was no work for this engine.
+        if (parseable.length === 0) return done(null, 0);
 
         try {
             await this._ensureOffscreenDocument();
-        } catch {
-            return out;
+        } catch (e) {
+            return done(`offscreen document could not be created: ${e?.message || 'unknown error'}`, parseable.length);
         }
 
         for (let i = 0; i < parseable.length; i += BATCH_SIZE) {
@@ -54,15 +68,25 @@ export class OffscreenLintService {
                     type: 'TS_LINT_FILES',
                     files: batch.map(f => ({ path: f.path, content: f.content }))
                 });
-            } catch {
-                return out; // give up → regex fallback already covered the files
+            } catch (e) {
+                // Give up — the regex layer already covered these files — but say
+                // which files were left unparsed rather than returning silence.
+                return done(
+                    `offscreen lint failed after ${i} of ${parseable.length} file(s): ${e?.message || 'unknown error'}`,
+                    parseable.length,
+                );
             }
-            if (!response || !response.success) return out;
+            if (!response || !response.success) {
+                return done(
+                    `offscreen lint returned no result after ${i} of ${parseable.length} file(s)`,
+                    parseable.length,
+                );
+            }
             for (const [path, findings] of Object.entries(response.findingsByFile || {})) {
                 out.set(path, findings);
             }
         }
-        return out;
+        return done(null, parseable.length);
     }
 
     async _ensureOffscreenDocument() {
