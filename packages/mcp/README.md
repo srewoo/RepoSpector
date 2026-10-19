@@ -88,13 +88,15 @@ what to fetch:
 - **`settings`** — review-quality switches with the same flat keys as `.repospector.yaml`:
   `minRubricScore` (0-100, default 80), `lensHistory`, `lensCodeComments`, `lensRulesCompliance`,
   `lensPriorPrComments` (booleans, default true), `priorPrLimit` (1-20, default 5). The repo's own
-  `.repospector.yaml` `settings` (read from the indexed repo at the reviewed revision) apply first; keys
-  given here override them. Unknown or mistyped keys, from either source, are reported back as
+  `.repospector.yaml` `settings` apply first; keys given here override them. The repo file is read at
+  the **base** revision (the merge base of a `range`, else `pr_ref.base_sha`), never the reviewed head,
+  so a pull request cannot loosen its own gate. With no base revision (e.g. a bare `diff`), repo settings
+  are skipped and a `configWarnings` entry says so. Unknown or mistyped keys, from either source, are reported back as
   `configWarnings` (repo ones prefixed `.repospector.yaml:`); a switched-off lens is reported not run.
 
 Four lenses run beside the model pass: `history` (local `git blame` / `git log` on the indexed repo),
 `codeComments` (comments near each hunk), `rulesCompliance` (`CLAUDE.md`, `AGENTS.md`,
-`.repospector.yaml` at the reviewed head) and `priorPrComments`. Without sampling, the bundle's
+`.repospector.yaml`, all read at the base revision, so a PR cannot add the rule it then quotes) and `priorPrComments`. Without sampling, the bundle's
 `delegatedLenses` carries each lens's question and context for you to run over the hunks.
 
 ## Flags and environment variables

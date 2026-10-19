@@ -29,8 +29,9 @@ const REPO_CONFIG = '.repospector.yaml';
 
 /**
  * Root and changed-directory CLAUDE.md / AGENTS.md, plus .repospector.yaml, at
- * the reviewed revision. No revision → none: reading the worktree would quote
- * rules from a different commit than the one under review.
+ * `rev`. Callers pass the review's BASE revision, never the PR head: the head is
+ * author-controlled, and reading config there lets a PR loosen its own gate.
+ * No revision → none: the worktree is not a trusted revision either.
  *
  * `.repospector.yaml` is parsed and validated exactly as the extension does
  * (CustomRulesService + repoSettingsSchema): its rule entries become the rules

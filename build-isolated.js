@@ -302,6 +302,14 @@ async function copyAssets() {
     const manifestSrc = fs.readFileSync('src/manifest.json', 'utf8');
     const manifest = JSON.parse(manifestSrc);
 
+    // package.json is the single source of the version, so the two can't drift.
+    // Chrome only accepts 1-4 dot-separated integers.
+    const { version } = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+    if (!/^\d+(\.\d+){0,3}$/.test(version)) {
+        throw new Error(`package.json version "${version}" is not a valid Chrome extension version`);
+    }
+    manifest.version = version;
+
     // Ensure no "type": "module" in manifest
     if (manifest.background?.type) {
         delete manifest.background.type;

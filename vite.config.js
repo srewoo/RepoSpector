@@ -9,11 +9,10 @@ const copyAssets = () => {
     return {
         name: 'copy-assets',
         writeBundle() {
-            // Copy manifest
-            fs.copyFileSync(
-                resolve(__dirname, 'src/manifest.json'),
-                resolve(__dirname, 'dist/manifest.json')
-            );
+            // Copy manifest, stamping the version from package.json
+            const manifest = JSON.parse(fs.readFileSync(resolve(__dirname, 'src/manifest.json'), 'utf8'));
+            manifest.version = JSON.parse(fs.readFileSync(resolve(__dirname, 'package.json'), 'utf8')).version;
+            fs.writeFileSync(resolve(__dirname, 'dist/manifest.json'), JSON.stringify(manifest, null, 2));
 
             // Copy assets directory if it exists
             if (fs.existsSync(resolve(__dirname, 'src/assets'))) {

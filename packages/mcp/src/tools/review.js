@@ -378,9 +378,18 @@ export const REVIEW_PR_TOOL = {
         const prRef = args.pr_ref && typeof args.pr_ref === 'object' ? args.pr_ref : {};
         const contextBase = prRef.base_sha || identity.effectiveBase || identity.baseSha || null;
         const contextHead = prRef.head_sha || identity.headSha || null;
-        const { rulesFiles, repoConfig } = await loadRulesFiles(repo, identity.source.rev ?? null, diffFiles);
+        // Repo settings and rules come from the BASE, never the reviewed head:
+        // the PR author controls the head, so a PR could otherwise lower its own
+        // `minRubricScore` or add the very rule its findings then "quote". The
+        // extension reads the config from the default branch for the same reason.
+        const settingsBase = identity.effectiveBase || prRef.base_sha || null;
+        const { rulesFiles, repoConfig } = await loadRulesFiles(repo, settingsBase, diffFiles);
         // `.repospector.yaml` settings under the call's `settings` (call wins).
         const quality = resolveMcpQuality(args.settings, repoConfig);
+        if (!settingsBase) {
+            quality.configWarnings.push('.repospector.yaml: repo settings and rules files were skipped '
+                + 'because no base revision was available; defaults and the `settings` argument apply.');
+        }
         const contextPort = createMcpContextPort({
             repoPath: repo,
             priorPrComments: Array.isArray(args.prior_pr_comments) ? args.prior_pr_comments : null,
