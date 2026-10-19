@@ -16,6 +16,12 @@
  *
  *   node eval/gate-replay.js --corpus eval/corpus/public-prs.json
  *   node eval/gate-replay.js --corpus eval/corpus/public-prs.json --show-kills
+ *   node eval/gate-replay.js --corpus eval/corpus/public-prs.json --rubric-threshold 80
+ *
+ * `--rubric-threshold N` then replays the rubric scorer's stored scores over
+ * what the gates kept: the deterministic caps, the threshold N and the
+ * unscored ("not verified") policy. Predictions with no stored rubric are
+ * reported as "no rubric data", never as a pass.
  *
  * Reading the output: `TP killed` is the number that decides whether a gate
  * ships. Precision gain is worthless if it is bought by deleting real bugs, and
@@ -30,6 +36,7 @@ import { checkStaticPremise } from '../src/utils/staticRulePremise.js';
 import { assessSpeculation } from '../src/utils/findingSpeculation.js';
 import { assessImportClaim } from '../src/utils/importClaimGate.js';
 import { diffsByFile } from '../src/utils/siblingSweep.js';
+import { replayRubric, formatRubricReplay, parseRubricThreshold } from './lib/rubricReplay.js';
 
 function arg(name, fallback = null) {
     const i = process.argv.indexOf(name);
@@ -37,6 +44,16 @@ function arg(name, fallback = null) {
 }
 const showKills = process.argv.includes('--show-kills');
 const corpusPath = arg('--corpus', 'eval/corpus/public-prs.json');
+
+let rubricThreshold = null;
+if (process.argv.includes('--rubric-threshold')) {
+    const parsed = parseRubricThreshold(arg('--rubric-threshold'));
+    if (!parsed.ok) {
+        console.error(parsed.error);
+        process.exit(1);
+    }
+    rubricThreshold = parsed.value;
+}
 
 const corpus = JSON.parse(fs.readFileSync(path.resolve(corpusPath), 'utf8'));
 
@@ -87,9 +104,13 @@ const tally = {
 };
 const byGate = {};
 const kills = [];
+// What the gates kept, per case — the rubric replay runs over this, because
+// the scorer runs after the deterministic gates in the shipped pipeline.
+const keptCases = [];
 
 for (const c of corpus.cases || []) {
     const patches = diffsByFile(c.prData);
+    const keptPredictions = [];
     for (const pred of c.predictions || []) {
         tally.total += 1;
         const verdict = verdictFor(c, pred);
@@ -105,8 +126,10 @@ for (const c of corpus.cases || []) {
             kills.push({ case: c.id, verdict, gate: out.by, file: pred.file, line: pred.line, title: pred.title, reason: out.reason });
         } else {
             tally.kept[verdict] += 1;
+            keptPredictions.push(pred);
         }
     }
+    keptCases.push({ ...c, predictions: keptPredictions });
 }
 
 const pct = (n, d) => (d === 0 ? 'n/a' : `${((n / d) * 100).toFixed(1)}%`);
@@ -142,3 +165,11 @@ if (showKills) {
     }
 }
 console.log('');
+
+if (rubricThreshold !== null) {
+    const rep = replayRubric(keptCases, { threshold: rubricThreshold, verdictFor });
+    console.log(formatRubricReplay(rep));
+    console.log('');
+    // Missing data is not a pass. A script that gates on this exits non-zero.
+    if (!rep.hasRubricData) process.exitCode = 2;
+}

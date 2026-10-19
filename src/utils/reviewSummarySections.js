@@ -17,7 +17,10 @@ import { findingPath, findingLine } from './inlineCommentFormatter.js';
 function renderBullet(f) {
     const path = findingPath(f);
     const line = findingLine(f);
-    const loc = path ? (line != null ? `\`${path}:${line}\`` : `\`${path}\``) : '_(no location)_';
+    const bare = path ? (line != null ? `\`${path}:${line}\`` : `\`${path}\``) : '_(no location)_';
+    // Full-SHA permalink (spec §4.4). Only https links are rendered — the URL
+    // goes into markdown posted on the PR.
+    const loc = path && /^https:\/\//.test(String(f?.permalink ?? '')) ? `[${bare}](${f.permalink})` : bare;
 
     const headline = String(f.title || f.message || f.description || 'Issue')
         .split('\n')[0]
@@ -132,9 +135,60 @@ export function renderPolicyNote(stats) {
     if (stats.droppedBySeverityFloor) bits.push(`${stats.droppedBySeverityFloor} below the configured severity floor`);
     if (stats.droppedByConfidence) bits.push(`${stats.droppedByConfidence} below the confidence floor`);
     if (stats.droppedByScore) bits.push(`${stats.droppedByScore} below the value-score floor`);
+    if (stats.notVerified) bits.push(`${stats.notVerified} not verified by the rubric check`);
     if (stats.suppressedAsDuplicate) bits.push(`${stats.suppressedAsDuplicate} already commented on`);
     if (!bits.length) return '';
     return `<sub>Only blocking findings are posted inline — ${bits.join('; ')}.</sub>`;
 }
 
-export default { renderDeferredSections, renderEscalationSection, renderPolicyNote };
+/** One line, no newlines, bounded — repo-supplied text goes into a PR comment. */
+function oneLine(s, max = 200) {
+    return String(s ?? '').replace(/\s*\n\s*/g, ' ').trim().slice(0, max);
+}
+
+/**
+ * Findings the rubric check could not score (spec §2.5). Kept and shown, never
+ * posted inline, each with the reason it was not scored.
+ */
+export function renderNotVerifiedSection(findings = [], options = {}) {
+    const { maxItems = 20 } = options;
+    if (!findings.length) return '';
+    const out = [
+        '',
+        '### Not verified',
+        '',
+        '_The independent rubric check could not score these, so they are not posted inline. They may still be real._',
+        '',
+    ];
+    for (const f of findings.slice(0, maxItems)) {
+        const why = f?.rubric?.reason ? ` _(${oneLine(f.rubric.reason)})_` : '';
+        out.push(`${renderBullet(f)}${why}`);
+    }
+    if (findings.length > maxItems) {
+        out.push(`- _…and ${findings.length - maxItems} more (see the RepoSpector panel)._`);
+    }
+    return out.join('\n');
+}
+
+/**
+ * `.repospector.yaml` warnings and checks that did not run (completeness
+ * contract: a check that did not run is reported, never read as "no findings").
+ */
+export function renderQualityNotes({ configWarnings = [], lensReport = [] } = {}) {
+    const out = [];
+    if (configWarnings.length) {
+        out.push('', '### Configuration warnings', '');
+        for (const w of configWarnings) out.push(`- ${oneLine(w)}`);
+    }
+    const notRun = (lensReport || []).filter((r) => r?.status === 'not-run');
+    if (notRun.length) {
+        out.push('', '### Checks that did not run', '');
+        for (const r of notRun) out.push(`- \`${oneLine(r.lens, 40)}\` — ${oneLine(r.reason)}`);
+    }
+    return out.join('\n');
+}
+
+export default {
+    renderDeferredSections, renderEscalationSection, renderPolicyNote,
+    renderNotVerifiedSection, renderQualityNotes,
+};

@@ -165,3 +165,52 @@ describe('review → post seam', () => {
         expect(comments).toHaveLength(0);
     });
 });
+
+describe('rubric gate → post seam', () => {
+    const { filterGenuineProblems } = require('../../src/utils/genuineProblemGate.js');
+    const lineMap = buildCommentableLineMap(prData.files);
+    const withRubric = (f, score) => ({
+        ...f,
+        evidence: 'exec(cmd);',
+        rubric: { status: 'scored', score, rawScore: score, preExisting: false, quotedRule: null, reason: 'r', capReason: null },
+    });
+
+    it('posts only findings at or above minRubricScore', () => {
+        const canonical = buildCanonicalFindings(orchestratorResult.perFileFindings, []);
+        const scored = canonical.map((f) => withRubric(f, f.line === 12 ? 90 : 50));
+        const gated = filterGenuineProblems(scored, { minRubricScore: 80 });
+        const comments = formatInlineComments(gated.findings, { commentableLines: lineMap });
+
+        expect(comments.map((c) => c.line)).toEqual([12]);
+        expect(gated.dropped.map((f) => f.line)).toEqual([14]);
+    });
+});
+
+describe('not-verified and permalinks reach the posted review', () => {
+    const { partitionForPosting } = require('../../src/utils/reviewPostingPolicy.js');
+    const { renderNotVerifiedSection } = require('../../src/utils/reviewSummarySections.js');
+    const lineMap = buildCommentableLineMap(prData.files);
+    const SHA = 'd'.repeat(40);
+    const link = (line) => `https://github.com/acme/api/blob/${SHA}/src/api.js#L${line - 1}-L${line + 1}`;
+
+    it('posts the scored finding inline with its permalink and lists the unscored one under Not verified', () => {
+        const canonical = buildCanonicalFindings(orchestratorResult.perFileFindings, []).map((f) => ({
+            ...f,
+            permalink: link(f.line),
+            rubric: f.line === 12
+                ? { status: 'scored', score: 95 }
+                : { status: 'unscored', reason: 'call budget exhausted' },
+            severity: 'high',
+        }));
+
+        const policy = partitionForPosting(canonical);
+        const comments = formatInlineComments(policy.inline, { commentableLines: lineMap });
+        const summary = renderNotVerifiedSection(policy.notVerified);
+
+        expect(comments.map((c) => c.line)).toEqual([12]);
+        expect(comments[0].body).toContain(link(12));
+        expect(summary).toContain('### Not verified');
+        expect(summary).toContain(`[\`src/api.js:14\`](${link(14)})`);
+        expect(summary).toContain('call budget exhausted');
+    });
+});

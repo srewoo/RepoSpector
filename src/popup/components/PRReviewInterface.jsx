@@ -184,6 +184,13 @@ export function PRReviewInterface({
                     analysisResult: {
                         ...(staticAnalysisResult ?? {}),
                         findings,
+                        headSha: analysisResult?.headSha ?? null,
+                        // Only what the posted summary renders from this review
+                        // (spec §4.1, §3.1) — not the whole reviewQuality object.
+                        reviewQuality: {
+                            configWarnings: analysisResult?.reviewQuality?.configWarnings ?? [],
+                            lensReport: analysisResult?.reviewQuality?.lensReport ?? [],
+                        },
                         // Let the post handler refuse an APPROVE/REQUEST_CHANGES for a
                         // run that a skip rule short-circuited. Without these two
                         // fields its guard has nothing to check.

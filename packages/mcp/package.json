@@ -16,9 +16,9 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test test/",
+    "test": "node --test 'test/**/*.test.js'",
     "build": "node build.js",
-    "prepublishOnly": "node build.js && node --test test/",
+    "prepublishOnly": "node build.js && npm test",
     "start": "node src/index.js",
     "version:patch": "npm version patch --no-git-tag-version",
     "version:minor": "npm version minor --no-git-tag-version",

@@ -31,9 +31,14 @@ import { normalizeFindingKeys } from './FindingsNormalizer.js';
 import { parsePatchHunks } from '../utils/patchLines.js';
 import { anchorFindings } from '../utils/anchorFindings.js';
 import { createCompleteness, mergeCompleteness } from '../utils/reviewCompleteness.js';
+import { mapPool } from '../utils/boundedPool.js';
 
 /** Wall-clock cap per chunk. */
 export const DEFAULT_CHUNK_TIMEOUT_MS = 240_000;
+
+/** Chunks reviewed at once (spec §4.5). Each chunk's engine has its own per-unit concurrency. */
+export const DEFAULT_CHUNK_CONCURRENCY = 3;
+const MAX_CHUNK_CONCURRENCY = 8;
 
 /**
  * Reject after `ms` if `promise` has not settled.
@@ -204,17 +209,27 @@ export class ReviewOrchestrator {
         onProgress?.({ step: 'chunked', chunkSummary });
 
         // ── 3. Deep phase — fan out chunks through the existing engine ──
+        //
+        // Spec §4.5: a bounded pool instead of one chunk at a time. Each chunk
+        // returns its own outcome; outcomes are merged in CHUNK order below, so
+        // the report is identical whatever order the chunks finish in.
+        // `onProgress` still fires per chunk as each one starts and finishes.
         const deepFindings = [];
         const chunkNarratives = [];
         const failedChunks = [];
+        const skippedFiles = [];
         // P0-1: the engine's completeness contract, one per chunk, merged at the
         // end. Previously `result.stats.parseFailures` died here — the handler
         // read `result.stats.parseFailures` on the ADAPTED report, which never
         // carried it, so on the default (orchestrated) path a truncated per-file
         // response was invisible to the verdict.
         const chunkCompleteness = [];
+        const chunkConcurrency = Math.min(
+            MAX_CHUNK_CONCURRENCY,
+            Math.max(1, Math.floor(Number(options.chunkConcurrency ?? DEFAULT_CHUNK_CONCURRENCY)) || 1),
+        );
 
-        for (const chunk of chunks) {
+        const reviewChunk = async (chunk) => {
             onProgress?.({
                 step: 'deep_review',
                 chunkIndex: chunk.index,
@@ -234,10 +249,10 @@ export class ReviewOrchestrator {
             };
 
             try {
-                // Per-chunk wall-clock cap. One pathological
-                // chunk — a huge generated file, a model that stalls mid-stream —
-                // must not hold the whole review hostage. The chunk is recorded as
-                // failed and the remaining chunks still produce a review.
+                // Per-chunk wall-clock cap. One pathological chunk — a huge
+                // generated file, a model that stalls mid-stream — must not hold
+                // the whole review hostage. The chunk is recorded as failed and
+                // the remaining chunks still produce a review.
                 const result = await withTimeout(
                     this.multiPass.execute(
                         chunkPrData,
@@ -254,22 +269,10 @@ export class ReviewOrchestrator {
                     `chunk ${chunk.index}/${chunk.total}`,
                 );
 
-                if (result.analysis) {
-                    chunkNarratives.push(result.analysis);
-                }
-                // Lift this chunk's findings and emit them via onProgress so
-                // the UI can render incrementally. Without this the UI shows
-                // a blank panel for the full LLM duration — for a 50-file MR
-                // that's 60+ seconds of dead time.
-                //
-                // MultiPassReviewEngine returns `perFileFindings` as an array of
-                // per-file objects, each with a nested `findings` array. Older /
-                // stub engines return an already-flat findings array. liftEngineFindings
-                // handles both so real per-file findings aren't collapsed into one
-                // empty file-level finding.
-                // Repair schema drift (typo'd keys, `"42"` line numbers, arrays
-                // where prose was asked for) BEFORE canonicalisation, so a
-                // mis-keyed severity doesn't silently default to "suggestion".
+                // Lift this chunk's findings (nested engine shape or flat stub
+                // shape — liftEngineFindings handles both) and repair schema
+                // drift BEFORE canonicalisation, so a mis-keyed severity doesn't
+                // silently default to "suggestion".
                 const repaired = normalizeFindingKeys(liftEngineFindings(result.perFileFindings));
                 if (repaired.stats.aliasedKeys || repaired.stats.coercedLines) {
                     console.warn(
@@ -286,8 +289,8 @@ export class ReviewOrchestrator {
                     }),
                 ).filter(Boolean);
 
-                deepFindings.push(...chunkFindings);
-
+                // Streamed as each chunk completes, so the UI renders
+                // incrementally instead of a blank panel for the whole run.
                 onProgress?.({
                     step: 'chunk_findings',
                     chunkIndex: chunk.index,
@@ -296,22 +299,27 @@ export class ReviewOrchestrator {
                     chunkSummary: result.analysis ?? '',
                 });
 
-                chunkCompleteness.push(result.completeness ?? createCompleteness({
-                    // A stub/legacy engine that predates the contract still
-                    // reports what it can rather than claiming completeness.
-                    expectedUnits: chunk.files?.length ?? null,
-                    inspectedUnits: (chunk.files?.length ?? 0) - (result.failedFiles?.length ?? 0),
-                    parseFailures: Number(result.stats?.parseFailures) || 0,
-                    failedUnits: (result.failedFiles ?? []).map((f) => ({ unit: f, reason: 'unit-failed' })),
-                }));
-
-                if (result.failedFiles?.length) failedChunks.push({ chunk: chunk.index, failedFiles: result.failedFiles });
+                return {
+                    narrative: result.analysis || null,
+                    findings: chunkFindings,
+                    completeness: result.completeness ?? createCompleteness({
+                        // A stub/legacy engine that predates the contract still
+                        // reports what it can rather than claiming completeness.
+                        expectedUnits: chunk.files?.length ?? null,
+                        inspectedUnits: (chunk.files?.length ?? 0) - (result.failedFiles?.length ?? 0),
+                        parseFailures: Number(result.stats?.parseFailures) || 0,
+                        failedUnits: (result.failedFiles ?? []).map((f) => ({ unit: f, reason: 'unit-failed' })),
+                    }),
+                    failed: result.failedFiles?.length
+                        ? { chunk: chunk.index, failedFiles: result.failedFiles }
+                        : null,
+                    skippedFiles: result.skippedFiles ?? [],
+                };
             } catch (err) {
                 // A credential failure is not a per-chunk problem to note and
                 // move past — it will fail every remaining chunk too, and the
                 // report built from zero findings would read "Clean review".
-                // Abort so the user is told their key is bad instead of being
-                // handed a green verdict on an unreviewed MR.
+                // Rethrown: the pool stops starting chunks and the review aborts.
                 if (isAuthError(err)) {
                     onProgress?.({
                         step: 'auth_error',
@@ -320,24 +328,38 @@ export class ReviewOrchestrator {
                     });
                     throw markAuthError(err);
                 }
-                failedChunks.push({ chunk: chunk.index, error: err.message });
-                // A chunk that threw read none of its files. Every one of them
-                // is an expected unit that was never inspected.
-                chunkCompleteness.push(createCompleteness({
-                    expectedUnits: chunk.files?.length ?? 1,
-                    inspectedUnits: 0,
-                    failedUnits: (chunk.files ?? []).map((f) => ({
-                        unit: f.filename ?? f.path ?? f.new_path ?? `chunk-${chunk.index}`,
-                        reason: 'chunk-failed',
-                        error: err.message,
-                    })),
-                }));
                 onProgress?.({
                     step: 'deep_review_error',
                     chunkIndex: chunk.index,
                     error: err.message,
                 });
+                // A chunk that threw read none of its files. Every one of them
+                // is an expected unit that was never inspected.
+                return {
+                    narrative: null,
+                    findings: [],
+                    completeness: createCompleteness({
+                        expectedUnits: chunk.files?.length ?? 1,
+                        inspectedUnits: 0,
+                        failedUnits: (chunk.files ?? []).map((f) => ({
+                            unit: f.filename ?? f.path ?? f.new_path ?? `chunk-${chunk.index}`,
+                            reason: 'chunk-failed',
+                            error: err.message,
+                        })),
+                    }),
+                    failed: { chunk: chunk.index, error: err.message },
+                    skippedFiles: [],
+                };
             }
+        };
+
+        const outcomes = await mapPool(chunks, chunkConcurrency, reviewChunk);
+        for (const o of outcomes) {
+            if (o.narrative) chunkNarratives.push(o.narrative);
+            deepFindings.push(...o.findings);
+            chunkCompleteness.push(o.completeness);
+            if (o.failed) failedChunks.push(o.failed);
+            skippedFiles.push(...o.skippedFiles);
         }
 
         // ── 4. Standards phase — lift caller-supplied static findings ──
@@ -434,6 +456,8 @@ export class ReviewOrchestrator {
                 },
                 cache: this.findingCache?.getStats?.() ?? null,
                 failedChunks,
+                // Files each chunk's engine cut for its file cap, in chunk order.
+                skippedFiles,
                 completeness,
             },
         });

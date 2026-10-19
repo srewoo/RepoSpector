@@ -466,6 +466,31 @@ GATE 2 firing zero times is not evidence it is useless: the corpus predictions a
 already post-verification output, and context-line findings were being dropped
 upstream. It gates a class adjudication observed, and costs nothing.
 
+#### Rubric threshold — offline replay (`--rubric-threshold N`)
+
+`eval/run.js` now runs the rubric scorer (0-100, Anthropic `code-review` plugin scale) after the
+deterministic gates and **stores** each score on the prediction instead of filtering by it, together with
+`confidence`, `score`, `source`, `lens`, `evidence`, `citedLine` and the rubric's `rawScore`, `preExisting`,
+`quotedRule` and `capReason`. One run then serves every threshold:
+
+    npm run eval:run -- --corpus eval/corpus/public-prs.json
+    node eval/gate-replay.js --corpus eval/corpus/public-prs.json --rubric-threshold 80
+    node eval/gate-replay.js --corpus eval/corpus/public-prs.json --rubric-threshold 60
+
+After the deterministic-gate report, the replay re-applies to what the gates kept: the pre-existing cap
+(score → 0), the unquoted-rule cap (score → 25, recomputed only when the case cached its `CLAUDE.md` /
+`AGENTS.md` / `.repospector.yaml` in `fileContents`; otherwise the stored capped score is used), the
+threshold, and the unscored policy (kept, reported **not verified**, never posted inline). It prints
+tp / fp / unadjudicated for postable, not verified and dropped. **Dropped true positives are the cost.**
+
+A corpus run before this change has no rubric data. The replay says
+`no rubric data — re-run npm run eval:run to capture it` and exits 2; it never reports that as a pass.
+Pass `--no-rubric` to `eval/run.js` to skip the scorer (A/B, or to save calls).
+
+What the replay cannot measure: whether the scorer judged well (it replays stored judgements) and what
+recall the four new lenses add. Both need `npm run eval:real` and `npm run eval:injected` on the same model,
+before and after.
+
 #### Lens coverage — the intent-versus-implementation gap
 
 Category precision across both adjudicated corpora, which is what the lens mix

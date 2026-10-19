@@ -6,6 +6,7 @@
  */
 
 import { githubApiBase, gitlabApiBase } from '../utils/gitHosts.js';
+import { validateRepoSettings } from '../utils/repoSettingsSchema.js';
 
 // Severity ordering used by the threshold filter. Lower index = lower
 // severity. Anything below the configured threshold is dropped.
@@ -206,11 +207,21 @@ export class CustomRulesService {
     }
 
     /**
-     * Validate and normalize config
+     * Validate and normalize config.
+     *
+     * `settings` used to keep exactly four keys, so `lightModel`, `multiFinder`,
+     * `llmRefutation` and every other documented key in a repo file was dropped
+     * without a word. Every key in `REPO_SETTING_TYPES` (repoSettingsSchema.js) is
+     * now type-checked and kept; unknown, mistyped and credential keys are
+     * dropped AND reported in `configWarnings` for the review summary.
+     *
+     * Absent keys stay absent — the old `null` placeholders overrode the user's
+     * own Settings in `resolveConfig`, which skips only `undefined`.
      */
     validateConfig(config) {
         if (!config || typeof config !== 'object') return null;
 
+        const { settings, warnings } = validateRepoSettings(config.settings);
         return {
             ignore: {
                 files: Array.isArray(config.ignore?.files) ? config.ignore.files : [],
@@ -219,17 +230,11 @@ export class CustomRulesService {
             severity_overrides: config.severity_overrides || config.severityOverrides || {},
             rules: Array.isArray(config.rules) ? config.rules : [],
             settings: {
-                minConfidence: config.settings?.minConfidence || null,
-                // Findings below this severity are filtered out.
-                // One of: critical, high, medium, low, info.
-                severityThreshold: config.settings?.severityThreshold || null,
-                // Pin the LLM provider/model for this repo, e.g. "openai:gpt-4.1-mini".
-                // Overrides the user's global setting when present.
-                model: config.settings?.model || null,
-                // Enable diff-anchored review (default true). Setting to false
-                // restores whole-file review behavior. Almost no one wants this.
-                diffAnchored: config.settings?.diffAnchored !== false
-            }
+                ...settings,
+                // Diff-anchored review stays on unless the repo says false.
+                diffAnchored: settings.diffAnchored !== false,
+            },
+            configWarnings: warnings,
         };
     }
 

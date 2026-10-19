@@ -24,6 +24,7 @@
 
 import { liftEngineFindings } from '../services/engineContract.js';
 import { findingPath, findingLine } from './inlineCommentFormatter.js';
+import { RUBRIC_STATUS } from '../review-core/rubricScorer.js';
 
 /**
  * Posting severity is a three-way bucket, not the five-way display severity.
@@ -226,8 +227,15 @@ export function partitionForPosting(findings, options = {}) {
     const inline = [];
     const suggestions = [];
     const nitpicks = [];
+    // Spec §2.5: a finding the rubric check could not score is kept but never
+    // posted inline, in either posting mode. It is listed under "Not verified".
+    const notVerified = [];
 
     for (const f of kept) {
+        if (f?.rubric?.status === RUBRIC_STATUS.UNSCORED) {
+            notVerified.push(f);
+            continue;
+        }
         const sev = postingSeverity(f);
 
         if (!blockingOnlyInline) {
@@ -287,8 +295,9 @@ export function partitionForPosting(findings, options = {}) {
     }
 
     stats.inline = postable.length;
+    stats.notVerified = notVerified.length;
 
-    return { inline: postable, suggestions, nitpicks, escalations, stats };
+    return { inline: postable, suggestions, nitpicks, escalations, notVerified, stats };
 }
 
 // Re-exported so the many existing importers of this module keep working, and so

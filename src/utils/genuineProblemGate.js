@@ -10,6 +10,22 @@
 
 import { BLOCKING_SEVERITIES } from './findingsFlatten.js';
 import { classifyClaim, validationStatusOf } from './findingClaim.js';
+import { filterByRubric, RUBRIC_STATUS } from '../review-core/rubricScorer.js';
+import { isDeterministicSource } from './findingSources.js';
+
+/**
+ * A finding that reaches the rubric gate without a rubric (carried forward
+ * from an older run, or added after the scoring stage) is never treated as
+ * having passed it: deterministic sources bypass, as they bypass the scorer;
+ * everything else is "not verified".
+ */
+function withRubricDefault(f) {
+    if (f?.rubric?.status) return f;
+    const base = { score: null, rawScore: null, preExisting: null, quotedRule: null, capReason: null };
+    return isDeterministicSource(f?.source)
+        ? { ...f, rubric: { ...base, status: RUBRIC_STATUS.BYPASSED, reason: 'deterministic source' } }
+        : { ...f, rubric: { ...base, status: RUBRIC_STATUS.UNSCORED, reason: 'not scored in this run' } };
+}
 
 // P1-2: the category and text blacklists that used to live here matched
 // anywhere in `title + description + message + suggestion`, so a real
@@ -85,7 +101,13 @@ function hasChangedCodeEvidence(finding) {
 export function filterGenuineProblems(findings = [], options = {}) {
     const minConfidence = Number(options.minConfidence ?? 0.8);
     const minScore = Number(options.minScore ?? 7);
+    // Rubric mode (spec §1.3 step 7): the independent rubric score is the
+    // threshold. Off unless the caller passes a number, so every legacy caller
+    // (eval/run.js, the existing tests) keeps the confidence + value-score gate.
+    const rubricMode = options.minRubricScore != null && Number.isFinite(Number(options.minRubricScore));
+    const minRubricScore = rubricMode ? Number(options.minRubricScore) : null;
     const kept = [];
+    const notVerified = [];
     const dropped = [];
     const reasons = {};
 
@@ -128,6 +150,15 @@ export function filterGenuineProblems(findings = [], options = {}) {
 
         if (!hasChangedCodeEvidence(finding)) {
             reject(finding, 'missing-changed-code-evidence');
+            continue;
+        }
+
+        if (rubricMode) {
+            // Per finding, so the kept list keeps its input order.
+            const r = filterByRubric([withRubricDefault(finding)], { minRubricScore });
+            if (r.postable.length) kept.push(r.postable[0]);
+            else if (r.notVerified.length) notVerified.push(r.notVerified[0]);
+            else reject(r.dropped[0] ?? finding, 'rubric-score');
             continue;
         }
 
@@ -187,15 +218,27 @@ export function filterGenuineProblems(findings = [], options = {}) {
         validationStatus: validationStatusOf(f),
     }));
 
+    // Unscored findings are KEPT (spec §2.5) — the reader still sees them under
+    // "Not verified" — but `blocking: false` means failLevel never blocks a
+    // merge on a claim nobody independently checked.
+    const unverified = notVerified.map((f) => ({
+        ...f,
+        blocking: false,
+        validationStatus: validationStatusOf(f),
+    }));
+
     return {
-        findings: marked,
+        findings: [...marked, ...unverified],
         dropped,
+        notVerified: unverified,
         stats: {
             input: (findings || []).length,
             kept: kept.length,
+            notVerified: unverified.length,
             dropped: dropped.length,
             minConfidence,
             minScore,
+            minRubricScore,
             byReason: reasons,
             // How many of the accepted findings actually had a citation checked
             // against source. A review reporting 10 problems of which 0 were
@@ -224,19 +267,31 @@ export function buildPrecisionAnalysis(findings = [], options = {}) {
     if (options.skipped) {
         return `## Review not completed\n\n${options.reason || 'RepoSpector did not inspect the changed code.'}`;
     }
+    // Unscored findings are not "genuine problems found": nothing verified them.
+    const reported = findings.filter((f) => f?.rubric?.status !== RUBRIC_STATUS.UNSCORED);
+    const unverified = findings.length - reported.length;
+    const unverifiedNote = unverified
+        ? `\n\n${unverified} more candidate${unverified === 1 ? '' : 's'} could not be scored by the rubric check and `
+            + `${unverified === 1 ? 'is' : 'are'} listed under "Not verified".`
+        : '';
     if (options.partial) {
-        const suffix = findings.length
-            ? `${findings.length} genuine problem${findings.length === 1 ? '' : 's'} found in the reviewed portion.`
+        const suffix = reported.length
+            ? `${reported.length} genuine problem${reported.length === 1 ? '' : 's'} found in the reviewed portion.`
             : 'No genuine problems were found in the reviewed portion.';
-        return `## Partial review\n\n${suffix} Unreviewed files are not considered clean.`;
+        return `## Partial review\n\n${suffix} Unreviewed files are not considered clean.${unverifiedNote}`;
     }
-    if (findings.length === 0) {
-        return '## Clean review\n\nNo genuine problems were found in the changed code.';
+    if (reported.length === 0) {
+        return `## Clean review\n\nNo genuine problems were found in the changed code.${unverifiedNote}`;
+    }
+    const head = `## ${reported.length} genuine problem${reported.length === 1 ? '' : 's'} found\n\n`;
+    if (options.minRubricScore != null) {
+        return `${head}Only evidence-backed defects that scored at least ${options.minRubricScore}/100 on the `
+            + `independent rubric check (or come from a deterministic analyzer) are reported.${unverifiedNote}`;
     }
     // Deliberately does NOT claim every finding cleared the reviewer-value
     // gate: when scoring was unavailable, a high-severity finding is kept
     // without a score precisely so an outage cannot empty the review.
-    return `## ${findings.length} genuine problem${findings.length === 1 ? '' : 's'} found\n\nOnly evidence-backed defects that cleared the confidence gate are reported. Each one either cleared the reviewer-value score floor or was too severe to drop while scoring was unavailable.`;
+    return `${head}Only evidence-backed defects that cleared the confidence gate are reported. Each one either cleared the reviewer-value score floor or was too severe to drop while scoring was unavailable.`;
 }
 
 export default { filterGenuineProblems, summarizeGenuineProblems, buildPrecisionAnalysis };

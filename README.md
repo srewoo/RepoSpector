@@ -11,19 +11,35 @@ LLM providers, with local embeddings that keep indexing on your machine.
 ## ✨ Features
 
 ### PR / MR review
-- **Two-phase review pipeline** — skip-rule gating (docs-only, draft, oversized)
-  → diff chunking → per-file deep LLM review → static-analysis merge →
-  assigned-hunks normalization → a canonical verdict report.
-- **Review-quality pipeline** — multi-finder recall pass → citation enforcement
-  → adversarial verification (false-positive removal) → fix recommendation.
-  Runs on every PR regardless of size.
+- **Two-phase review pipeline** — skip-rule gating (docs-only, draft, oversized,
+  failing pipeline) → diff chunking, with chunks reviewed in parallel
+  (`chunkConcurrency`, default 3; results merged in chunk order) → per-file deep
+  LLM review → static-analysis merge → assigned-hunks normalization → a
+  canonical verdict report.
+- **Review-quality pipeline** — multi-finder recall pass (including history,
+  code-comment, rules-file and prior-PR-comment lenses) → citation enforcement →
+  deterministic evidence gates → an independent per-finding **rubric scorer**
+  (0-100; only findings scoring ≥ `minRubricScore`, default 80, are reported) →
+  fix recommendation. Findings the scorer could not score are listed under
+  "Not verified" and never posted inline, and a review with any "Not verified"
+  finding is reported as partial — it never approves. Lenses and checks that
+  could not run (including CI checks the token could not read) are listed
+  with the reason. The LLM refuter (`llmRefutation`) and the 1-10 value scorer
+  (`valueScoring`) remain available, off by default. Runs on every PR regardless of size.
 - **Incremental re-review on push** — after the first review, a new push only
   re-reads the files whose diff actually changed; findings on untouched files
-  are carried forward. The PR page polls for new commits and offers a
+  are carried forward.
+  **Upgrade note:** findings carried forward from a review made before the
+  rubric scorer shipped have no rubric score, so they show as "Not verified"
+  and non-blocking until their files are re-reviewed. The PR page polls for new commits and offers a
   re-review (or runs one automatically when auto-review is on).
 - **Inline findings posted to the PR** — comments are validated against the
   diff before posting, deduplicated per line, and carry rationale, a rule
-  citation, evidence, and a one-click ```suggestion patch where available.
+  citation, evidence, a full-SHA permalink to the reviewed code, and a
+  one-click ```suggestion patch where available. Posting re-checks the PR first
+  and refuses if it has been closed, merged or returned to draft since the
+  review. Findings the rubric check could not score are listed in the summary
+  under "Not verified" and never posted inline.
 - **Persistent sessions** — reviews, threads, and metrics are stored in
   IndexedDB with a 30-day retention window.
 - **Adaptive learning** — records which findings you act on to tune future noise.

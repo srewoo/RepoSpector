@@ -11,6 +11,10 @@ import { filesForStaticAnalysis } from './reviewRevision.js';
 import { resolveReviewIdentity } from './reviewIdentity.js';
 import { buildFindingsSection } from './findings.js';
 import { beginDelegatedReview } from './delegation.js';
+import { createMcpContextPort } from '../adapters/mcpContextPort.js';
+import {
+    loadRulesFiles, permalinkTargetFrom, renderPipelineSection, linkedIssueText, resolveMcpQuality,
+} from './reviewQuality.js';
 import { applyPremiseGate, renderStaticSection } from './staticFindings.js';
 import { lintTypeScript } from './tsLint.js';
 import { promoteIntroducedFindings } from '../../../../src/utils/changedLineSeverity.js';
@@ -216,7 +220,14 @@ export const REVIEW_PR_TOOL = {
         + 'deterministic static-analysis output (linters, tree-sitter, secret scan). Give it a diff '
         + 'you already have (preferred — pass `diff`, e.g. fetched by a GitLab or GitHub MCP '
         + 'server, so no token is needed here), a pull request URL, or a local revision range. '
-        + 'Returns this material for you to reason over — it does not itself write findings.',
+        + 'BEFORE calling, fetch with your GitHub/GitLab MCP and pass in: the diff (`diff`), the PR '
+        + 'description (`intent`), linked issues (`linked_requirements`), review comments from recent '
+        + 'merged PRs that touched the changed files (`prior_pr_comments`), the check-run or pipeline '
+        + 'status (`pipeline_status`), and the PR URL with its head and base SHAs (`pr_ref`). This '
+        + 'server never calls GitHub or GitLab for those; anything you omit is reported as not run. '
+        + 'Returns this material for you to reason over — it does not itself write findings: '
+        + 'model, lens and rubric results (when your client offers sampling) are candidates, and '
+        + 'it posts nothing.',
     inputSchema: {
         type: 'object',
         properties: {
@@ -268,6 +279,52 @@ export const REVIEW_PR_TOOL = {
                     },
                 },
             },
+            /* eslint-disable-next-line camelcase */
+            prior_pr_comments: {
+                type: 'array',
+                description: 'Review comments from recent MERGED PRs/MRs that touched the changed files, '
+                    + 'fetched with your GitHub/GitLab MCP. Feeds the priorPrComments lens. Untrusted.',
+                items: {
+                    type: 'object',
+                    properties: {
+                        path: { type: 'string' },
+                        /* eslint-disable-next-line camelcase */
+                        pr_ref: { type: 'string' },
+                        author: { type: 'string' },
+                        body: { type: 'string' },
+                        line: { type: 'integer' },
+                    },
+                    required: ['path', 'body'],
+                },
+            },
+            /* eslint-disable-next-line camelcase */
+            pipeline_status: {
+                type: 'string',
+                enum: ['success', 'failed', 'running', 'none'],
+                description: 'The PR check runs / MR pipeline result, read with your GitHub/GitLab MCP. '
+                    + 'A failing pipeline defers the review.',
+            },
+            settings: {
+                type: 'object',
+                description: 'Review-quality switches, same flat keys as .repospector.yaml: '
+                    + 'minRubricScore (0-100, default 80), lensHistory, lensCodeComments, '
+                    + 'lensRulesCompliance, lensPriorPrComments (booleans, default true), '
+                    + 'priorPrLimit (1-20, default 5). Overrides the same keys in the repo\'s '
+                    + '.repospector.yaml settings. Unknown or mistyped keys are reported as warnings.',
+            },
+            /* eslint-disable-next-line camelcase */
+            pr_ref: {
+                type: 'object',
+                description: 'Metadata only — never fetched. Used for permalinks (url + head_sha) and '
+                    + 'as the blame base (base_sha). With `diff` given, the diff is what is reviewed.',
+                properties: {
+                    url: { type: 'string' },
+                    /* eslint-disable-next-line camelcase */
+                    head_sha: { type: 'string' },
+                    /* eslint-disable-next-line camelcase */
+                    base_sha: { type: 'string' },
+                },
+            },
             ...REPO_ARG,
         },
     },
@@ -314,6 +371,26 @@ export const REVIEW_PR_TOOL = {
             headContentByPath = null; // the section below reports the reason
         }
 
+        // Review-quality context (spec §1.2, MCP adapter). Local git and
+        // caller-supplied arguments only: the host fetched the platform data
+        // with its own GitHub/GitLab MCP, and this server makes no platform
+        // call for any of it.
+        const prRef = args.pr_ref && typeof args.pr_ref === 'object' ? args.pr_ref : {};
+        const contextBase = prRef.base_sha || identity.effectiveBase || identity.baseSha || null;
+        const contextHead = prRef.head_sha || identity.headSha || null;
+        const { rulesFiles, repoConfig } = await loadRulesFiles(repo, identity.source.rev ?? null, diffFiles);
+        // `.repospector.yaml` settings under the call's `settings` (call wins).
+        const quality = resolveMcpQuality(args.settings, repoConfig);
+        const contextPort = createMcpContextPort({
+            repoPath: repo,
+            priorPrComments: Array.isArray(args.prior_pr_comments) ? args.prior_pr_comments : null,
+            headSha: identity.source.rev || contextHead,
+            baseSha: contextBase,
+            diffFiles,
+        });
+        const fileLengths = Object.fromEntries([...(headContentByPath ?? new Map())]
+            .map(([p, content]) => [p, String(content).split('\n').length]));
+
         // Resolved once and shared: the graph, coverage and retrieval sections
         // are all answers about the SAME touched symbols, and deriving them
         // separately is how three sections came to describe different things.
@@ -344,6 +421,8 @@ export const REVIEW_PR_TOOL = {
                 baseSha: identity.baseSha ?? null,
                 headSha: identity.headSha ?? null,
                 diffFiles,
+                rulesFiles,
+                minRubricScore: quality.minRubricScore,
             });
         } catch { delegated = null; }
         const reviewId = delegated?.reviewId ?? null;
@@ -361,6 +440,10 @@ export const REVIEW_PR_TOOL = {
             value: renderIntentSection(args),
             ok: true,
         });
+
+        // Host-supplied pipeline status through the shared skip rules: a
+        // failing pipeline DEFERS, and the bundle says so before any finding.
+        sections.push({ label: 'pipeline', value: renderPipelineSection(args), ok: true });
 
         // Rendered through `renderDiffFiles` directly, and REFITTABLE, rather
         // than borrowing `get_diff_context`'s finished string. That string is
@@ -395,6 +478,16 @@ export const REVIEW_PR_TOOL = {
                 hunks: renderHunks(Math.floor(ctx.config.maxToolTokens * 0.25)),
                 revision: identity.headSha,
                 reviewId,
+                contextPort,
+                rulesFiles,
+                prDescription: typeof args.intent === 'string' ? args.intent.slice(0, 2000) : '',
+                linkedIssue: linkedIssueText(args.linked_requirements),
+                baseSha: contextBase,
+                headSha: contextHead,
+                permalink: permalinkTargetFrom({ prRef, prUrl: args.pr_url ?? null, headSha: contextHead }),
+                fileLengths,
+                // minRubricScore, lenses, lensLimits, configWarnings: repo file + `settings` arg.
+                ...quality,
             });
 
             // Refittable, and the shedding order matters: `findings` is the
@@ -405,10 +498,12 @@ export const REVIEW_PR_TOOL = {
             // Written as a plain JSON.stringify first, this section was cut
             // mid-structure at 1200 tokens: the same failure every other JSON
             // section here already had to fix.
-            const { findings, ...head } = result;
+            const { findings, delegatedLenses, ...head } = result;
             const render = (tokens) => renderJsonSection(
                 head,
-                [{ key: 'findings', items: findings }],
+                // Delegated lenses shed after findings: they are prompts for
+                // the host, and the lens report in `head` still names them.
+                [{ key: 'findings', items: findings }, { key: 'delegatedLenses', items: delegatedLenses }],
                 tokens === null ? Number.MAX_SAFE_INTEGER : tokens,
             );
             return { text: render(null), refit: render };

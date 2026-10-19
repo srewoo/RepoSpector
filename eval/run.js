@@ -39,6 +39,11 @@ import { graphFindingsForCase } from './lib/graphContext.js';
 import { createRetention, recordStage } from './lib/retention.js';
 import { buildManifest } from './lib/manifest.js';
 import { normalizeProductPath, PRODUCT_PATH } from './lib/productPaths.js';
+import { scoreFindings as scoreRubric } from '../src/review-core/rubricScorer.js';
+import { createRubricContextFor } from '../src/review-core/rubricContext.js';
+import { createExtensionModelPort } from '../src/services/adapters/extensionModelPort.js';
+import { isDeterministicSource } from '../src/utils/findingSources.js';
+import { rulesFilesForCase } from './lib/rubricReplay.js';
 
 export function parseArgs(argv) {
     const args = {
@@ -54,6 +59,10 @@ export function parseArgs(argv) {
         // See the comment at their call site (in reviewOne) for why they were
         // missing here in the first place.
         scoreFindings: true, precisionGate: true,
+        // Rubric scorer (spec §2), annotate-only here: scores are stored on
+        // each prediction and `gate-replay.js --rubric-threshold N` applies the
+        // threshold offline, so one run serves every threshold.
+        rubric: true,
         // A full run is hours of LLM time. Resume is the difference between a
         // crash costing one case and costing the whole run.
         resume: false,
@@ -78,6 +87,7 @@ export function parseArgs(argv) {
         else if (a === '--fail-level') args.failLevel = argv[++i];
         else if (a === '--no-scoring') args.scoreFindings = false;
         else if (a === '--no-precision-gate') args.precisionGate = false;
+        else if (a === '--no-rubric') args.rubric = false;
         else if (a === '--product-path') args.productPath = normalizeProductPath(argv[++i]);
         else if (a === '--host-agent') args.hostAgent = argv[++i];
         else if (a === '--help' || a === '-h') args.help = true;
@@ -86,8 +96,47 @@ export function parseArgs(argv) {
     return args;
 }
 
-/** Flatten a finding to the scoreable record, keeping enough to adjudicate it. */
-function toPrediction(f, posted) {
+/**
+ * Per-run identity for a finding that was actually rubric-scored. A symbol key
+ * survives the object spreads later stages use to clone findings, but JSON,
+ * Object.keys and every normal property read ignore it, so no existing stage
+ * can see it. Findings added after scoring (graph / external) never get one.
+ */
+const RUBRIC_TAG = Symbol('evalRubricTag');
+let rubricTagSeq = 0;
+
+/** Tag copies of `findings` for scoring; the copies carry no `rubric`. */
+export function tagForRubric(findings) {
+    return findings.map((f) => ({ ...f, [RUBRIC_TAG]: ++rubricTagSeq }));
+}
+
+/** Re-attach the stored rubric by tag only; untagged findings get none. */
+export function attachRubric(f, rubricByTag) {
+    const tag = f[RUBRIC_TAG];
+    return tag !== undefined && rubricByTag.has(tag) ? { ...f, rubric: rubricByTag.get(tag) } : f;
+}
+
+/** The rubric verdict as stored: enough to re-apply the threshold and caps offline. */
+function rubricRecord(r) {
+    if (!r) return null;
+    return {
+        status: r.status ?? null,
+        score: r.score ?? null,
+        rawScore: r.rawScore ?? null,
+        preExisting: r.preExisting ?? null,
+        quotedRule: r.quotedRule ? String(r.quotedRule).slice(0, 300) : null,
+        reason: r.reason ? String(r.reason).slice(0, 300) : null,
+        capReason: r.capReason ?? null,
+    };
+}
+
+/**
+ * Flatten a finding to the scoreable record, keeping enough to adjudicate it —
+ * and, since the rubric upgrade, enough to replay a new filter over it without
+ * a model (spec §5.1). A stored prediction that lacked these could not be
+ * re-filtered; it could only be re-run.
+ */
+export function toPrediction(f, posted) {
     return {
         file: f.file || f.filePath || '',
         line: f.line ?? null,
@@ -97,6 +146,14 @@ function toPrediction(f, posted) {
         suggestion: (f.suggestion || '').slice(0, 300),
         rule: f.rule ?? f.ruleId ?? null,
         source: f.source ?? null,
+        category: f.category ?? null,
+        citationRule: f.citation?.rule ?? null,
+        confidence: f.confidence ?? null,
+        score: f.score ?? null,
+        lens: f.lens ?? null,
+        evidence: f.evidence ? String(f.evidence).slice(0, 400) : null,
+        citedLine: f._evidence?.citedLine ?? null,
+        rubric: rubricRecord(f.rubric),
         // Whether a reviewer would actually SEE this inline, per the posting
         // policy. Precision on posted findings is the number that matters;
         // precision over everything generated is the diagnostic.
@@ -279,6 +336,30 @@ export async function reviewOne(kase, { llm, settings, opts }) {
     recordStage(retention, 'verification', findings, verified.findings);
     findings = verified.findings;
 
+    // Rubric scorer, after the deterministic gates as in the shipped pipeline
+    // (spec §2.6). ANNOTATE ONLY: no finding is removed here, so the stored
+    // predictions keep every score and `gate-replay.js --rubric-threshold N`
+    // can sweep thresholds offline. Deterministic sources come back `bypassed`.
+    // The verdicts live in a side map, NOT on the findings: every later stage
+    // (posting policy included, which routes `unscored` to notVerified) must
+    // behave exactly as it does with --no-rubric, so baselines stay comparable.
+    // They are re-attached only when predictions are built.
+    const rubricByTag = new Map();
+    let rubricStats = null;
+    if (opts.rubric !== false && findings.length) {
+        const rulesFiles = rulesFilesForCase(kase);
+        const tagged = tagForRubric(findings);
+        const scored = await scoreRubric(tagged, {
+            modelPort: createExtensionModelPort({ llmService: llm, settings, lightModel: settings.lightModel ?? null }),
+            contextFor: createRubricContextFor({ files: prData.files || [], rulesFiles }),
+            rulesTexts: rulesFiles.map((r) => r.text),
+            isDeterministic: (f) => isDeterministicSource(f.source),
+        });
+        scored.findings.forEach((f, i) => rubricByTag.set(tagged[i][RUBRIC_TAG], f.rubric));
+        findings = tagged;
+        rubricStats = scored.stats;
+    }
+
     // The scorer, then the precision gate — the two shipped pipeline stages this
     // harness never ran. Every recall/precision figure this project published
     // before this change described findings the extension went on to delete:
@@ -372,7 +453,10 @@ export async function reviewOne(kase, { llm, settings, opts }) {
     recordStage(retention, 'posting-policy', findings, policy.inline);
 
     return {
-        predictions: findings.map(f => toPrediction(f, postedKeys.has(`${f.file || f.filePath}:${f.line}`))),
+        predictions: findings.map(f => toPrediction(
+            attachRubric(f, rubricByTag),
+            postedKeys.has(`${f.file || f.filePath}:${f.line}`),
+        )),
         // P1-7 — recorded per case so the report can attribute recall lost in
         // gates, and so two runs can be compared with their confounds stated.
         productPath: normalizeProductPath(opts.productPath),
@@ -398,6 +482,7 @@ export async function reviewOne(kase, { llm, settings, opts }) {
             precision: precisionStats,
             scoreFindings: opts.scoreFindings,
             precisionGate: opts.precisionGate,
+            rubric: rubricStats,
             droppedByGates: verified.stats.dropped,
             duplicates: verified.stats.duplicates,
             evidenceRefuted: verified.stats.evidenceRefuted,
@@ -461,6 +546,7 @@ async function main() {
             '  --fail-level <l>      none | info | low | medium | high | critical | any (default high)',
             '  --no-scoring          Skip the SuggestionScorer pass (A/B: the gate treats unscored findings as an outage, not a deletion)',
             '  --no-precision-gate   Skip filterGenuineProblems (A/B against the shipped default)',
+            '  --no-rubric           Skip the rubric scorer (predictions then carry rubric: null; gate-replay reports no rubric data)',
             '  --product-path <p>    extension | api | mcp-host — which shipped reviewer this run',
             '                        describes. Results are never pooled across paths.',
             '  --host-agent <name>   For --product-path mcp-host: the agent doing the reasoning.',

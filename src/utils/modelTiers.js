@@ -57,6 +57,15 @@ export const STAGE_TIERS = Object.freeze({
     changelog: TIER.LIGHT,
     labels: TIER.LIGHT,
     convention: TIER.LIGHT,
+
+    // Rubric scorer (review-core/rubricScorer.js). It DOES judge whether a
+    // finding is real, which by the rule above reads heavy. It is light on
+    // purpose: it runs once per surviving finding (10-20 calls a review), its
+    // answer is a fixed 0-100 rubric over a +-20-line hunk rather than open
+    // reasoning over a diff, and its worst outputs are clamped in code
+    // (pre-existing -> 0, unquoted rule -> 25). With no light model configured
+    // it resolves to the review model like every other stage.
+    rubric: TIER.LIGHT,
 });
 
 /**

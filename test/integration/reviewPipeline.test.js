@@ -131,3 +131,60 @@ describe('Review pipeline (real engine + orchestrator) integration', () => {
         expect(report.findings).toHaveLength(0);
     });
 });
+
+describe('Review pipeline → rubric stage → precision gate (integration)', () => {
+    const { runRubricStage } = require('../../src/services/reviewQualityStage.js');
+    const { filterGenuineProblems } = require('../../src/utils/genuineProblemGate.js');
+
+    function stubLLMWithEvidence() {
+        return jest.fn(async (messages) => {
+            const system = messages?.[0]?.content ?? '';
+            if (system !== PER_FILE_REVIEW_SYSTEM_PROMPT) {
+                return { content: 'synthesis', usage: { input: 1, output: 1 } };
+            }
+            // The engine batches both small files into one call, so answer for both.
+            const finding = (file) => ({
+                severity: 'high', file, line: 2,
+                message: 'Unvalidated input reaches query', rule: 'security:injection',
+                evidence: 'const value_2 = 1;',
+            });
+            return {
+                content: JSON.stringify({
+                    file: 'src/foo.js', language: 'javascript', fileVerdict: 'REQUEST_CHANGES', riskLevel: 'HIGH',
+                    findings: [finding('src/foo.js'), finding('src/bar.js')],
+                    positives: [],
+                }),
+                usage: { input: 10, output: 5 },
+            };
+        });
+    }
+
+    it('scores the real engine output, keeps the >=80 finding and holds the unscored one as not verified', async () => {
+        const engine = new MultiPassReviewEngine({ llmService: { streamChat: stubLLMWithEvidence() } });
+        const orchestrator = new ReviewOrchestrator({ multiPassEngine: engine });
+        const report = await orchestrator.review(
+            fixturePR(), {}, { provider: 'openai', model: 'gpt-4.1-mini', apiKey: 'sk-test' }, {},
+        );
+        expect(report.findings.length).toBe(2);
+
+        // foo.js is scored 90; bar.js gets no answer (budget refused).
+        const modelPort = jest.fn(async (messages) => {
+            const text = messages.map((m) => m.content).join('\n');
+            return /src\/bar\.js/.test(text)
+                ? { status: 'not-run', reason: 'call budget exhausted' }
+                : { status: 'ok', text: JSON.stringify({ score: 90, preExisting: false, quotedRule: null, reason: 'reachable' }) };
+        });
+        const scored = await runRubricStage(report.findings, {
+            modelPort, files: fixturePR().files, rulesFiles: [],
+        });
+        const gated = filterGenuineProblems(scored.findings, { minRubricScore: 80 });
+
+        const foo = gated.findings.find((f) => f.file === 'src/foo.js');
+        const bar = gated.findings.find((f) => f.file === 'src/bar.js');
+        expect(foo.blocking).toBe(true);
+        expect(foo.rubric.score).toBe(90);
+        expect(bar.blocking).toBe(false);
+        expect(bar.rubric.status).toBe('unscored');
+        expect(gated.notVerified.map((f) => f.file)).toEqual(['src/bar.js']);
+    });
+});

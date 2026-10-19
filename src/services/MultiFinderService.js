@@ -1,4 +1,6 @@
 import { FINDER_LENSES, buildLensFinderPrompt, activeLenses } from '../utils/finderLensPrompts.js';
+import { parseFinderFindings } from '../utils/finderFindingsJson.js';
+import { prepareLensContexts } from '../review-core/lenses/index.js';
 import { freshFindings } from '../utils/findingDedup.js';
 import { PRIORITY } from '../utils/callBudget.js';
 import { tokenManager } from '../utils/tokenManager.js';
@@ -60,6 +62,8 @@ export class MultiFinderService {
             promptMode = 'default',
             // Override the derived per-model budget (mainly for tests/eval).
             diffBudgetChars = null,
+            // `needs` of context-backed lenses resolve through these; PR intent reaches every lens.
+            contextPort = null, rulesFiles = [], lensLimits = {}, prDescription = '', linkedIssue = '',
         } = opts;
 
         /** Lenses that errored or timed out this run — reported, never swallowed. */
@@ -83,12 +87,18 @@ export class MultiFinderService {
         // Per-lens gating lives on the lenses themselves (`appliesTo`,
         // `requiresReuseContext`) so adding a lens never means editing this
         // runner. This used to hardcode the test-quality file test here.
-        const active = activeLenses(lenses, {
+        const gated = activeLenses(lenses, {
             files: prData.files || [],
             hasReuseContext: Boolean(reuseContext && String(reuseContext).trim()),
         });
+        // A lens whose `needs` cannot be resolved is not-run with a reason.
+        const prep = await prepareLensContexts(gated, {
+            files: prData.files || [], contextPort, rulesFiles,
+            baseSha: prData.baseSha ?? null, headSha: prData.headSha ?? null, limits: lensLimits,
+        });
+        const active = prep.runnable;
         if (!active.length) {
-            return { findings: [], stats: { rounds: 0, added: 0, byLens: {} }, usage };
+            return { findings: [], stats: { rounds: 0, added: 0, byLens: {}, lensReport: prep.skipped }, usage };
         }
 
         for (let round = 0; round < maxRounds; round++) {
@@ -106,7 +116,8 @@ export class MultiFinderService {
                     // Only the reuse lens reads this; passing it to every lens
                     // would spend the cached prefix on context they ignore.
                     reuseContext: lens.requiresReuseContext ? reuseContext : '',
-                    mode: promptMode
+                    mode: promptMode,
+                    prDescription, linkedIssue, lensContext: prep.contexts.get(lens.key) || '',
                 });
                 try {
                     const resp = await this.llmService.streamChat(
@@ -116,14 +127,16 @@ export class MultiFinderService {
                             model: settings.model,
                             apiKey: settings.apiKey,
                             budgetStage: 'finder',
-                            budgetPriority: PRIORITY.ESSENTIAL,
+                            // OPTIONAL for context-backed lenses: the reserve keeps room for the rubric scorer.
+                            budgetPriority: lens.needs?.length ? PRIORITY.OPTIONAL : PRIORITY.ESSENTIAL,
                             stream: false,
                             timeout: FINDER_TIMEOUT_MS,
                         }
                     );
                     usage.input += resp?.usage?.input || 0;
                     usage.output += resp?.usage?.output || 0;
-                    const findings = this._parseFindings(resp?.content || resp)
+                    const findings = parseFinderFindings(resp?.content || resp)
+                        .filter(f => !lens.accepts || lens.accepts(f))
                         .map(f => ({ ...f, source: 'llm', lens: lens.key }));
                     return { lens: lens.key, findings };
                 } catch (e) {
@@ -160,9 +173,15 @@ export class MultiFinderService {
                 + `not because they found nothing: ${failedLenses.map(f => f.lens).join(', ')}`
             );
         }
+        // Completeness: every lens that did not run, once, with why.
+        const lensReport = [...prep.skipped];
+        for (const f of failedLenses) {
+            if (lensReport.some(r => r.lens === f.lens)) continue;
+            lensReport.push({ lens: f.lens, status: 'not-run', reason: f.reason });
+        }
         return {
             findings: added,
-            stats: { rounds, added: added.length, byLens, failedLenses },
+            stats: { rounds, added: added.length, byLens, failedLenses, lensReport },
             usage,
         };
     }
@@ -275,24 +294,6 @@ export class MultiFinderService {
         }
 
         return sections.join('\n\n');
-    }
-
-    _parseFindings(text) {
-        if (!text || typeof text !== 'string') return [];
-        let cleaned = text.trim();
-        if (cleaned.startsWith('```json')) cleaned = cleaned.slice(7);
-        else if (cleaned.startsWith('```')) cleaned = cleaned.slice(3);
-        if (cleaned.endsWith('```')) cleaned = cleaned.slice(0, -3);
-        cleaned = cleaned.trim();
-        const tryParse = (s) => {
-            try {
-                const o = JSON.parse(s);
-                if (Array.isArray(o?.findings)) return o.findings;
-                if (Array.isArray(o)) return o;
-            } catch { /* ignore */ }
-            return null;
-        };
-        return tryParse(cleaned) || tryParse((cleaned.match(/\{[\s\S]*\}/) || [])[0] || '') || [];
     }
 }
 

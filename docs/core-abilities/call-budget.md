@@ -39,9 +39,9 @@ about why.
 
 | Priority | Stages | May spend |
 |---|---|---|
-| `essential` | `per-file`, `aggregate`, `finder`, `line-question` | the whole budget |
-| `important` | `verify`, `summary` | the whole budget |
-| `optional` | `scoring`, `fixes`, `explore`, `docstrings` | down to a 15% floor |
+| `essential` | `per-file`, `aggregate`, `finder` (the nine diff-only lenses), `line-question` | the whole budget |
+| `important` | `verify`, `rubric`, `summary` | the whole budget |
+| `optional` | `finder` (context-backed lenses: `history`, `codeComments`, `rulesCompliance`, `priorPrComments`), `scoring`, `fixes`, `explore`, `docstrings` | down to a 15% floor |
 
 ## Exhaustion is not an error
 

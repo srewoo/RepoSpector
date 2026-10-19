@@ -98,6 +98,16 @@ describe('SkipRuleEngine.evaluateSkipRules', () => {
         const r = evaluateSkipRules(pr({ pipelineStatus: 'failed' }));
         expect(r).toEqual({ action: 'DEFER', reason: 'failing_pipeline' });
     });
+    it('DEFERs on a raw GitLab pipeline shape (pipeline.status)', () => {
+        const r = evaluateSkipRules(pr({ pipeline: { status: 'failed' } }));
+        expect(r).toEqual({ action: 'DEFER', reason: 'failing_pipeline' });
+    });
+    it('DEFERs on a cancelled head pipeline', () => {
+        expect(evaluateSkipRules(pr({ pipelineStatus: 'canceled' })).action).toBe('DEFER');
+    });
+    it.each(['running', 'success', 'none', undefined])('does not defer on pipelineStatus %p', (s) => {
+        expect(evaluateSkipRules(pr({ pipelineStatus: s })).action).toBe('REVIEW');
+    });
     it('reviews oversized PRs partially rather than skipping them', () => {
         const files = Array.from({ length: 300 }, (_, i) => ({
             filename: `src/mod${i}.js`, additions: 30, deletions: 0,

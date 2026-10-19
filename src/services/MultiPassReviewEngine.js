@@ -113,7 +113,9 @@ export class MultiPassReviewEngine {
                     + (skipped.length > 10 ? `, +${skipped.length - 10} more` : '')
                 );
             }
-            this.lastSkippedFiles = skipped.map(f => f.filename);
+            // Returned, not stored on `this`: one engine serves parallel chunks,
+            // and an instance field would hold whichever chunk wrote last.
+            const skippedFiles = skipped.map(f => f.filename);
 
             onProgress?.({
                 phase: 'reviewing',
@@ -403,6 +405,7 @@ export class MultiPassReviewEngine {
             return {
                 analysis: aggregationResponse.content || aggregationResponse,
                 perFileFindings,
+                skippedFiles,
                 failedFiles,
                 reviewUnits: reviewUnits.length,
                 processingTime: Date.now() - startTime,

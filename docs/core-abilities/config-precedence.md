@@ -77,3 +77,29 @@ wanted feature and spends the user's own key on the user's own provider.
 `reviewQuality.configProvenance` (key → layer), `configEnforced`, and
 `configRejected`. `explainOverrides()` renders those as one line each; the review
 handler logs them with a `⚙️` prefix.
+
+## Repo file validation
+
+`.repospector.yaml` `settings` is validated key by key (`src/utils/repoSettingsSchema.js`).
+Accepted: every `ENFORCEABLE_KEYS` key, `model`, `diffAnchored`, and the
+review-quality keys:
+
+| Key | Type | Default |
+|---|---|---|
+| `minRubricScore` | integer 0-100 | 80 |
+| `lensHistory`, `lensCodeComments`, `lensRulesCompliance`, `lensPriorPrComments` | boolean | true |
+| `priorPrLimit` | integer 1-20 | 5 |
+| `chunkConcurrency` | integer 1-8 | 3 |
+| `valueScoring` | boolean | false |
+| `lightModel` | model name | none |
+| `verificationVotes`, `finderRounds`, `explorationIterations` | integer 1-10 | 1, 2, 4 |
+| `minConfidence` | number 0-1 | none |
+| `hypothesisValidation`, `repoExploration`, `teamConventions` | boolean | on (exploration: per model) |
+
+Flat keys only — the parser handles two levels and no YAML library is bundled.
+
+A key that is unknown, has the wrong type, or is in `USER_ONLY_KEYS` is dropped
+and reported in `configWarnings`, which the review summary and the MCP output
+show. A repo file can never supply a credential, even before `resolveConfig`
+refuses it. Defaults live in `REVIEW_QUALITY_DEFAULTS` (`configPrecedence.js`)
+and enter as the `defaults` layer.

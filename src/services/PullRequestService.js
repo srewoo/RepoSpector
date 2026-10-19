@@ -10,6 +10,8 @@ import { formatInlineComments } from '../utils/inlineCommentFormatter.js';
 import { buildCommentableLineMap, oldLineForNewLine } from '../utils/patchLines.js';
 import { githubApiBase, gitlabApiBase, rememberGitLabHost, detectPlatform, PLATFORM } from '../utils/gitHosts.js';
 import { createCompleteness } from '../utils/reviewCompleteness.js';
+import { normalizePipelineStatus } from '../utils/pipelineStatus.js';
+import * as prHistory from './prHistory.js';
 
 /**
  * A file-fetch failure that says whether the file is ABSENT or merely
@@ -320,15 +322,27 @@ export class PullRequestService {
             }
             const prData = await prResponse.json();
 
-            // Fetch paginated endpoints in parallel (per_page=100, follows Link headers)
-            const [filesData, commitsData, reviewsData, comments] = await Promise.all([
+            // Fetch paginated endpoints in parallel (per_page=100, follows Link headers).
+            // Check runs on the head commit give `pipelineStatus`. A check that
+            // could not be read is `none` WITH a reason, never read as clean, and
+            // never a failed fetch of the whole PR.
+            const headSha = prData.head?.sha;
+            const checksP = headSha
+                ? this._fetchCheckRuns(this.githubApiFor(prInfo), owner, repo, headSha, headers)
+                    .then(runs => ({ runs, error: null }), (err) => {
+                        console.warn(`GitHub check runs unreadable for ${owner}/${repo}@${headSha}: ${err.message}`);
+                        return { runs: null, error: err.message };
+                    })
+                : Promise.resolve({ runs: null, error: 'no head sha' });
+            const [filesData, commitsData, reviewsData, comments, checks] = await Promise.all([
                 this.fetchAllPagesGitHub(`${base}/files`, headers),
                 this.fetchAllPagesGitHub(`${base}/commits`, headers),
                 this.fetchAllPagesGitHub(`${base}/reviews`, headers),
-                this.fetchAllPagesGitHub(`${base}/comments`, headers)
+                this.fetchAllPagesGitHub(`${base}/comments`, headers),
+                checksP,
             ]);
 
-            return this.normalizeGitHubPR(prData, filesData, commitsData, reviewsData, comments);
+            return this.normalizeGitHubPR(prData, filesData, commitsData, reviewsData, comments, checks.runs, checks.error);
         } catch (error) {
             console.error('Error fetching GitHub PR:', error);
             throw error;
@@ -338,7 +352,7 @@ export class PullRequestService {
     /**
      * Normalize GitHub PR data to common format
      */
-    normalizeGitHubPR(pr, files, commits, reviews, comments) {
+    normalizeGitHubPR(pr, files, commits, reviews, comments, checkRuns = null, checkRunsError = null) {
         return {
             platform: 'github',
             id: pr.id,
@@ -368,6 +382,11 @@ export class PullRequestService {
             // decide whether the PR moved since the last review.
             headSha: pr.head?.sha || null,
             baseSha: pr.base?.sha || null,
+
+            // success | failed | running | none — read by SkipRuleEngine.
+            pipelineStatus: normalizePipelineStatus(checkRuns),
+            // Set only when the checks could not be read (pipelineStatus is then `none`).
+            pipelineStatusReason: checkRuns === null && checkRunsError ? `checks_unreadable: ${checkRunsError}` : null,
 
             // Stats
             stats: {
@@ -695,6 +714,9 @@ export class PullRequestService {
                 createdAt: n.created_at,
                 system: n.system || false
             })),
+
+            // success | failed | running | none — read by SkipRuleEngine.
+            pipelineStatus: normalizePipelineStatus(mr.head_pipeline?.status),
 
             // Pipeline status
             pipeline: mr.head_pipeline ? {
@@ -1104,13 +1126,7 @@ export class PullRequestService {
             }
             if (!ref) return [];
 
-            const runsResp = await fetch(
-                `${api}/repos/${owner}/${repo}/commits/${ref}/check-runs?per_page=${MAX_RUNS}`,
-                { headers },
-            );
-            if (!runsResp.ok) return [];
-
-            const runs = (await runsResp.json())?.check_runs || [];
+            const runs = await this._fetchCheckRuns(api, owner, repo, ref, headers, MAX_RUNS);
             const out = [];
 
             for (const run of runs) {
@@ -1149,6 +1165,24 @@ export class PullRequestService {
             console.warn('Failed to fetch check annotations:', e.message);
             return [];
         }
+    }
+
+    /**
+     * Check runs on one commit (GitHub). Shared by `fetchCheckAnnotations` and
+     * the `pipelineStatus` read in `fetchGitHubPR`.
+     *
+     * @returns {Promise<Array>} the runs; rejects with `HTTP <status>` when unreadable
+     */
+    async _fetchCheckRuns(api, owner, repo, ref, headers, perPage = 100) {
+        const resp = await fetch(
+            `${api}/repos/${owner}/${repo}/commits/${ref}/check-runs?per_page=${perPage}`,
+            { headers },
+        );
+        if (!resp.ok) {
+            console.warn(`GitHub check runs for ${ref} unreadable: HTTP ${resp.status}`);
+            throw new Error(`HTTP ${resp.status}`);
+        }
+        return (await resp.json())?.check_runs || [];
     }
 
     /**
@@ -1770,6 +1804,35 @@ export class PullRequestService {
         }
 
         return [];
+    }
+
+    /** Parse a PR/MR URL or throw — the history methods below need a real target. */
+    _prInfoOrThrow(url) {
+        const prInfo = this.parsePullRequestUrl(url);
+        if (!prInfo) throw new Error(`Unsupported PR/MR URL: ${url}`);
+        return prInfo;
+    }
+
+    /**
+     * Blame ranges overlapping [startLine, endLine] of `path` at `ref` (use the
+     * BASE sha: the lens asks who wrote the lines this PR changes). GitHub via
+     * GraphQL (token required), GitLab via the files/blame REST endpoint.
+     * Throws on any failure. See services/prHistory.js.
+     *
+     * @returns {Promise<Array<{start:number,end:number,sha:string,message:string,date:string}>>}
+     */
+    async fetchBlame(prUrl, path, ref, startLine, endLine) {
+        return prHistory.fetchBlame(this, this._prInfoOrThrow(prUrl), path, ref, startLine, endLine);
+    }
+
+    /** Last `limit` commits touching `path` at `ref`. Throws on failure. */
+    async fetchRecentCommits(prUrl, path, ref, limit = 5) {
+        return prHistory.fetchRecentCommits(this, this._prInfoOrThrow(prUrl), path, ref, limit);
+    }
+
+    /** Review comments on `path` from recent merged PRs/MRs, excluding `excludeNumber`. Throws on failure. */
+    async fetchPriorPrComments(prUrl, path, { limitPrs = 5, excludeNumber = null } = {}) {
+        return prHistory.fetchPriorPrComments(this, this._prInfoOrThrow(prUrl), path, { limitPrs, excludeNumber });
     }
 
     /** Head SHA of a PR — required as `commit_id` when posting standalone comments. */

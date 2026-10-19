@@ -28,6 +28,7 @@
  */
 
 import { VERDICT } from './reviewSchema.js';
+import { normalizePipelineStatus, PIPELINE_STATUS } from '../utils/pipelineStatus.js';
 
 // Tunables — all overridable per-call.
 export const DEFAULT_THRESHOLDS = Object.freeze({
@@ -176,9 +177,11 @@ export function evaluateSkipRules(pr, opts = {}) {
         return { action: 'DEFER', reason: 'merge_conflict' };
     }
 
-    // 6. Failing pipeline → DEFER (re-run after fix).
-    const pipeline = String(pr.pipelineStatus ?? pr.ciStatus ?? '').toLowerCase();
-    if (pipeline && /^(failed|failing|error)$/.test(pipeline)) {
+    // 6. Failing pipeline → DEFER (re-run after fix). `pipelineStatus` is set
+    //    by PullRequestService on both hosts; the raw GitLab `pipeline.status`
+    //    and `ciStatus` fallbacks cover callers that pass an un-normalised PR.
+    const pipeline = normalizePipelineStatus(pr.pipelineStatus ?? pr.ciStatus ?? pr.pipeline?.status);
+    if (pipeline === PIPELINE_STATUS.FAILED) {
         return { action: 'DEFER', reason: 'failing_pipeline' };
     }
 

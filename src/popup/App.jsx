@@ -29,6 +29,9 @@ import { rankKeylessRoutes } from './utils/keylessRoutes.js';
 function mapReviewData(data) {
     return {
         reviewedAt: data.reviewedAt || null,
+        // Read by the post handler's head-moved check; without it that guard
+        // had nothing to compare against.
+        headSha: data.headSha ?? null,
         analysis: data.analysis,
         recommendation: data.staticAnalysis?.recommendation,
         reviewEffort: data.reviewEffort,

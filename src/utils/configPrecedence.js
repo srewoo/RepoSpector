@@ -94,6 +94,21 @@ export const USER_ONLY_KEYS = Object.freeze([
 ]);
 
 /**
+ * Built-in defaults for the review-quality keys (spec §2.5, §3.4, §4.5). Pass
+ * them as (part of) the `defaults` layer so every other layer can override them.
+ */
+export const REVIEW_QUALITY_DEFAULTS = Object.freeze({
+    minRubricScore: 80,
+    lensHistory: true,
+    lensCodeComments: true,
+    lensRulesCompliance: true,
+    lensPriorPrComments: true,
+    priorPrLimit: 5,
+    chunkConcurrency: 3,
+    valueScoring: false,
+});
+
+/**
  * Merge the layers into one config, recording where each key came from.
  *
  * Only OWN, DEFINED keys of a layer participate: `{ verifyFindings: undefined }`
@@ -200,4 +215,6 @@ export function explainOverrides(resolution) {
     return out;
 }
 
-export default { resolveConfig, flag, explainOverrides, LAYERS, ENFORCEABLE_KEYS, USER_ONLY_KEYS };
+export default {
+    resolveConfig, flag, explainOverrides, LAYERS, ENFORCEABLE_KEYS, USER_ONLY_KEYS, REVIEW_QUALITY_DEFAULTS,
+};

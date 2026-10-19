@@ -76,6 +76,27 @@ Every tool accepts an optional `repo` argument (an absolute path; `~` is expande
 - **`pr_url`** — a GitHub PR or GitLab MR link for this server to fetch itself.
 - **`range`** — a local git revision range, such as `main..HEAD`.
 
+`review_pr` also takes platform context **your** GitHub/GitLab MCP fetched — this server never calls the
+platform for it, and needs no token for it. Each is optional; an omitted one is reported as not run, with
+what to fetch:
+
+- **`prior_pr_comments`** — `[{path, pr_ref, author, body, line?}]`, review comments from recent merged
+  PRs that touched the changed files. Feeds the `priorPrComments` lens.
+- **`pipeline_status`** — `success | failed | running | none`. A failing pipeline is reported as `DEFER`.
+- **`pr_ref`** — `{url, head_sha, base_sha}`, metadata only: findings get permalinks pinned to `head_sha`,
+  and `base_sha` is the blame base for the `history` lens. It never triggers a fetch.
+- **`settings`** — review-quality switches with the same flat keys as `.repospector.yaml`:
+  `minRubricScore` (0-100, default 80), `lensHistory`, `lensCodeComments`, `lensRulesCompliance`,
+  `lensPriorPrComments` (booleans, default true), `priorPrLimit` (1-20, default 5). The repo's own
+  `.repospector.yaml` `settings` (read from the indexed repo at the reviewed revision) apply first; keys
+  given here override them. Unknown or mistyped keys, from either source, are reported back as
+  `configWarnings` (repo ones prefixed `.repospector.yaml:`); a switched-off lens is reported not run.
+
+Four lenses run beside the model pass: `history` (local `git blame` / `git log` on the indexed repo),
+`codeComments` (comments near each hunk), `rulesCompliance` (`CLAUDE.md`, `AGENTS.md`,
+`.repospector.yaml` at the reviewed head) and `priorPrComments`. Without sampling, the bundle's
+`delegatedLenses` carries each lens's question and context for you to run over the hunks.
+
 ## Flags and environment variables
 
 - `--repo <path>` — default repository for calls that do not name one. Defaults to the working directory.
@@ -171,6 +192,26 @@ The `dependencies` section (OSV vulnerability lookups) runs only when the change
 dependency manifest, and says `applicable: false` when it does not — a real answer rather than a missing
 one. Its cache is file-backed beside the index. A section that genuinely cannot run is still named in the
 output rather than silently omitted, so a reader cannot mistake a missing check for a passing one.
+
+### Rubric scoring and the delegated exchange
+
+Every model-asserted finding — the sampled model pass, the new lenses, and findings you submit with
+`submit_review_findings` — is scored 0-100 by an independent rubric pass (the scale from Anthropic's
+`code-review` plugin). A pre-existing issue is capped at 0; a rule-violation claim whose quoted rule is not
+found verbatim in a loaded rules file (`CLAUDE.md`, `AGENTS.md`, or a `.repospector.yaml` rule entry —
+never its `settings` block) is capped at 25. Findings below `minRubricScore` (default 80; the same
+threshold for findings you submit and score through `rubric_requests`) are dropped; findings that could
+not be scored are kept and listed as **not verified**.
+
+When your client offers MCP sampling the scoring runs through it. When it does not, the reply to
+`submit_review_findings` lists `rubric_requests`, each a prompt for you to run; send the answers back in a
+second call:
+
+    submit_review_findings({ review_id, reviewer, rubric_scores: [
+      { request_id, score, preExisting, quotedRule, reason } ] })
+
+Findings may also carry `lens` (`history`, `codeComments`, `rulesCompliance`, `priorPrComments`) when they
+answer a delegated lens from the bundle, and `quotedRule` for `rulesCompliance`.
 
 ## Releasing an update
 

@@ -76,7 +76,7 @@ import { detectLanguageFromPath } from '../../utils/languageMap.js';
 import { CallBudget, PRIORITY } from '../../utils/callBudget.js';
 import { isAuthError, describeAuthError } from '../../utils/authErrors.js';
 import { PriorFindingService } from '../../services/PriorFindingService.js';
-import { resolveConfig, explainOverrides } from '../../utils/configPrecedence.js';
+import { resolveConfig, explainOverrides, REVIEW_QUALITY_DEFAULTS } from '../../utils/configPrecedence.js';
 import { ExternalFindingsService } from '../../services/ExternalFindingsService.js';
 import { applyFilterMode, describeFilterMode } from '../../utils/findingFilterMode.js';
 import { decideFailure, describeFailLevel } from '../../utils/failLevel.js';
@@ -119,6 +119,23 @@ import {
     buildPrecisionAnalysis,
     summarizeGenuineProblems,
 } from '../../utils/genuineProblemGate.js';
+import { createExtensionModelPort } from '../../services/adapters/extensionModelPort.js';
+import { createExtensionContextPort } from '../../services/adapters/extensionContextPort.js';
+import { RUBRIC_STATUS } from '../../review-core/rubricScorer.js';
+import {
+    resolveReviewNumbers,
+    selectNewLenses,
+    lensNotRun,
+    collectRulesFiles,
+    issueText,
+    runRubricStage,
+    fileLengthsFrom,
+    attachReviewPermalinks,
+} from '../../services/reviewQualityStage.js';
+import { renderNotVerifiedSection, renderQualityNotes } from '../../utils/reviewSummarySections.js';
+import { checkPostingEligibility } from '../../utils/postingEligibility.js';
+import { FINDER_LENSES } from '../../utils/finderLensPrompts.js';
+import { LENS_LIMITS } from '../../review-core/lenses/index.js';
 
 /**
  * Load `.repospector.yaml` for the repo a PR/MR belongs to.
@@ -1279,6 +1296,7 @@ export function createPrReviewHandlers(svc) {
             // shape so every existing `rqCfg.x !== false` test still reads the
             // same value it did before.
             const configResolution = resolveConfig({
+                defaults: REVIEW_QUALITY_DEFAULTS,
                 user: reviewSettings || {},
                 org: settings.orgPolicy || null,
                 repo: customConfig?.settings || {},
@@ -1453,8 +1471,12 @@ export function createPrReviewHandlers(svc) {
             // competent reviewer would want to interrupt the author with it.
             // Repositories can raise this threshold, but cannot make an unscored
             // or low-value candidate become a reported defect.
-            const scoringEnabled = rqCfg.scoreFindings !== false && options.scoreFindings !== false;
+            const scoringEnabled = (rqCfg.valueScoring === true || options.valueScoring === true)
+                && rqCfg.scoreFindings !== false && options.scoreFindings !== false;
             const minScore = Math.max(7, Number(rqCfg.minScore ?? options.minScore ?? 7));
+            // The precision gate's threshold (spec §2.5): rubric score 0-100.
+            // Validated: NaN / '' / out-of-range fall back or clamp (0-100).
+            const { minRubricScore, priorPrLimit } = resolveReviewNumbers(rqCfg, options);
             // 'blocking' (default) | 'background' | false — see the indexing block below.
             // Without this, RAG + graph context are dark for any repo the user never
             // manually indexed.
@@ -1991,6 +2013,8 @@ export function createPrReviewHandlers(svc) {
             // What was this change SUPPOSED to do? Ticket + acceptance criteria,
             // CI state, author's description. Pure/synchronous — cannot fail.
             let intentBlock = '';
+            // Hoisted so the multi-finder lenses see the same ticket (spec §3.3).
+            let linkedIssue = null;
             try {
                 // The ticket, when the PR names one. `options.issue` lets a
                 // caller supply it directly (tests, or a future tracker
@@ -1999,6 +2023,7 @@ export function createPrReviewHandlers(svc) {
                 // acceptance-criteria branch inside buildIntentBlock had never
                 // run in production.
                 const issue = options.issue || await resolveLinkedIssue(svc, prUrl, prData);
+                linkedIssue = issue || null;
                 if (issue) {
                     console.log(`🎫 Linked issue ${issue.key}: ${issue.summary}`);
                 }
@@ -2090,8 +2115,36 @@ export function createPrReviewHandlers(svc) {
             const reviewOptions = {
                 focusAreas: options.focusAreas || ['security', 'bugs', 'performance'],
                 maxConcurrent: options.maxConcurrent || 3,
-                maxFilesToReview: options.maxFiles || 50
+                maxFilesToReview: options.maxFiles || 50,
+                // Spec §4.5: chunks reviewed at once (1-8, default 3). Per-chunk
+                // unit concurrency (`maxConcurrent`) still applies inside each.
+                chunkConcurrency: Number(rqCfg.chunkConcurrency ?? options.chunkConcurrency ?? 3),
             };
+
+            // ── Shared review-core ports (spec §1.2) ─────────────────────────
+            // The rubric scorer and the new lenses run through these, so the
+            // same core serves the extension and repospector-mcp.
+            const modelPort = createExtensionModelPort({
+                llmService: svc.llmService, settings: reviewSettings_, lightModel,
+            });
+            // Tokens are already on the service (updatePRServiceTokens ran above).
+            const contextPort = createExtensionContextPort({
+                prData,
+                prUrl,
+                pullRequestService: svc.pullRequestService,
+            });
+            const rulesFiles = collectRulesFiles({
+                instructionScopes, repoInstructions, repoRules: customConfig?.rules || [],
+            });
+            const newLensSelection = selectNewLenses(rqCfg, { multiFinderEnabled });
+            const lensReport = [...newLensSelection.lensReport];
+            // Unreadable CI checks: pipelineStatus is then `none`, which the skip
+            // rules read as "no pipeline" — say so instead of staying silent.
+            if (prData.pipelineStatusReason) {
+                lensReport.push({ lens: 'pipelineStatus', status: 'not-run', reason: prData.pipelineStatusReason });
+            }
+            const configWarnings = Array.isArray(customConfig?.configWarnings) ? customConfig.configWarnings : [];
+            for (const w of configWarnings) console.warn(`⚙️  .repospector.yaml: ${w}`);
 
             // Backend dispatch (Aegis) is currently disabled — the third-party
             // backend surface is hidden from the UI and the dispatch logic
@@ -2212,15 +2265,24 @@ export function createPrReviewHandlers(svc) {
                         reuseContext,
                         maxRounds: finderRounds,
                         promptMode: finderMode,
-                        onProgress
+                        onProgress,
+                        // Spec §3: the four new lenses and what they need.
+                        lenses: [...FINDER_LENSES, ...newLensSelection.lenses],
+                        contextPort,
+                        rulesFiles,
+                        lensLimits: { ...LENS_LIMITS, priorPrLimit },
+                        prDescription: prData.description || '',
+                        linkedIssue: issueText(linkedIssue),
                     });
                     if (fres.findings.length) verifiedFindings = [...verifiedFindings, ...fres.findings];
                     finderStats = fres.stats;
+                    lensReport.push(...(fres.stats?.lensReport || []));
                     postUsage.input += fres.usage.input;
                     postUsage.output += fres.usage.output;
                     console.log(`🔎 Multi-finder (${finderMode}) added ${fres.stats.added} findings across ${fres.stats.rounds} round(s)`);
                 } catch (e) {
                     console.warn('Multi-finder pass failed (using baseline findings):', e?.message);
+                    lensReport.push(...lensNotRun(newLensSelection.lenses, `multi-finder failed: ${e?.message || e}`));
                 }
             }
 
@@ -2314,6 +2376,28 @@ export function createPrReviewHandlers(svc) {
                     `🕵️  Verification: kept ${verificationStats.kept}/${verificationStats.input}`,
                 );
             }
+
+            // ── Rubric scorer (spec §2) ──────────────────────────────────────
+            //
+            // Replaces the LLM refuter in the default path (the refuter stays
+            // behind `llmRefutation`). Runs AFTER the deterministic gates above so
+            // the model never scores what code already refuted. One LIGHT-tier
+            // call per finding at IMPORTANT priority; deterministic sources are
+            // bypassed. Never throws — an outage leaves findings `unscored`, which
+            // the precision gate keeps under "Not verified" and never posts inline.
+            const rubricRun = await runRubricStage(verifiedFindings, {
+                modelPort,
+                files: prData.files || [],
+                rulesFiles,
+                onProgress,
+            });
+            verifiedFindings = rubricRun.findings;
+            const rubricStats = { ...rubricRun.stats, error: rubricRun.error };
+            console.log(
+                `🧮 Rubric: ${rubricStats.scored} scored, ${rubricStats.unscored} unscored, `
+                + `${rubricStats.bypassed} bypassed, ${rubricStats.capped} capped`
+                + (rubricRun.error ? ` (${rubricRun.error})` : ''),
+            );
 
             // 3a-pre) Missing-test finder — deterministic, and covering a class
             //     RepoSpector structurally could not report before: the only test
@@ -2545,12 +2629,16 @@ export function createPrReviewHandlers(svc) {
             const pipelineResult = await runFindingPipeline(
                 verifiedFindings,
                 {
+                    // Rubric mode: `rubric.score >= minRubricScore` is the
+                    // threshold (spec §1.3 step 7); confidence/minScore stay in
+                    // the call only for the stats they report.
                     precisionGate: (findings, opts) => filterGenuineProblems(findings, {
                         minConfidence: Math.max(
                             0.8,
                             Number(opts.minConfidence ?? options.minConfidence ?? 0.8),
                         ),
                         minScore: opts.minScore,
+                        minRubricScore,
                     }),
                     admit: admitDeterministic,
                     scope: applyFilterMode,
@@ -2684,6 +2772,14 @@ export function createPrReviewHandlers(svc) {
                 }
             }
 
+            // Full-SHA permalinks on every reported finding (spec §4.4), so the
+            // summary, the panel and inline comments link to the reviewed code.
+            verifiedFindings = attachReviewPermalinks(verifiedFindings, {
+                prUrl,
+                headSha: prData.headSha ?? null,
+                fileLengths: fileLengthsFrom(prData, fileContext),
+            });
+
             // A review that ran WITHOUT repo context is a weaker review, and the reader
             // has to know which kind they are looking at — otherwise "it found nothing
             // about our conventions" is indistinguishable from "it had no idea what our
@@ -2797,7 +2893,12 @@ export function createPrReviewHandlers(svc) {
             // the popup forwards `reviewEvent` to the host verbatim, one click
             // posted a real approval on an unreviewed PR. Gate outcomes must win
             // over the finding count.
-            const multiPassBlocking = countBlocking(verifiedFindings);
+            const notVerifiedFindings = verifiedFindings.filter(
+                (f) => f?.rubric?.status === RUBRIC_STATUS.UNSCORED,
+            );
+            const multiPassBlocking = countBlocking(
+                verifiedFindings.filter((f) => f?.rubric?.status !== RUBRIC_STATUS.UNSCORED),
+            );
             const gateOutcome = describeGateOutcome(result);
             // A partial run still escalates on what it DID read; it just cannot approve.
             //
@@ -2831,6 +2932,15 @@ export function createPrReviewHandlers(svc) {
                     ? createCompleteness({ parseFailures: Number(result.stats.parseFailures) || 0 })
                     : null,
                 prData?.completeness ?? null,
+                // Unscored findings are non-blocking by design, so a rubric
+                // outage would otherwise read as a clean APPROVE.
+                notVerifiedFindings.length > 0
+                    ? createCompleteness({ unavailableChecks: [{
+                        name: 'rubric scorer',
+                        reason: `${notVerifiedFindings.length} finding(s) not verified`,
+                        required: true,
+                    }] })
+                    : null,
             );
             const governed = governVerdict(
                 { verdict: rawVerdict, reviewEvent: rawReviewEvent },
@@ -2865,6 +2975,7 @@ export function createPrReviewHandlers(svc) {
                 skipped: reviewWasSkipped,
                 partial: reviewWasPartial,
                 reason: gateOutcome?.reason,
+                minRubricScore,
             });
             // One rendering of every incompleteness reason — parse failures,
             // failed chunks, dropped hunks, host-diff gaps — instead of the
@@ -2873,6 +2984,10 @@ export function createPrReviewHandlers(svc) {
             if (completenessNote) {
                 result.analysis += `\n\n${completenessNote}`;
             }
+            const notVerifiedSection = renderNotVerifiedSection(notVerifiedFindings);
+            if (notVerifiedSection) result.analysis += `\n${notVerifiedSection}`;
+            const qualityNotes = renderQualityNotes({ configWarnings, lensReport });
+            if (qualityNotes) result.analysis += `\n${qualityNotes}`;
             if (indexStatus === 'index-failed' || indexStatus === 'indexing-started') {
                 const contextCaveat = indexStatus === 'index-failed'
                     ? `Reviewed without repository context because indexing failed${indexError ? `: ${indexError}` : ''}; this result is based on the diff and changed-file context only.`
@@ -2954,6 +3069,13 @@ export function createPrReviewHandlers(svc) {
                         parseFailures,
                         citation: citationStats,
                         scoring: scoringStats,
+                        valueScoring: scoringEnabled,
+                        // Spec §2: the rubric stage and its threshold.
+                        rubric: rubricStats,
+                        minRubricScore,
+                        notVerified: notVerifiedFindings.length,
+                        // Spec §3.1: every new lens that did not run, with why.
+                        lensReport,
                         minScore,
                         precision: precisionStats,
                         precisionDropped,
@@ -3003,6 +3125,8 @@ export function createPrReviewHandlers(svc) {
                         configProvenance: configResolution.provenance,
                         configEnforced: configResolution.enforced,
                         configRejected: configResolution.rejected,
+                        // Spec §4.1: unknown/mistyped/user-only keys in .repospector.yaml.
+                        configWarnings,
                         // Which of the team's own scanners were read, and what
                         // each contributed — including the ones that failed. A
                         // review that silently lost its CodeQL findings looks
@@ -3232,6 +3356,19 @@ export function createPrReviewHandlers(svc) {
                 console.warn('Could not fetch PR for line validation / dedupe; posting without it:', e.message);
             }
 
+            // ── Eligibility re-check (spec §4.3) ─────────────────────────────
+            // The PR may have been closed, merged or returned to draft since the
+            // review. Same skip rules the review ran, on the fresh fetch.
+            const eligibility = checkPostingEligibility(prDataForLines);
+            if (!eligibility.eligible) {
+                sendResponse({
+                    success: false,
+                    error: eligibility.reason,
+                    data: { ineligible: true, gateReason: eligibility.gateReason },
+                });
+                return;
+            }
+
             // ── Head re-check ─────────────────────────────────────────────────
             //
             // P1-8: between reviewing and posting, the author can push. A
@@ -3362,6 +3499,10 @@ export function createPrReviewHandlers(svc) {
             const escalationSection = renderEscalationSection(policy.escalations || []);
             if (escalationSection) summaryBody += `\n${escalationSection}\n`;
 
+            // Spec §2.5: unscored findings, with the reason, never inline.
+            const notVerifiedSection = renderNotVerifiedSection(policy.notVerified || []);
+            if (notVerifiedSection) summaryBody += `\n${notVerifiedSection}\n`;
+
             const policyNote = renderPolicyNote(policy.stats);
             if (policyNote) summaryBody += `\n${policyNote}\n`;
 
@@ -3393,6 +3534,12 @@ export function createPrReviewHandlers(svc) {
 
             const contextNote = renderContextNote(rq);
             if (contextNote) summaryBody += `\n${contextNote}\n`;
+
+            const qualityNotes = renderQualityNotes({
+                configWarnings: rq?.configWarnings || [],
+                lensReport: rq?.lensReport || [],
+            });
+            if (qualityNotes) summaryBody += `\n${qualityNotes}\n`;
 
             const provenanceNote = renderProvenanceNote(rq);
             if (provenanceNote) summaryBody += `\n${provenanceNote}\n`;

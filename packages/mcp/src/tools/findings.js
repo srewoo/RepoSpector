@@ -1,12 +1,14 @@
 import { requestCompletion, samplingStatus } from '../sampling.js';
-import {
-    admitDeterministic,
-    ASSERTION,
-} from '../../../../src/utils/deterministicAdmission.js';
+import { admitDeterministic } from '../../../../src/utils/deterministicAdmission.js';
 import { createCompleteness, describeCompleteness } from '../../../../src/utils/reviewCompleteness.js';
 import { AWAITING_CALL } from './delegation.js';
 import { anchorFindings } from '../../../../src/utils/anchorFindings.js';
 import { parsedFilesFrom } from './anchor.js';
+import { createSamplingModelPort } from '../adapters/samplingModelPort.js';
+import { DEFAULT_MIN_RUBRIC_SCORE } from '../../../../src/review-core/rubricScorer.js';
+import { attachPermalinks } from '../../../../src/review-core/permalink.js';
+import { runNewLenses, gateByRubric } from './reviewQuality.js';
+import { briefRubric } from './rubricExchange.js';
 
 /**
  * findings — `review_pr` stops at evidence and starts naming defects.
@@ -173,6 +175,11 @@ export function parseFindings(text) {
  * flattened into one KIND of claim: each carries an `assertionLevel`, so a
  * reader can tell a graph inference from a model's judgement without reading
  * the prose.
+ *
+ * Model-asserted findings — the model pass and the four new lenses — then go
+ * through the rubric scorer (spec §2): below `minRubricScore` they are dropped
+ * and listed, and those that could not be scored are kept and listed as not
+ * verified. Deterministic findings bypass it, as they bypass every verifier.
  */
 export async function buildFindingsSection({
     server, diffFiles, indexer, prData, hunks, context = '', revision = null,
@@ -180,6 +187,19 @@ export async function buildFindingsSection({
     // presence is what turns an unavailable model pass from a dead end into a
     // check the host agent can close.
     reviewId = null,
+    modelPort = createSamplingModelPort({ server }),
+    contextPort = null,
+    rulesFiles = [],
+    prDescription = '',
+    linkedIssue = '',
+    baseSha = null,
+    headSha = null,
+    permalink = null,
+    fileLengths = {},
+    minRubricScore = DEFAULT_MIN_RUBRIC_SCORE,
+    lenses = undefined,
+    lensLimits = undefined,
+    configWarnings = [],
 }) {
     const deterministic = await deterministicFindings(diffFiles, indexer, prData);
     const admitted = admitDeterministic(deterministic.findings, 'graph', { revision });
@@ -189,6 +209,7 @@ export async function buildFindingsSection({
         ? await modelFindings(server, { hunks, context })
         : { findings: [], available: false, reason: sampling.reason, model: null, raw: null };
 
+    const parsedFiles = parsedFilesFrom(diffFiles);
     const modelFound = anchorFindings((model.findings || []).map((f) => ({
         file: f.file ?? f.filePath ?? null,
         line: f.line ?? null,
@@ -201,7 +222,23 @@ export async function buildFindingsSection({
         // host agent reading this bundle is expected to try to refute it.
         assertionLevel: 'model-asserted',
         validationStatus: 'unvalidated',
-    })), parsedFilesFrom(diffFiles)).findings;
+    })), parsedFiles).findings;
+
+    const lensRun = await runNewLenses({
+        modelPort, contextPort, rulesFiles, diffFiles, hunks, lenses, lensLimits,
+        prTitle: prData?.title, prDescription, linkedIssue, baseSha, headSha,
+        parse: parseFindings,
+    });
+    const lensFound = anchorFindings(lensRun.findings, parsedFiles).findings;
+
+    const rubric = await gateByRubric({
+        findings: [...modelFound, ...lensFound], modelPort, diffFiles, rulesFiles, minRubricScore,
+    });
+
+    const merged = [...admitted.admitted, ...rubric.kept];
+    const findings = permalink?.target
+        ? attachPermalinks(merged, { ...permalink.target, fileLengths })
+        : merged;
 
     // A pass that could not run is an incomplete review, and the contract says
     // so in the same vocabulary the extension uses.
@@ -217,6 +254,10 @@ export async function buildFindingsSection({
     //                           happened — only the callback is.
     // Sampling unavailable,
     //   no session            → the old behaviour: nothing can close it.
+    //
+    // Lens and rubric gaps are recorded as OPTIONAL checks: a lens that could
+    // not get its context, or a finding the scorer could not reach, narrows the
+    // review without leaving any of the change unread.
     const delegatedTo = !model.available && reviewId ? reviewId : null;
     const completeness = createCompleteness({
         unavailableChecks: [
@@ -232,14 +273,27 @@ export async function buildFindingsSection({
             ...deterministic.errors.map((reason) => ({
                 name: 'deterministic finders', reason, required: false,
             })),
+            ...lensRun.lensReport.filter((r) => r.status !== 'ok').map((r) => ({
+                name: `lens:${r.lens}`,
+                reason: r.status === 'delegated' ? `delegated to the host as ${r.requestId}` : r.reason,
+                required: false,
+            })),
+            ...(rubric.notVerified.length ? [{
+                name: 'rubric scorer',
+                reason: `${rubric.notVerified.length} finding(s) not verified`,
+                required: false,
+            }] : []),
         ],
     });
 
     return {
-        findings: [...admitted.admitted, ...modelFound],
+        findings,
         counts: {
             deterministic: admitted.admitted.length,
             modelGenerated: modelFound.length,
+            lens: lensFound.length,
+            droppedByRubric: rubric.dropped.length,
+            notVerified: rubric.notVerified.length,
             rejectedForProvenance: admitted.rejected.length,
         },
         modelPass: {
@@ -251,11 +305,24 @@ export async function buildFindingsSection({
                 : {}),
             ...(model.raw ? { unparsedOutput: model.raw } : {}),
         },
+        lensReport: lensRun.lensReport,
+        configWarnings,
+        delegatedLenses: lensRun.delegated,
+        rubric: {
+            minRubricScore,
+            notVerified: rubric.notVerified.map(briefRubric),
+            dropped: rubric.dropped.map(briefRubric),
+        },
+        permalinks: permalink?.target
+            ? 'attached'
+            : (permalink?.reason ?? 'pass pr_ref {url, head_sha} so findings can carry permalinks'),
         note: model.available
             ? 'Model-generated findings are CANDIDATES asserted by a model and checked by '
                 + 'nothing. Try to refute each one against the source before repeating it. '
                 + 'Deterministic findings carry a rule id and are reproducible, but a graph '
-                + 'edge is an inference, not a proof.'
+                + 'edge is an inference, not a proof. Model and lens findings were also scored '
+                + `0-100 by an independent rubric pass: those below ${minRubricScore} are listed `
+                + 'under rubric.dropped, and those it could not score under rubric.notVerified.'
             : delegatedTo
                 ? 'NO MODEL RAN IN THIS SERVER — it holds no key and this client offers no '
                     + 'sampling, so YOU are the reasoning pass. The findings below, if any, are '
@@ -263,7 +330,8 @@ export async function buildFindingsSection({
                     + `clean. Read the evidence sections, then record what you conclude with `
                     + `${AWAITING_CALL} (review_id ${delegatedTo}). Until that call arrives this `
                     + 'review is recorded as incomplete, because asking is not the same as being '
-                    + 'answered.'
+                    + 'answered. Run each entry in delegatedLenses over the hunks too, and tag '
+                    + 'what it finds with that lens.'
                 : 'THE MODEL PASS DID NOT RUN. The findings below, if any, are deterministic only. '
                     + 'This is NOT evidence that the change is clean — it means the reasoning check '
                     + 'was unavailable. Review the evidence sections yourself.',

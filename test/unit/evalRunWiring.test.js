@@ -12,7 +12,7 @@
  * thing under test here is the plumbing, not the model.
  */
 
-const { reviewOne, parseArgs } = require('../../eval/run.js');
+const { reviewOne, parseArgs, tagForRubric, attachRubric } = require('../../eval/run.js');
 
 const FILE_LINES = [
     'package main',                            // 1
@@ -62,7 +62,7 @@ function makeCase(over = {}) {
  * with one finding on the line the patch touched so the tail of the pipeline has
  * something to carry.
  */
-function stubLlm() {
+function stubLlm({ severity = 'medium' } = {}) {
     const prompts = [];
     return {
         prompts,
@@ -83,7 +83,7 @@ function stubLlm() {
                         id: 'f1',
                         file: 'server.go',
                         line: 7,
-                        severity: 'medium',
+                        severity,
                         type: 'bug',
                         title: 'newServer may reject an empty addr',
                         description: 'Guarded above, but the guard is the only check.',
@@ -215,6 +215,45 @@ describe('reviewOne applies the shipped policies', () => {
         const { stats } = await reviewOne(makeCase(), { llm, settings: SETTINGS, opts: OPTS });
         expect(stats.externalFindings).toBe(0);
         expect(stats.externalSources).toBe(0);
+    });
+});
+
+describe('rubric annotation is invisible to the existing stages', () => {
+    it('leaves posted flags, inline stats and retention identical to --no-rubric', async () => {
+        // High severity so the finding is posted inline with the rubric off —
+        // under the old bug the `unscored` rubric demoted it, so this differs.
+        const on = await reviewOne(makeCase(), { llm: stubLlm({ severity: 'high' }), settings: SETTINGS, opts: { ...OPTS, rubric: true } });
+        const off = await reviewOne(makeCase(), { llm: stubLlm({ severity: 'high' }), settings: SETTINGS, opts: { ...OPTS, rubric: false } });
+
+        expect(off.predictions.some((p) => p.posted)).toBe(true);
+        expect(off.stats.inline).toBeGreaterThan(0);
+        expect(on.predictions.map((p) => p.posted)).toEqual(off.predictions.map((p) => p.posted));
+        expect(on.stats.inline).toBe(off.stats.inline);
+        expect(on.stats.demotedToSummary).toBe(off.stats.demotedToSummary);
+        expect(on.retention).toEqual(off.retention);
+        // The stub's answers are not rubric JSON, so the verdict is stored as unscored.
+        expect(on.predictions.some((p) => p.rubric?.status === 'unscored')).toBe(true);
+        expect(off.predictions.every((p) => p.rubric === null)).toBe(true);
+    });
+});
+
+describe('rubric tags', () => {
+    const base = { file: 'a.js', line: 3, title: 'same' };
+    it('keeps each rubric on its own finding and gives late findings none', () => {
+        const [a, b] = tagForRubric([{ ...base, description: 'one' }, { ...base, description: 'two' }]);
+        const byTag = new Map();
+        // clone through a spread, as later stages do
+        const cloneA = { ...a };
+        const cloneB = { ...b };
+        const tagOf = (f) => Object.getOwnPropertySymbols(f).map((s) => f[s])[0];
+        byTag.set(tagOf(cloneA), { status: 'scored', score: 90 });
+        byTag.set(tagOf(cloneB), { status: 'scored', score: 10 });
+        const graphLike = { ...base, source: 'graph' };
+
+        expect(attachRubric(cloneA, byTag).rubric.score).toBe(90);
+        expect(attachRubric(cloneB, byTag).rubric.score).toBe(10);
+        expect(attachRubric(graphLike, byTag).rubric).toBeUndefined();
+        expect(tagForRubric([base])[0].rubric).toBeUndefined();
     });
 });
 

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { cn } from '@/lib/utils';
+import { permalinkHref } from '../utils/permalink.js';
 import { MotionDiv, LazyAnimatePresence } from './ui/MotionDiv';
 import {
     AlertTriangle,
@@ -115,6 +116,20 @@ export function FindingCard({ finding, onDismiss, onMarkResolved, onFindingActio
     const fileName = filePath.split('/').pop() || filePath;
     const lineNumber = finding.line || finding.lineNumber || '?';
     const fileLocation = fileName !== 'Unknown' ? `${fileName}:${lineNumber}` : `Line ${lineNumber}`;
+    // Spec §4.4: link the location to the code at the reviewed commit when known.
+    const href = permalinkHref(finding);
+    const locationText = href ? (
+        <a
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="underline hover:text-text"
+            title="View the code at the reviewed commit"
+        >
+            {fileLocation}
+        </a>
+    ) : fileLocation;
 
     // Get source badge for AI findings
     const sourceLabel = finding.source === 'ai' ? 'AI' : finding.tool || 'Static';
@@ -161,7 +176,7 @@ export function FindingCard({ finding, onDismiss, onMarkResolved, onFindingActio
                                 {severity.label}
                             </span>
                             <span className="text-xs text-textMuted">
-                                {fileLocation}
+                                {locationText}
                             </span>
                         </div>
                         <p className="text-sm text-text mt-1 truncate">
@@ -259,6 +274,10 @@ export function FindingCard({ finding, onDismiss, onMarkResolved, onFindingActio
                         transition={{ duration: 0.2 }}
                     >
                         <CardContent className="pt-0 pb-4 px-4 border-t border-border">
+                            {/* Outside the toggle <button>: interactive content may not nest in one. */}
+                            {href && (
+                                <div className="mt-3 text-xs">{locationText}</div>
+                            )}
                             {/* Description / Impact / Suggestion — the core detail.
                                 Findings come in several shapes (LLM: title/description/
                                 impact/suggestion; static: message/remediation), so read

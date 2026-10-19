@@ -153,6 +153,12 @@ export function buildCommentBody(f) {
         }
     }
 
+    // Full-SHA permalink (spec §4.4): the code as reviewed, even after a push.
+    // https only — the URL is rendered into markdown on the PR.
+    if (/^https:\/\//.test(String(f.permalink ?? ''))) {
+        lines.push('', `🔗 [View the code at the reviewed commit](${f.permalink})`);
+    }
+
     // Provenance: reviewers trust a comment more when they know what produced it
     // and whether it survived verification.
     const marks = [];

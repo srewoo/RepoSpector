@@ -276,7 +276,12 @@ export function convertVerifiedFindings(list) {
         // on the same panel that labels it "code graph" on the PR.
         source: isDeterministicSource(f.source) ? f.source : 'ai',
         tool: f.tool || (isDeterministicSource(f.source) ? f.source : undefined),
-        confidence: f.confidence ?? 0.8
+        confidence: f.confidence ?? 0.8,
+        // The posting handler decides inline vs "Not verified" from `rubric`,
+        // and links `permalink`; dropping them here silently undid both.
+        rubric: f.rubric ?? null,
+        permalink: f.permalink ?? null,
+        lens: f.lens ?? null,
     }));
 }
 
