@@ -137,8 +137,10 @@ export class ConfidenceScorer {
         const severityMatch = a.severity === b.severity;
 
         // For dependency findings, match by package name
+        // Same package at the same pinned line. Two lines are two locations (a
+        // lockfile pins a version twice) and must not collapse into the first.
         if (a.tool === 'dependency' && b.tool === 'dependency') {
-            return a.packageName === b.packageName;
+            return a.packageName === b.packageName && (a.line ?? null) === (b.line ?? null);
         }
 
         return categoryMatch || (severityMatch && lineDiff <= 2);

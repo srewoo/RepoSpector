@@ -11,6 +11,7 @@ import {
     SEVERITY_WEIGHTS
 } from '../utils/staticAnalysisPatterns.js';
 import { LockfileParser } from '../utils/lockfileParser.js';
+import { withDependencyLines } from '../utils/dependencyLocation.js';
 
 export class DependencyAnalyzer {
     constructor(options = {}) {
@@ -90,7 +91,8 @@ export class DependencyAnalyzer {
         }
 
         // Check dependencies for vulnerabilities
-        const findings = this.checkVulnerabilities(dependencies, fileType, filePath);
+        // A line, so the finding lands where the version is pinned, not on the file.
+        const findings = withDependencyLines(this.checkVulnerabilities(dependencies, fileType, filePath), content);
 
         return {
             tool: 'dependency',
@@ -431,6 +433,15 @@ export class DependencyAnalyzer {
     /**
      * Detect dependency file type
      */
+    /**
+     * Is this a manifest or lockfile? The MCP server called this through optional
+     * chaining while it did not exist, so every change read as touching no
+     * manifest and the OSV lookup never ran.
+     */
+    isDependencyFile(filePath) {
+        return this.detectFileType(filePath) !== null;
+    }
+
     detectFileType(filePath) {
         if (!filePath) return null;
 
@@ -562,6 +573,22 @@ export class DependencyAnalyzer {
     }
 
     /**
+     * The OSV-backed entry point. `analyze` alone parses manifests and checks a
+     * small built-in table; it never reached OSV and never read a lockfile, so
+     * a PR that pinned a vulnerable version in its lockfile was not flagged.
+     */
+    async analyzeAsync(content, context = {}) {
+        const { filePath = 'unknown' } = context;
+        if (this.lockfileParser.detectLockfileType(filePath)) return this.analyzeLockfile(content, context);
+        const result = this.analyze(content, context);
+        if (!this.osvService || !result.dependencies?.length) return result;
+        const findings = withDependencyLines(
+            await this.checkVulnerabilitiesWithOSV(result.dependencies, result.fileType, filePath), content,
+        );
+        return { ...result, findings };
+    }
+
+    /**
      * Analyze a lockfile for transitive dependency vulnerabilities
      */
     async analyzeLockfile(content, context = {}) {
@@ -586,14 +613,17 @@ export class DependencyAnalyzer {
         };
         const fileType = ecosystemMap[lockfileType] || 'npm';
 
-        const findings = this.osvService
+        const findings = withDependencyLines(this.osvService
             ? await this.checkVulnerabilitiesWithOSV(dependencies, fileType, filePath)
-            : this.checkVulnerabilities(dependencies, fileType, filePath);
+            : this.checkVulnerabilities(dependencies, fileType, filePath), content);
 
         return {
             tool: 'dependency',
             filePath,
             fileType: lockfileType,
+            // The manifest ecosystem key OSV maps (`npm`, `pip`, ...): `packageLock`
+            // itself maps to nothing, so a lockfile could never be queried.
+            ecosystemFileType: fileType,
             dependencies,
             findings,
             summary: this.generateSummary(dependencies, findings),

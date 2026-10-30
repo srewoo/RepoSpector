@@ -132,7 +132,7 @@ import {
     fileLengthsFrom,
     attachReviewPermalinks,
 } from '../../services/reviewQualityStage.js';
-import { renderNotVerifiedSection, renderQualityNotes } from '../../utils/reviewSummarySections.js';
+import { renderNotVerifiedSection, renderObservationsSection, renderQualityNotes } from '../../utils/reviewSummarySections.js';
 import { checkPostingEligibility } from '../../utils/postingEligibility.js';
 import { FINDER_LENSES } from '../../utils/finderLensPrompts.js';
 import { LENS_LIMITS } from '../../review-core/lenses/index.js';
@@ -2897,7 +2897,7 @@ export function createPrReviewHandlers(svc) {
                 (f) => f?.rubric?.status === RUBRIC_STATUS.UNSCORED,
             );
             const multiPassBlocking = countBlocking(
-                verifiedFindings.filter((f) => f?.rubric?.status !== RUBRIC_STATUS.UNSCORED),
+                verifiedFindings.filter((f) => f?.rubric?.status !== RUBRIC_STATUS.UNSCORED && f?.observation !== true),
             );
             const gateOutcome = describeGateOutcome(result);
             // A partial run still escalates on what it DID read; it just cannot approve.
@@ -2986,6 +2986,10 @@ export function createPrReviewHandlers(svc) {
             }
             const notVerifiedSection = renderNotVerifiedSection(notVerifiedFindings);
             if (notVerifiedSection) result.analysis += `\n${notVerifiedSection}`;
+            const observationsSection = renderObservationsSection(
+                verifiedFindings.filter((f) => f?.observation === true),
+            );
+            if (observationsSection) result.analysis += `\n${observationsSection}`;
             const qualityNotes = renderQualityNotes({ configWarnings, lensReport });
             if (qualityNotes) result.analysis += `\n${qualityNotes}`;
             if (indexStatus === 'index-failed' || indexStatus === 'indexing-started') {
@@ -3502,6 +3506,8 @@ export function createPrReviewHandlers(svc) {
             // Spec §2.5: unscored findings, with the reason, never inline.
             const notVerifiedSection = renderNotVerifiedSection(policy.notVerified || []);
             if (notVerifiedSection) summaryBody += `\n${notVerifiedSection}\n`;
+            const observationsSection = renderObservationsSection(policy.observations || []);
+            if (observationsSection) summaryBody += `\n${observationsSection}\n`;
 
             const policyNote = renderPolicyNote(policy.stats);
             if (policyNote) summaryBody += `\n${policyNote}\n`;

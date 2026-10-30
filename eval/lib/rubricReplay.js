@@ -76,6 +76,7 @@ export function replayRubric(cases, { threshold = DEFAULT_MIN_RUBRIC_SCORE, verd
         status: { scored: 0, unscored: 0, bypassed: 0 },
         capped: { preExisting: 0, rule: 0 },
         postable: blank(),
+        observations: blank(),
         notVerified: blank(),
         dropped: blank(),
     };
@@ -92,7 +93,7 @@ export function replayRubric(cases, { threshold = DEFAULT_MIN_RUBRIC_SCORE, verd
             replayed.push(status === 'scored' ? replayScored(pred, rulesTexts, report) : pred);
         }
         const gate = filterByRubric(replayed, { minRubricScore: threshold });
-        for (const [bucket, list] of [['postable', gate.postable], ['notVerified', gate.notVerified], ['dropped', gate.dropped]]) {
+        for (const [bucket, list] of [['postable', gate.postable], ['observations', gate.observations], ['notVerified', gate.notVerified], ['dropped', gate.dropped]]) {
             for (const f of list) {
                 const v = verdictFor(c, f);
                 report[bucket][v] = (report[bucket][v] ?? 0) + 1;
@@ -123,6 +124,7 @@ export function formatRubricReplay(rep) {
         `  caps applied:            pre-existing ${rep.capped.preExisting}, unquoted rule ${rep.capped.rule}`,
         '  stage (tp / fp / unadjudicated):',
         `    postable      ${row(rep.postable)}`,
+        `    observations  ${row(rep.observations)}   ← shown, non-blocking, not inline`,
         `    not verified  ${row(rep.notVerified)}   ← kept, not posted inline`,
         `    dropped       ${row(rep.dropped)}   ← TRUE positives here are the cost`,
         `  Adjudicated precision of postable: ${pct(rep.postable.true_positive, adj)}  (${rep.postable.true_positive}/${adj})`,

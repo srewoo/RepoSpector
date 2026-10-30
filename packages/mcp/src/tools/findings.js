@@ -9,6 +9,8 @@ import { DEFAULT_MIN_RUBRIC_SCORE } from '../../../../src/review-core/rubricScor
 import { attachPermalinks } from '../../../../src/review-core/permalink.js';
 import { runNewLenses, gateByRubric } from './reviewQuality.js';
 import { briefRubric } from './rubricExchange.js';
+import { ConfigLintAnalyzer } from '../../../../src/services/ConfigLintAnalyzer.js';
+import { extractAddedLines } from '../../../../src/utils/patchLines.js';
 
 /**
  * findings — `review_pr` stops at evidence and starts naming defects.
@@ -169,6 +171,41 @@ export function parseFindings(text) {
 }
 
 /**
+ * Exact config-file rule matches (Dockerfile, workflow, migration, manifest,
+ * Terraform, shell, React lists) on the change's ADDED lines, as claims.
+ *
+ * The extension posts these directly; leaving them as `static_analysis`
+ * evidence here let a host agent drop a rule hit it judged minor, so the same
+ * change got a different review on the two paths. Run on added lines, exactly
+ * as the extension does, so the two cannot disagree.
+ */
+export function configLintFindings(diffFiles = []) {
+    const lint = new ConfigLintAnalyzer();
+    const out = [];
+    for (const file of diffFiles) {
+        if (file?.status === 'removed' || !file?.patch) continue;
+        const filename = file.filename ?? file.path;
+        const { code, lineNumbers } = extractAddedLines(file.patch);
+        for (const f of lint.analyze(code, { filePath: filename }).findings) {
+            out.push({
+                file: filename,
+                line: lineNumbers[f.line - 1] ?? null,
+                severity: f.severity,
+                title: f.message,
+                description: f.remediation,
+                evidence: f.matchedText,
+                rule: f.ruleId,
+                ruleId: f.ruleId,
+                category: f.category,
+                tool: 'config-lint',
+                source: 'static',
+            });
+        }
+    }
+    return out;
+}
+
+/**
  * Assemble the `findings` section.
  *
  * Deterministic and model-generated findings are merged into one list but never
@@ -203,6 +240,9 @@ export async function buildFindingsSection({
 }) {
     const deterministic = await deterministicFindings(diffFiles, indexer, prData);
     const admitted = admitDeterministic(deterministic.findings, 'graph', { revision });
+    const configAdmitted = admitDeterministic(configLintFindings(diffFiles), 'scanner', { revision });
+    admitted.admitted.push(...configAdmitted.admitted);
+    admitted.rejected.push(...configAdmitted.rejected);
 
     const sampling = samplingStatus(server);
     const model = sampling.available
@@ -293,6 +333,7 @@ export async function buildFindingsSection({
             modelGenerated: modelFound.length,
             lens: lensFound.length,
             droppedByRubric: rubric.dropped.length,
+            observations: rubric.observations.length,
             notVerified: rubric.notVerified.length,
             rejectedForProvenance: admitted.rejected.length,
         },
@@ -311,6 +352,7 @@ export async function buildFindingsSection({
         rubric: {
             minRubricScore,
             notVerified: rubric.notVerified.map(briefRubric),
+            observations: rubric.observations.map(briefRubric),
             dropped: rubric.dropped.map(briefRubric),
         },
         permalinks: permalink?.target
@@ -322,7 +364,8 @@ export async function buildFindingsSection({
                 + 'Deterministic findings carry a rule id and are reproducible, but a graph '
                 + 'edge is an inference, not a proof. Model and lens findings were also scored '
                 + `0-100 by an independent rubric pass: those below ${minRubricScore} are listed `
-                + 'under rubric.dropped, and those it could not score under rubric.notVerified.'
+                + 'under rubric.observations (non-blocking, still worth showing) or, below the '
+                + 'observation floor, rubric.dropped; those it could not score under rubric.notVerified.'
             : delegatedTo
                 ? 'NO MODEL RAN IN THIS SERVER — it holds no key and this client offers no '
                     + 'sampling, so YOU are the reasoning pass. The findings below, if any, are '

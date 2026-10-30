@@ -28,6 +28,13 @@ export { RUBRIC_SYSTEM_PROMPT, RUBRIC_RESULT_SCHEMA, buildRubricMessages, valida
 
 export const RUBRIC_STATUS = Object.freeze({ SCORED: 'scored', UNSCORED: 'unscored', BYPASSED: 'bypassed' });
 export const DEFAULT_MIN_RUBRIC_SCORE = 80;
+/**
+ * Below the posting threshold but at or above this, a finding is shown as a
+ * non-blocking observation rather than dropped. Measured on OpenQodex's
+ * planted set: real minor defects (a re-sent email, a list without keys)
+ * scored 45-70, and cutting them cost 8 points of recall for 6 of precision.
+ */
+export const DEFAULT_MIN_OBSERVATION_SCORE = 50;
 export const RUBRIC_STAGE = 'rubric';
 const RULE_CAP = 25;
 
@@ -158,22 +165,31 @@ export async function scoreFindings(findings = [], {
 
 /**
  * Split by the precision gate.
- *   postable    — scored and score >= min, or bypassed
- *   notVerified — unscored (or no rubric at all): kept, shown with the reason, never posted inline
- *   dropped     — scored below the threshold
+ *   postable     — scored and score >= min, or bypassed
+ *   observations — scored in [minObservationScore, min): shown, non-blocking, never inline
+ *   notVerified  — unscored (or no rubric at all): kept, shown with the reason, never posted inline
+ *   dropped      — scored below minObservationScore
  */
-export function filterByRubric(findings = [], { minRubricScore = DEFAULT_MIN_RUBRIC_SCORE } = {}) {
+export function filterByRubric(findings = [], {
+    minRubricScore = DEFAULT_MIN_RUBRIC_SCORE,
+    minObservationScore = DEFAULT_MIN_OBSERVATION_SCORE,
+} = {}) {
     const min = Number.isFinite(minRubricScore) ? minRubricScore : DEFAULT_MIN_RUBRIC_SCORE;
+    const floor = Math.min(min, Number.isFinite(minObservationScore) ? minObservationScore : DEFAULT_MIN_OBSERVATION_SCORE);
     const postable = [];
+    const observations = [];
     const notVerified = [];
     const dropped = [];
     for (const f of findings) {
         const r = f?.rubric;
         if (r?.status === RUBRIC_STATUS.BYPASSED) postable.push(f);
-        else if (r?.status === RUBRIC_STATUS.SCORED) (r.score >= min ? postable : dropped).push(f);
-        else notVerified.push(f);
+        else if (r?.status === RUBRIC_STATUS.SCORED) {
+            if (r.score >= min) postable.push(f);
+            else if (r.score >= floor) observations.push(f);
+            else dropped.push(f);
+        } else notVerified.push(f);
     }
-    return { postable, notVerified, dropped };
+    return { postable, observations, notVerified, dropped };
 }
 
 /**

@@ -28,8 +28,17 @@ describe('filterGenuineProblems — rubric mode', () => {
         expect(res.findings[0].blocking).toBe(true);
     });
 
-    it('drops a scored finding below minRubricScore with reason rubric-score', () => {
+    it('keeps a finding scored below minRubricScore but above the floor as a non-blocking observation', () => {
         const res = filterGenuineProblems([bug({ rubric: rubric('scored', 75) })], { minRubricScore: 80 });
+        expect(res.findings).toHaveLength(1);
+        expect(res.findings[0]).toMatchObject({ observation: true, blocking: false });
+        expect(res.observations).toHaveLength(1);
+        expect(res.stats.kept).toBe(0);
+        expect(res.dropped).toHaveLength(0);
+    });
+
+    it('drops a scored finding below the observation floor with reason rubric-score', () => {
+        const res = filterGenuineProblems([bug({ rubric: rubric('scored', 40) })], { minRubricScore: 80 });
         expect(res.findings).toHaveLength(0);
         expect(res.dropped[0]._precisionDrop).toBe('rubric-score');
         expect(res.stats.byReason['rubric-score']).toBe(1);
@@ -94,5 +103,27 @@ describe('buildPrecisionAnalysis — rubric mode', () => {
         const text = buildPrecisionAnalysis([bug({ rubric: rubric('unscored') })], { minRubricScore: 80 });
         expect(text).toMatch(/^## Clean review/);
         expect(text).toMatch(/Not verified/);
+    });
+});
+
+describe('observations never post inline and never block', () => {
+    const { partitionForPosting } = require('../../src/utils/reviewPostingPolicy.js');
+    const { decideFailure } = require('../../src/utils/failLevel.js');
+    const { renderObservationsSection } = require('../../src/utils/reviewSummarySections.js');
+    const obs = { file: 'a.js', line: 3, severity: 'high', title: 'list items have no key', blocking: false, observation: true, rubric: { status: 'scored', score: 60 } };
+
+    it('the posting policy lists an observation apart from inline findings', () => {
+        const p = partitionForPosting([obs], { blockingOnlyInline: true });
+        expect(p.inline).toHaveLength(0);
+        expect(p.observations).toEqual([obs]);
+        expect(p.stats.observations).toBe(1);
+    });
+
+    it('a high-severity observation does not block the merge', () => {
+        expect(decideFailure([obs], { failLevel: 'high' }).blocks).toBe(false);
+    });
+
+    it('the summary renders an Observations section with the score', () => {
+        expect(renderObservationsSection([obs])).toMatch(/### Observations[\s\S]*score 60/);
     });
 });

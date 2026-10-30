@@ -21,7 +21,7 @@
  *     Incompleteness rate is reported, not folded in.
  */
 
-import { wilson, pct, scorePrecisionBySource, matchReferences } from './scoring.js';
+import { wilson, pct, scorePrecisionBySource, matchReferences, sameLocation, mentionsIssue } from './scoring.js';
 import { classifyClaim } from '../../src/utils/findingClaim.js';
 import {
     PRODUCT_PATH,
@@ -86,8 +86,19 @@ export function buildBenchmarkReport(cases = [], options = {}) {
     let styleTotal = 0;
 
     let cleanCases = 0;
+    let cleanQuiet = 0;
     let findingsOnCleanCases = 0;
     let incompleteCases = 0;
+    let locationMatched = 0;
+    let issueMatched = 0;
+
+    // Precision as bounds, the way OpenQodex reports it: a finding is correct
+    // when a human says so or it hits a reference defect, wrong when a human
+    // says so or it sits on a clean case, and otherwise unresolved. The lower
+    // bound counts every unresolved finding wrong, the upper counts it right.
+    const bounds = { correct: 0, wrong: 0, unresolved: 0 };
+
+    const perReview = { reviews: 0, wallMs: 0, timed: 0, tokensIn: 0, tokensOut: 0, metered: 0 };
 
     const retentionStages = [];
 
@@ -113,11 +124,45 @@ export function buildBenchmarkReport(cases = [], options = {}) {
         styleTotal += styles.length;
         styleMatched += matchReferences(predictions, styles, tolerance).matched.length;
 
-        if (isCleanCase(kase)) {
+        // Location recall at ±1 line, whatever the finding says.
+        locationMatched += matchReferences(predictions, defects, 1).matched.length;
+        // Issue recall: the finding overlaps the defect's lines AND names it.
+        issueMatched += matchReferences(predictions, defects, 0, mentionsIssue).matched.length;
+
+        const clean = isCleanCase(kase);
+        const incomplete = kase.incomplete === true || kase.stats?.incomplete === true
+            || kase.runStats?.incomplete === true;
+        if (clean) {
             cleanCases++;
             findingsOnCleanCases += predictions.length;
+            // A clean change passes only a COMPLETE review with no finding.
+            if (!incomplete && predictions.length === 0) cleanQuiet++;
         }
-        if (kase.incomplete === true || kase.stats?.incomplete === true) incompleteCases++;
+        if (incomplete) incompleteCases++;
+
+        const human = scorePrecisionBySource(predictions, adjudications, tolerance).human.outcomes;
+        // Not one-to-one: a second finding on a found defect is a duplicate, and
+        // a finding on a side issue the case accepts as real is correct too.
+        const names = (p, refs) => refs.some((r) => sameLocation(p, r, tolerance) && mentionsIssue(p, r));
+        const accepted = kase.acceptedIssues ?? [];
+        predictions.forEach((p, i) => {
+            if (human[i] === 'tp') bounds.correct++;
+            else if (human[i] === 'fp') bounds.wrong++;
+            else if (human[i] === 'disputed') bounds.unresolved++;
+            else if (!clean && (names(p, defects) || names(p, accepted))) bounds.correct++;
+            else if (clean) bounds.wrong++;
+            else bounds.unresolved++;
+        });
+
+        const wallMs = kase.runStats?.wallMs ?? kase.manifest?.latencyMs;
+        if (kase.runStats || kase.manifest) perReview.reviews++;
+        if (Number.isFinite(wallMs)) { perReview.wallMs += wallMs; perReview.timed++; }
+        const tokens = kase.runStats?.tokens;
+        if (tokens && Number.isFinite(tokens.input)) {
+            perReview.tokensIn += tokens.input;
+            perReview.tokensOut += tokens.output ?? 0;
+            perReview.metered++;
+        }
         if (kase.retention) retentionStages.push(...scoreRetention(kase.retention, adjudications));
     }
 
@@ -157,7 +202,13 @@ export function buildBenchmarkReport(cases = [], options = {}) {
         /** Human comments it deliberately does not make. Reported, never pooled. */
         designStyleAgreement: { matched: styleMatched, reference: styleTotal, ...wilson(styleMatched, styleTotal) },
 
+        precisionBounds: precisionBounds(bounds),
+        issueRecall: { matched: issueMatched, reference: defectTotal, ...wilson(issueMatched, defectTotal) },
+        locationRecall: { matched: locationMatched, reference: defectTotal, ...wilson(locationMatched, defectTotal) },
+
         cleanCases,
+        cleanQuiet,
+        cleanRate: { matched: cleanQuiet, reference: cleanCases, ...wilson(cleanQuiet, cleanCases) },
         findingsOnCleanCases,
         falsePositivesPerCleanCase: cleanCases ? findingsOnCleanCases / cleanCases : null,
 
@@ -169,8 +220,35 @@ export function buildBenchmarkReport(cases = [], options = {}) {
         // not a passing one, and the report says so rather than averaging over
         // whatever happened to be in the file.
         coverage: coverageOf(cases),
-        cost: options.manifest?.cost ?? null,
-        latencyMs: options.manifest?.latencyMs ?? null,
+        perReview: perReviewCost(perReview, options.price),
+    };
+}
+
+function precisionBounds({ correct, wrong, unresolved }) {
+    const total = correct + wrong + unresolved;
+    return {
+        correct, wrong, unresolved, total,
+        lower: total ? correct / total : null,
+        upper: total ? (correct + unresolved) / total : null,
+    };
+}
+
+/**
+ * Mean time, tokens and cost per review. Cost needs a price in USD per million
+ * tokens (`{input, output}`); without one it is null, never guessed.
+ */
+export function perReviewCost(p, price = null) {
+    const tokensIn = p.metered ? p.tokensIn / p.metered : null;
+    const tokensOut = p.metered ? p.tokensOut / p.metered : null;
+    const cost = price && tokensIn != null
+        ? (tokensIn * price.input + tokensOut * price.output) / 1e6
+        : null;
+    return {
+        reviews: p.reviews,
+        wallMs: p.timed ? p.wallMs / p.timed : null,
+        tokensIn,
+        tokensOut,
+        cost,
     };
 }
 
@@ -193,14 +271,29 @@ export function formatBenchmarkReport(report) {
             + `${r.designStyleAgreement.matched}/${r.designStyleAgreement.reference}   `
             + 'reported separately — the reviewer does not attempt these',
         '',
+        `Issue recall:      ${pct(r.issueRecall.rate)}  [${pct(r.issueRecall.low)} – ${pct(r.issueRecall.high)}]   `
+            + `${r.issueRecall.matched}/${r.issueRecall.reference} defects with a finding on their lines that names them`,
+        `Location recall:   ${pct(r.locationRecall.rate)}   `
+            + `${r.locationRecall.matched}/${r.locationRecall.reference} defects with a finding within ±1 line`,
+        `Precision bounds:  ${pct(r.precisionBounds.lower)} to ${pct(r.precisionBounds.upper)}   `
+            + `${r.precisionBounds.correct}/${r.precisionBounds.total} to `
+            + `${r.precisionBounds.correct + r.precisionBounds.unresolved}/${r.precisionBounds.total}   `
+            + `(${r.precisionBounds.unresolved} unresolved: wrong in the lower bound, right in the upper)`,
+        '',
+        `Clean rate:        ${pct(r.cleanRate.rate)}  [${pct(r.cleanRate.low)} – ${pct(r.cleanRate.high)}]   `
+            + `${r.cleanQuiet}/${r.cleanCases} clean PRs reviewed completely with no finding`,
         `Clean PRs:         ${r.cleanCases}   `
             + `${r.falsePositivesPerCleanCase == null ? 'n/a' : r.falsePositivesPerCleanCase.toFixed(2)} finding(s) per clean PR`,
         `Incompleteness:    ${r.incompletenessRate == null ? 'n/a' : pct(r.incompletenessRate)}   `
             + `${r.incompleteCases} run(s) could not read the whole change`,
     ];
 
-    if (r.latencyMs != null) lines.push(`Latency:           ${Math.round(r.latencyMs)}ms`);
-    if (r.cost != null) lines.push(`Cost:              $${Number(r.cost).toFixed(4)}`);
+    const pr = r.perReview;
+    lines.push(
+        `Time per review:   ${pr.wallMs == null ? 'not measured' : `${(pr.wallMs / 1000).toFixed(1)} s`}`,
+        `Tokens per review: ${pr.tokensIn == null ? 'not measured' : `${Math.round(pr.tokensIn)} in / ${Math.round(pr.tokensOut)} out`}`,
+        `Cost per review:   ${pr.cost == null ? 'not measured (pass --price <in>,<out> USD per 1M tokens)' : `$${pr.cost.toFixed(4)}`}`,
+    );
 
     const retention = formatRetention(r.retention);
     if (retention) lines.push(retention);

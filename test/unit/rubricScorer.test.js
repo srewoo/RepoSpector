@@ -235,19 +235,27 @@ describe('scoreFindings', () => {
 describe('filterByRubric', () => {
     const f = (rubric) => ({ title: 't', rubric });
 
-    it('splits postable / notVerified / dropped at the default threshold of 80', () => {
+    it('splits postable / observations / notVerified / dropped at 80 and the observation floor of 50', () => {
         expect(DEFAULT_MIN_RUBRIC_SCORE).toBe(80);
         const pass = f({ status: 'scored', score: 80 });
-        const low = f({ status: 'scored', score: 79 });
+        const observe = f({ status: 'scored', score: 79 });
+        const floor = f({ status: 'scored', score: 50 });
+        const low = f({ status: 'scored', score: 49 });
         const bypass = f({ status: 'bypassed', score: null });
         const unscored = f({ status: 'unscored', score: null, reason: 'budget' });
         const none = { title: 'no rubric' };
 
-        expect(filterByRubric([pass, low, bypass, unscored, none])).toEqual({
+        expect(filterByRubric([pass, observe, floor, low, bypass, unscored, none])).toEqual({
             postable: [pass, bypass],
+            observations: [observe, floor],
             notVerified: [unscored, none],
             dropped: [low],
         });
+    });
+
+    it('an observation floor above the posting threshold never hides a postable finding', () => {
+        const sixty = f({ status: 'scored', score: 60 });
+        expect(filterByRubric([sixty], { minRubricScore: 50, minObservationScore: 70 }).postable).toEqual([sixty]);
     });
 
     it('honours a custom threshold', () => {

@@ -560,8 +560,13 @@ async function main() {
     }
 
     const vars = env();
-    const apiKey = requireKey(vars, 'OPENAI_API_KEY', 'Add OPENAI_API_KEY to .env.');
-    const model = vars.OPENAI_MODEL || 'gpt-4.1-mini';
+    // EVAL_MODEL picks any provider the extension supports, e.g.
+    // `anthropic:claude-opus-5-5`; its key is <PROVIDER>_API_KEY. Unset keeps
+    // the OpenAI default so existing corpora re-run unchanged.
+    const modelSpec = vars.EVAL_MODEL || `openai:${vars.OPENAI_MODEL || 'gpt-4.1-mini'}`;
+    const [provider] = modelSpec.split(':');
+    const keyName = `${provider.toUpperCase()}_API_KEY`;
+    const apiKey = requireKey(vars, keyName, `Add ${keyName} to .env.`);
     // An eval-only env override threaded straight into `settings`, which
     // MultiPassReviewEngine already reads as
     // `settings?.hunkWindowing ?? HUNK_WINDOWING` — the shipped default stays
@@ -585,7 +590,7 @@ async function main() {
     // retrieval. See eval/README.md.
     const contextProfile = process.env.REPOSPECTOR_CONTEXT_PROFILE === 'legacy' ? 'legacy' : 'default';
     const contextBudget = resolveBudget({ profile: contextProfile });
-    const settings = { provider: 'openai', model: `openai:${model}`, apiKey, hunkWindowing };
+    const settings = { provider, model: modelSpec, apiKey, hunkWindowing };
 
     const path = resolve(args.corpus);
     const parsed = JSON.parse(readFileSync(path, 'utf8'));
@@ -628,7 +633,7 @@ async function main() {
     }
 
     console.log(
-        `Model: openai:${model}   Cases: ${selected.length}   ` +
+        `Model: ${modelSpec}   Cases: ${selected.length}   ` +
         `Multi-finder: ${args.multiFinder ? `${args.finderMode} × ${args.finderRounds} round(s)` : 'off'}   ` +
         `Hunk windowing: ${hunkWindowing ? 'ON (REPOSPECTOR_HUNK_WINDOWING=1)' : 'off'}   ` +
         `Context profile: ${contextProfile}${contextProfile === 'legacy' ? ' (REPOSPECTOR_CONTEXT_PROFILE=legacy)' : ''} ` +
@@ -666,9 +671,13 @@ async function main() {
         const started = Date.now();
         process.stdout.write(`${kase.id} … `);
         try {
-            const { predictions, stats } = await reviewOne(kase, { llm, settings, opts: { ...args, contextProfile, contextBudget } });
-            kase.predictions = predictions;
-            kase.runStats = stats;
+            const { predictions, stats, productPath, retention, incomplete, manifest } =
+                await reviewOne(kase, { llm, settings, opts: { ...args, contextProfile, contextBudget } });
+            // Persist everything reviewOne recorded. Keeping only predictions and
+            // stats left the report's incompleteness, retention and latency empty
+            // on every real run.
+            stats.wallMs = Date.now() - started;
+            Object.assign(kase, { predictions, runStats: stats, productPath, retention, incomplete, manifest });
 
             totals.baseline += stats.baseline;
             totals.finderAdded += stats.finderAdded;

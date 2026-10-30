@@ -70,6 +70,66 @@ A prediction matches a reference when the file matches and the lines are within
 `--tolerance` (default 5). A human comment with no line matches anywhere in that
 file, because reviewers legitimately comment on a file as a whole.
 
+## OpenQodex-comparable figures
+
+The benchmark report also prints the figures OpenQodex publishes, defined the
+same way, so the two tools can be compared row for row:
+
+| Figure | Definition |
+|---|---|
+| Location recall | Reference defects with a finding within ±1 line, whatever it says |
+| Precision bounds | A finding is correct if a human says so or it hits a reference defect; wrong if a human says so or it sits on a clean case; otherwise unresolved. Lower bound counts unresolved as wrong, upper as right |
+| Clean rate | Clean PRs whose review completed with zero findings (Wilson 95%) |
+| Time / tokens / cost per review | Means over reviewed cases. Cost needs `--price <in>,<out>` (USD per 1M tokens) and is never guessed |
+| A/A noise | `--aa <twin corpus>`: the same build run twice; a gap smaller than this can be chance |
+
+```bash
+node eval/inject.js --controls 4          # keep the last 4 PRs unmutated as clean controls
+cp eval/corpus/injected.json eval/corpus/injected-aa.json   # twin, before any run
+node eval/run.js   --corpus eval/corpus/injected.json
+node eval/run.js   --corpus eval/corpus/injected-aa.json
+node eval/score.js --corpus eval/corpus/injected.json --price 1.25,10 --aa eval/corpus/injected-aa.json
+```
+
+Without `--controls` the planted-bug corpus has no clean PRs, and a reviewer
+that flags every change would score 100% detection unchallenged.
+
+### Head-to-head on OpenQodex's own cases
+
+`eval/import-openqodex.js` imports OpenQodex's planted-bug dev set (21 cases,
+51 bugs, 2 clean; Apache-2.0) with its answer key: each bug's line range and
+the words a finding must use to name it, plus side issues the case accepts as
+real. Score with `--tolerance 1` so the figures use OpenQodex's rules.
+
+```bash
+git clone --depth 1 https://github.com/openqodex/openqodex /tmp/oq
+node eval/import-openqodex.js --src /tmp/oq/benchmark/cases
+node eval/run.js   --corpus eval/corpus/openqodex-planted.json
+node eval/score.js --corpus eval/corpus/openqodex-planted.json --tolerance 1
+```
+
+The same cases can be reviewed through the MCP server, with a coding agent as
+the reasoning pass (`productPath: mcp-host`). Build the cases as git repos,
+have an agent that has never seen the answer key call `review_pr` (range
+`main..change`) and `submit_review_findings` on each, save each agent's JSON
+reply into one folder, then merge and score:
+
+```bash
+node eval/materialise-openqodex.js /tmp/oq/benchmark/cases /tmp/oq-run/repos
+# ... one reviewer agent per few repos, replies saved to /tmp/oq-run/results/*.json
+HOST_MODEL=claude-opus-5-5 node eval/merge-mcp-results.js \
+  eval/corpus/openqodex-planted.json /tmp/oq-run/results /tmp/oq-run/oq-map.json \
+  eval/corpus/openqodex-mcp.json 50
+node eval/score.js --corpus eval/corpus/openqodex-mcp.json --tolerance 1
+```
+
+The last argument is the rubric floor: 50 scores inline findings plus
+observations, 80 inline findings only.
+
+One difference remains and favours OpenQodex: its reviewer reads the whole
+repository, while this harness supplies only the changed files, so a bug whose
+evidence is an unchanged caller can only be inferred.
+
 ## Corpus format
 
 ```jsonc

@@ -49,7 +49,35 @@ export function sameLocation(a, b, tolerance = DEFAULT_LINE_TOLERANCE) {
     const lb = locationOf(b);
     if (!la.file || !lb.file || la.file !== lb.file) return false;
     if (la.line == null || lb.line == null) return true;
-    return Math.abs(la.line - lb.line) <= tolerance;
+    return lineGap(a, b) <= tolerance;
+}
+
+/**
+ * Lines between two records, 0 when their ranges overlap. A record's range is
+ * `line`..`lineEnd` (a planted bug spans lines; a finding usually names one).
+ */
+export function lineGap(a, b) {
+    const range = (r) => {
+        const { line } = locationOf(r);
+        const end = Number(r?.lineEnd ?? r?.endLine);
+        return [line, Number.isFinite(end) && end >= line ? end : line];
+    };
+    const [a0, a1] = range(a);
+    const [b0, b1] = range(b);
+    return Math.max(0, a0 - b1, b0 - a1);
+}
+
+/**
+ * Does a finding's text name the issue? A reference may list `mentions`, words
+ * any one of which a finding about it must contain (OpenQodex's rule for an
+ * issue, as opposed to a location, match). No list means any text will do.
+ */
+export function mentionsIssue(prediction, reference) {
+    const words = reference?.mentions;
+    if (!Array.isArray(words) || words.length === 0) return true;
+    const text = ['title', 'description', 'suggestion', 'evidence', 'message']
+        .map((k) => prediction?.[k] ?? '').join(' ').toLowerCase();
+    return words.some((w) => text.includes(String(w).toLowerCase()));
 }
 
 /**
@@ -134,6 +162,8 @@ export function scorePrecision(predictions = [], adjudications = [], tolerance =
     let falsePositives = 0;
     let disputed = 0;
     let unadjudicated = 0;
+    // Per prediction, in input order: 'tp' | 'fp' | 'disputed' | null.
+    const outcomes = new Array(preds.length).fill(null);
 
     for (const entry of preds) {
         const verdicts = [
@@ -150,10 +180,13 @@ export function scorePrecision(predictions = [], adjudications = [], tolerance =
             // dispute into evidence of correctness. It is neither, so it is
             // reported and left out of the rate.
             disputed++;
+            outcomes[entry.index] = 'disputed';
         } else if (anyTrue) {
             truePositives++;
+            outcomes[entry.index] = 'tp';
         } else {
             falsePositives++;
+            outcomes[entry.index] = 'fp';
         }
     }
 
@@ -165,6 +198,7 @@ export function scorePrecision(predictions = [], adjudications = [], tolerance =
         unadjudicated,
         ambiguousLegacy,
         orphanAdjudications,
+        outcomes,
         adjudicated: truePositives + falsePositives,
         predicted: predictions.length,
         ...interval,
@@ -232,7 +266,7 @@ export function scoreRecall(predictions = [], humanComments = [], tolerance = DE
  *
  * @returns {{matched: Array<{reference: object, prediction: object, basis: string}>, missed: object[]}}
  */
-export function matchReferences(predictions = [], references = [], tolerance = DEFAULT_LINE_TOLERANCE) {
+export function matchReferences(predictions = [], references = [], tolerance = DEFAULT_LINE_TOLERANCE, accept = null) {
     const preds = predictions.map((p, index) => ({ record: p, index, defect: p?.defectId ?? null }));
 
     const pairs = [];
@@ -245,11 +279,12 @@ export function matchReferences(predictions = [], references = [], tolerance = D
                 continue;
             }
             if (!sameLocation(p.record, ref, tolerance)) continue;
+            if (accept && !accept(p.record, ref)) continue;
             const a = locationOf(p.record).line;
             const b = locationOf(ref).line;
             // A file-wide reference (no line) is a weaker pairing than a
             // line-for-line one, so it loses to any co-located candidate.
-            const cost = (a == null || b == null) ? tolerance + 1 : Math.abs(a - b);
+            const cost = (a == null || b == null) ? tolerance + 1 : lineGap(p.record, ref);
             pairs.push({ refIndex, predIndex: p.index, cost, basis: 'location' });
         }
     });

@@ -36,6 +36,7 @@ function parseArgs(argv) {
         else if (a === '--max-per-pr') args.maxPerPr = Number(argv[++i]);
         else if (a === '--only') args.only = argv[++i].split(',').map(s => s.trim());
         else if (a === '--list') args.list = true;
+        else if (a === '--controls') args.controls = Number(argv[++i]);
         else if (a === '--help' || a === '-h') args.help = true;
         else throw new Error(`Unknown argument: ${a}`);
     }
@@ -45,7 +46,7 @@ function parseArgs(argv) {
 function main() {
     const args = parseArgs(process.argv.slice(2));
     if (args.help) {
-        console.log('Usage: node eval/inject.js [--in <file>] [--out <file>] [--max-per-file n] [--max-per-pr n] [--only id,id] [--list]');
+        console.log('Usage: node eval/inject.js [--in <file>] [--out <file>] [--max-per-file n] [--max-per-pr n] [--only id,id] [--controls n] [--list]');
         return;
     }
     if (args.list) {
@@ -64,7 +65,27 @@ function main() {
     const byDefect = {};
     let total = 0;
 
-    for (const kase of cases) {
+    // Clean controls: the last N merged PRs, left unmutated. A reviewer that
+    // flags every change scores 100% detection; only these show it staying
+    // quiet. Their original human comments are kept apart, not used as truth.
+    const controls = Math.max(0, Math.floor(args.controls || 0));
+    const controlCases = controls ? cases.slice(-controls) : [];
+    for (const kase of controlCases) {
+        console.log(`  ${kase.id}: clean control`);
+        out.push({
+            id: `${kase.id}[control]`,
+            url: kase.url,
+            prData: kase.prData,
+            ...(kase.fileContents ? { fileContents: kase.fileContents } : {}),
+            clean: true,
+            humanComments: [],
+            originalHumanComments: kase.humanComments,
+            predictions: [],
+            adjudications: [],
+        });
+    }
+
+    for (const kase of cases.slice(0, cases.length - controlCases.length)) {
         const { prData, injected, fileContents } = injectIntoPr(kase.prData, {
             maxPerFile: args.maxPerFile,
             maxPerPr: args.maxPerPr,
@@ -112,7 +133,7 @@ function main() {
         });
     }
 
-    if (out.length === 0) throw new Error('No defects could be injected — the corpus has no matching added lines');
+    if (total === 0) throw new Error('No defects could be injected — the corpus has no matching added lines');
 
     mkdirSync(dirname(resolve(args.out)), { recursive: true });
     writeFileSync(resolve(args.out), `${JSON.stringify({
@@ -121,7 +142,7 @@ function main() {
         cases: out,
     }, null, 2)}\n`);
 
-    console.log(`\n${total} defect(s) across ${out.length} PR(s) → ${args.out}`);
+    console.log(`\n${total} defect(s) across ${out.length - controlCases.length} PR(s), ${controlCases.length} clean control(s) → ${args.out}`);
     console.log(`By category: ${Object.entries(byCategory).map(([k, v]) => `${k} ${v}`).join(', ')}`);
     console.log(`By defect:   ${Object.entries(byDefect).map(([k, v]) => `${k} ${v}`).join(', ')}`);
     console.log(`\nNext: node eval/run.js --corpus ${args.out}`);

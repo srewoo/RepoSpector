@@ -119,6 +119,7 @@ export function rubricSummary(session) {
     return {
         minRubricScore,
         postable: gate.postable.map(briefRubric),
+        observations: gate.observations.map(briefRubric),
         notVerified: gate.notVerified.map(briefRubric),
         dropped: gate.dropped.map(briefRubric),
     };

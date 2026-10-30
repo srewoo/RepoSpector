@@ -213,7 +213,7 @@ export function resolveMcpQuality(raw, repo = null) {
  * `kept` = postable + not verified; not-verified findings are kept but flagged.
  */
 export async function gateByRubric({ findings, modelPort, diffFiles = [], rulesFiles = [], minRubricScore }) {
-    if (!findings.length) return { kept: [], dropped: [], notVerified: [], stats: null };
+    if (!findings.length) return { kept: [], dropped: [], notVerified: [], observations: [], stats: null };
     const scored = await scoreFindings(findings, {
         modelPort,
         contextFor: createRubricContextFor({ files: diffFiles, rulesFiles }),
@@ -223,10 +223,14 @@ export async function gateByRubric({ findings, modelPort, diffFiles = [], rulesF
         requestIdFor: (f, i) => `bundle-rubric-${i}`,
     });
     const gate = filterByRubric(scored.findings, { minRubricScore });
+    // Observations ride with the kept set, marked non-blocking, so a reader
+    // sees a real minor defect the threshold would otherwise have deleted.
+    const observations = gate.observations.map((f) => ({ ...f, blocking: false, observation: true }));
     return {
-        kept: [...gate.postable, ...gate.notVerified],
+        kept: [...gate.postable, ...observations, ...gate.notVerified],
         dropped: gate.dropped,
         notVerified: gate.notVerified,
+        observations,
         stats: scored.stats,
     };
 }

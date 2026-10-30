@@ -46,6 +46,13 @@ export function createRetention() {
  * and hide what it removed.
  */
 export function recordStage(retention, stage, before = [], after = [], reasonOf = null) {
+    // Pin identity the first time a candidate is seen. Stages rewrite findings
+    // (citations attach a rule, gates relocate a line), which changes the
+    // content hash; unpinned, a rewritten finding read as dropped. Stages copy
+    // findings with spread, so the pinned id travels with the copy.
+    for (const f of after) {
+        if (f && typeof f === 'object' && !f.predictionId) f.predictionId = predictionId(f);
+    }
     const afterIds = new Set(after.map(predictionId));
     const dropped = before
         .filter((f) => !afterIds.has(predictionId(f)))

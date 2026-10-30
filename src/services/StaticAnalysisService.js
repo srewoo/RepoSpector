@@ -12,6 +12,7 @@ import { ConfidenceScorer } from './ConfidenceScorer.js';
 import { EOLService } from './EOLService.js';
 import { ImportGraphService } from './ImportGraphService.js';
 import { SecretsScanner } from './SecretsScanner.js';
+import { ConfigLintAnalyzer } from './ConfigLintAnalyzer.js';
 import { extractAddedLines, mapAddedBlockLine } from '../utils/patchLines.js';
 
 export class StaticAnalysisService {
@@ -24,6 +25,7 @@ export class StaticAnalysisService {
         this.eolService = options.eolService || (options.enableEOL !== false ? new EOLService(options.eol || {}) : null);
         this.importGraphService = options.importGraphService || new ImportGraphService();
         this.secretsScanner = new SecretsScanner();
+        this.configLintAnalyzer = new ConfigLintAnalyzer();
 
         // Optional services (injected from background)
         this.adaptiveLearningService = options.adaptiveLearningService || null;
@@ -34,6 +36,7 @@ export class StaticAnalysisService {
             enableSemgrep: options.enableSemgrep ?? true,
             enableDependency: options.enableDependency ?? true,
             enableEOL: options.enableEOL ?? true,
+            enableConfigLint: options.enableConfigLint ?? true,
             enableConfidenceAggregation: options.enableConfidenceAggregation ?? true,
             parallelAnalysis: options.parallelAnalysis ?? true,
             minConfidenceThreshold: options.minConfidenceThreshold ?? 0.4,
@@ -72,14 +75,14 @@ export class StaticAnalysisService {
             if (this.options.parallelAnalysis) {
                 // Run analyzers in parallel
                 const [eslintResult, semgrepResult, depResult] = await Promise.all([
-                    this.options.enableESLint ?
+                    this.options.enableESLint && !context.onlyDependency ?
                         this.eslintAnalyzer.analyzeWithEngine(code, context) :
                         Promise.resolve(null),
-                    this.options.enableSemgrep ?
+                    this.options.enableSemgrep && !context.onlyDependency ?
                         Promise.resolve(this.semgrepAnalyzer.analyze(code, context)) :
                         Promise.resolve(null),
-                    this.options.enableDependency && this.isDependencyFile(filePath) ?
-                        Promise.resolve(this.dependencyAnalyzer.analyze(code, context)) :
+                    this.options.enableDependency && this.isDependencyFile(filePath) && !context.skipDependency ?
+                        this.dependencyAnalyzer.analyzeAsync(code, context) :
                         Promise.resolve(null)
                 ]);
 
@@ -88,14 +91,14 @@ export class StaticAnalysisService {
                 results.dependency = depResult;
             } else {
                 // Run sequentially
-                if (this.options.enableESLint) {
+                if (this.options.enableESLint && !context.onlyDependency) {
                     results.eslint = await this.eslintAnalyzer.analyzeWithEngine(code, context);
                 }
-                if (this.options.enableSemgrep) {
+                if (this.options.enableSemgrep && !context.onlyDependency) {
                     results.semgrep = this.semgrepAnalyzer.analyze(code, context);
                 }
-                if (this.options.enableDependency && this.isDependencyFile(filePath)) {
-                    results.dependency = this.dependencyAnalyzer.analyze(code, context);
+                if (this.options.enableDependency && this.isDependencyFile(filePath) && !context.skipDependency) {
+                    results.dependency = await this.dependencyAnalyzer.analyzeAsync(code, context);
                 }
             }
 
@@ -105,6 +108,17 @@ export class StaticAnalysisService {
                 aggregatedResult = this.confidenceScorer.aggregateFindings(results);
             } else {
                 aggregatedResult = this.combineResultsSimple(results);
+            }
+
+            // Dockerfiles, workflows, migrations, manifests, Terraform, shell and
+            // React lists: exact rule matches, so they skip confidence fusion.
+            if (this.options.enableConfigLint && !context.onlyDependency) {
+                const config = this.configLintAnalyzer.analyze(code, context);
+                results.config = config;
+                if (config.findings.length) {
+                    aggregatedResult.findings = [...aggregatedResult.findings, ...config.findings];
+                    if (aggregatedResult.summary) aggregatedResult.summary.total = aggregatedResult.findings.length;
+                }
             }
 
             // Apply max findings limit
@@ -163,13 +177,13 @@ export class StaticAnalysisService {
         // Process files (in parallel if enabled)
         if (this.options.parallelAnalysis && files.length > 1) {
             const promises = files.map(file =>
-                this.analyzeFile(file.content, { filePath: file.path, ...options })
+                this.analyzeFile(file.content, { filePath: file.path, skipDependency: file.skipDependency, onlyDependency: file.onlyDependency, ...options })
             );
             const results = await Promise.all(promises);
             fileResults.push(...results);
         } else {
             for (const file of files) {
-                const result = await this.analyzeFile(file.content, { filePath: file.path, ...options });
+                const result = await this.analyzeFile(file.content, { filePath: file.path, skipDependency: file.skipDependency, onlyDependency: file.onlyDependency, ...options });
                 fileResults.push(result);
             }
         }
@@ -263,14 +277,15 @@ export class StaticAnalysisService {
             this.isDependencyFile(f.filename)
         );
 
-        // Add dependency files if we have their full content
+        // Add dependency files if we have their full content. PR files carry it as
+        // `fullContent`; reading only `content` meant this pass never ran, and a
+        // manifest cannot be parsed from its added lines alone.
         for (const depFile of depFiles) {
-            if (depFile.content) {
-                filesToAnalyze.push({
-                    path: depFile.filename,
-                    content: depFile.content
-                });
-            }
+            const content = depFile.content ?? depFile.fullContent;
+            if (!content || depFile.status === 'removed') continue;
+            const patched = filesToAnalyze.find((f) => f.path === depFile.filename);
+            if (patched) patched.skipDependency = true;
+            filesToAnalyze.push({ path: depFile.filename, content, onlyDependency: true });
         }
 
         // Run analysis
@@ -693,7 +708,11 @@ export class StaticAnalysisService {
                 if (used.has(j)) continue;
                 const candidate = findings[j];
 
+                // A vulnerable version pinned at two lines is two claims: the
+                // second may be the changed line, and grouping under the first
+                // let the diff-scope filter drop it with its primary.
                 if (
+                    primary.tool !== 'dependency' &&
                     candidate.ruleId === primary.ruleId &&
                     candidate.filePath === primary.filePath &&
                     Math.abs((candidate.line || 0) - (primary.line || 0)) <= lineProximity

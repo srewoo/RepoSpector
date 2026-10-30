@@ -17,6 +17,11 @@
  * vulnerabilities".
  */
 
+import { extractAddedLines } from '../../../../src/utils/patchLines.js';
+import { locateDependency } from '../../../../src/utils/dependencyLocation.js';
+
+export { locateDependency };
+
 const DEFAULT_TIMEOUT_MS = 15000;
 
 /** Reject rather than hang: this section is the only one that reaches a network. */
@@ -52,8 +57,11 @@ export async function buildDependencySection({
     const perFile = [];
     let unmappedEcosystem = null;
     for (const file of files) {
-        const parsed = analyzer.analyze(file.content, { filePath: file.path });
-        const ecosystem = osv.mapEcosystem(parsed?.fileType);
+        // analyzeAsync reads lockfiles too; analyze() returns "unsupported" for them.
+        const parsed = analyzer.analyzeAsync
+            ? await analyzer.analyzeAsync(file.content, { filePath: file.path })
+            : analyzer.analyze(file.content, { filePath: file.path });
+        const ecosystem = osv.mapEcosystem(parsed?.ecosystemFileType ?? parsed?.fileType);
         perFile.push({
             path: file.path,
             fileType: parsed?.fileType ?? null,
@@ -67,6 +75,14 @@ export async function buildDependencySection({
         for (const dep of parsed?.dependencies || []) {
             packages.push({ name: dep.name, version: dep.version, ecosystem });
         }
+    }
+
+    // A package named in both the manifest and its lockfile is one package; its
+    // advisory already lists every pinned location across both files.
+    const seen = new Set();
+    for (let i = packages.length - 1; i >= 0; i--) {
+        const key = `${packages[i].ecosystem}:${packages[i].name}@${packages[i].version}`;
+        if (seen.has(key)) packages.splice(i, 1); else seen.add(key);
     }
 
     const base = {
@@ -127,6 +143,14 @@ export async function buildDependencySection({
                 package: pkg.name,
                 version: pkg.version ?? null,
                 ecosystem: pkg.ecosystem,
+                // Where this version is pinned, and whether THIS change wrote
+                // that line: a finding belongs on each changed location.
+                locations: files.flatMap((file) => {
+                    const diff = manifests.find((m) => m.filename === file.path);
+                    const added = new Set(extractAddedLines(diff?.patch ?? '').lineNumbers);
+                    return locateDependency(file.content, pkg.name, pkg.version)
+                        .map((line) => ({ file: file.path, line, changed: added.has(line) }));
+                }),
                 vulnerabilities: vulns,
             });
         }

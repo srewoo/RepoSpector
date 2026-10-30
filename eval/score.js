@@ -33,6 +33,12 @@ function parseArgs(argv) {
         else if (a === '--tolerance') args.tolerance = Number(argv[++i]);
         else if (a === '--allow-llm-baseline') args.allowLlmBaseline = true;
         else if (a === '--holdout') args.holdout = Number(argv[++i]);
+        else if (a === '--aa') args.aa = argv[++i];
+        else if (a === '--price') {
+            const [input, output] = String(argv[++i]).split(',').map(Number);
+            if (!Number.isFinite(input) || !Number.isFinite(output)) throw new Error('--price takes <in>,<out> USD per 1M tokens');
+            args.price = { input, output };
+        }
         else if (a === '--help' || a === '-h') args.help = true;
         else throw new Error(`Unknown argument: ${a}`);
     }
@@ -50,6 +56,9 @@ Usage: node eval/score.js --corpus <file> [--gate] [--write-baseline] [--json]
   --misses            List the human comments the run did not raise
   --include-unreviewed  Score un-run cases as total misses (default: exclude)
   --allow-llm-baseline  Permit --write-baseline when the human sample is empty
+  --price <in>,<out>  USD per 1M input/output tokens, for cost per review
+  --aa <file>         A twin run of the same build on the same cases; reports
+                      A/A noise (a gap smaller than it can be chance)
 `.trim();
 
 function readJson(path) {
@@ -110,6 +119,20 @@ export function refuseLlmBaseline(result, args = {}) {
     return humanJudged === 0 && llmJudged > 0;
 }
 
+/**
+ * A/A noise: the same build run twice on the same cases. Scored only over the
+ * cases both runs reviewed, so a half-finished twin cannot fake stability.
+ */
+export function aaNoiseOf(casesA, casesB, tolerance) {
+    const reviewed = (c) => c.runStats || (c.predictions ?? []).length > 0;
+    const ids = new Set(casesB.filter(reviewed).map((c) => c.id));
+    const shared = casesA.filter((c) => reviewed(c) && ids.has(c.id)).map((c) => c.id);
+    const pick = (cases) => cases.filter((c) => shared.includes(c.id));
+    const matchedA = scoreRun(pick(casesA), { tolerance }).recall.matched;
+    const matchedB = scoreRun(pick(casesB), { tolerance }).recall.matched;
+    return { sharedCases: shared.length, matchedA, matchedB, difference: Math.abs(matchedA - matchedB) };
+}
+
 function main() {
     const args = parseArgs(process.argv.slice(2));
     if (args.help || !args.corpus) {
@@ -155,6 +178,7 @@ function main() {
         benchmark = buildBenchmarkReport(cases, {
             tolerance: args.tolerance,
             manifest: cases.find(c => c.manifest)?.manifest ?? null,
+            price: args.price,
         });
     } catch (e) {
         // `requireSinglePath` refuses to average two different reviewers.
@@ -181,8 +205,10 @@ function main() {
         };
     }
 
+    const aaNoise = args.aa ? aaNoiseOf(cases, validateCorpus(readJson(resolve(args.aa))), args.tolerance) : null;
+
     if (args.json) {
-        console.log(JSON.stringify({ ...result, benchmark, holdout: holdoutReport }, null, 2));
+        console.log(JSON.stringify({ ...result, benchmark, holdout: holdoutReport, aaNoise }, null, 2));
     } else {
         console.log(formatReport(result));
         if (benchmark) console.log(`\n${'─'.repeat(72)}\n\n${formatBenchmarkReport(benchmark)}`);
@@ -200,6 +226,14 @@ function main() {
                 console.log(formatBenchmarkReport(report));
             }
         }
+    }
+
+    if (aaNoise && !args.json) {
+        console.log(
+            `\nA/A noise vs ${args.aa}: ${aaNoise.matchedA} vs ${aaNoise.matchedB} reference(s) found `
+            + `over ${aaNoise.sharedCases} shared case(s), a difference of ${aaNoise.difference}.`
+            + '\nA gap between two configurations smaller than this can be chance.',
+        );
     }
 
     // A recall percentage tells you that you missed things; the list tells you

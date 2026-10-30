@@ -268,3 +268,87 @@ describe('the rendered report', () => {
         expect(text).toMatch(/shape\(s\) are ABSENT/);
     });
 });
+
+describe('OpenQodex-comparable figures', () => {
+    const at = (file, line, extra = {}) => ({ file, line, ...extra });
+
+    it('precision bounds: a hit on a planted defect is correct without a verdict, the rest unresolved', () => {
+        const r = buildBenchmarkReport([kase({
+            humanComments: [at('a.js', 10, { body: 'this throws on null', tagGroup: 'logic' })],
+            predictions: [at('a.js', 10, { title: 'null deref' }), at('a.js', 80, { title: 'other' })],
+        })]);
+        expect(r.precisionBounds).toMatchObject({ correct: 1, wrong: 0, unresolved: 1, total: 2 });
+        expect(r.precisionBounds.lower).toBe(0.5);
+        expect(r.precisionBounds.upper).toBe(1);
+    });
+
+    it('precision bounds: every finding on a clean case is wrong unless a human says otherwise', () => {
+        const p1 = at('a.js', 1, { title: 'x' });
+        const p2 = at('a.js', 50, { title: 'y' });
+        const r = buildBenchmarkReport([kase({
+            clean: true,
+            predictions: [p1, p2],
+            adjudications: [at('a.js', 50, { verdict: 'true_positive' })],
+        })]);
+        expect(r.precisionBounds).toMatchObject({ correct: 1, wrong: 1, unresolved: 0 });
+    });
+
+    it('clean rate counts only complete reviews with no finding', () => {
+        const r = buildBenchmarkReport([
+            kase({ id: 'quiet', clean: true }),
+            kase({ id: 'noisy', clean: true, predictions: [at('a.js', 1)] }),
+            kase({ id: 'broken', clean: true, incomplete: true }),
+        ]);
+        expect(r.cleanQuiet).toBe(1);
+        expect(r.cleanRate.reference).toBe(3);
+    });
+
+    it('location recall is stricter than the ±5 defect recall', () => {
+        const r = buildBenchmarkReport([kase({
+            humanComments: [at('a.js', 10, { body: 'this throws', tagGroup: 'logic' })],
+            predictions: [at('a.js', 14)],
+        })]);
+        expect(r.defectRecall.matched).toBe(1);
+        expect(r.locationRecall.matched).toBe(0);
+    });
+
+    it('per-review time and tokens are means over cases, cost only with a price', () => {
+        const cases = [
+            kase({ id: 'a', runStats: { wallMs: 1000, tokens: { input: 1000, output: 100 } } }),
+            kase({ id: 'b', runStats: { wallMs: 3000, tokens: { input: 3000, output: 300 } } }),
+        ];
+        expect(buildBenchmarkReport(cases).perReview).toMatchObject({ wallMs: 2000, tokensIn: 2000, cost: null });
+        const priced = buildBenchmarkReport(cases, { price: { input: 1, output: 10 } }).perReview;
+        expect(priced.cost).toBeCloseTo((2000 * 1 + 200 * 10) / 1e6);
+        expect(formatBenchmarkReport(buildBenchmarkReport(cases))).toMatch(/Cost per review:\s+not measured/);
+    });
+});
+
+describe('precision on a planted case counts duplicates and accepted side issues', () => {
+    it('a second finding on a found bug and a finding on an accepted issue are correct', () => {
+        const r = buildBenchmarkReport([kase({
+            humanComments: [{ file: 'a.go', line: 10, lineEnd: 12, body: 'race on map', tagGroup: 'concurrency', mentions: ['race'] }],
+            acceptedIssues: [{ file: 'a.go', line: 40, lineEnd: 41, mentions: ['timeout'] }],
+            predictions: [
+                { file: 'a.go', line: 11, title: 'data race' },
+                { file: 'a.go', line: 12, title: 'race again' },
+                { file: 'a.go', line: 40, title: 'no timeout on client' },
+                { file: 'a.go', line: 11, title: 'naming' },
+            ],
+        })]);
+        expect(r.precisionBounds).toMatchObject({ correct: 3, unresolved: 1, wrong: 0 });
+        expect(r.issueRecall.matched).toBe(1);
+    });
+});
+
+describe('retention survives a stage that rewrites findings', () => {
+    it('a finding a stage only annotates is kept, not dropped', () => {
+        const r = createRetention();
+        const found = [{ file: 'a.js', line: 3, title: 'null deref' }];
+        recordStage(r, 'generated', [], found);
+        const annotated = found.map((f) => ({ ...f, rule: 'cited-rule', line: 4 }));
+        recordStage(r, 'citations', found, annotated);
+        expect(r.stages[1].droppedCount).toBe(0);
+        expect(r.stages[1].added).toBe(0);
+    });
+});

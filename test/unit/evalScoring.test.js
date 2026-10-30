@@ -416,3 +416,35 @@ describe('baseline protection', () => {
         expect(refuseLlmBaseline(result, { allowLlmBaseline: false })).toBe(false);
     });
 });
+
+describe('A/A noise', () => {
+    const { aaNoiseOf } = require('../../eval/score.js');
+    const c = (id, preds) => ({
+        id, runStats: {}, predictions: preds, adjudications: [],
+        humanComments: [{ file: 'a.js', line: 1, body: 'bug' }, { file: 'a.js', line: 40, body: 'bug' }],
+    });
+
+    it('compares only the cases both runs reviewed', () => {
+        const a = [c('x', [{ file: 'a.js', line: 1 }, { file: 'a.js', line: 40 }]), c('y', [{ file: 'a.js', line: 1 }])];
+        const b = [c('x', [{ file: 'a.js', line: 1 }])];
+        expect(aaNoiseOf(a, b)).toEqual({ sharedCases: 1, matchedA: 2, matchedB: 1, difference: 1 });
+    });
+});
+
+describe('range and mention matching (OpenQodex issue rule)', () => {
+    const { lineGap, mentionsIssue, matchReferences } = require('../../eval/lib/scoring.js');
+    const bug = { file: 'a.py', line: 16, lineEnd: 20, mentions: ['travers', '../'] };
+
+    it('a finding inside a bug range is at distance 0, not its distance to the first line', () => {
+        expect(lineGap({ file: 'a.py', line: 20 }, bug)).toBe(0);
+        expect(lineGap({ file: 'a.py', line: 22 }, bug)).toBe(2);
+    });
+
+    it('a finding on the lines that does not name the bug is only a location match', () => {
+        expect(mentionsIssue({ title: 'Path traversal via name' }, bug)).toBe(true);
+        expect(mentionsIssue({ title: 'missing docstring' }, bug)).toBe(false);
+        const wrongText = [{ file: 'a.py', line: 17, title: 'missing docstring' }];
+        expect(matchReferences(wrongText, [bug], 0, mentionsIssue).matched).toHaveLength(0);
+        expect(matchReferences(wrongText, [bug], 0).matched).toHaveLength(1);
+    });
+});

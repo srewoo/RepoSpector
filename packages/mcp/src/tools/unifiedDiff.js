@@ -69,9 +69,7 @@ export function parseUnifiedDiff(text) {
     if (src.includes('diff --git ')) {
         const files = [];
         for (const chunk of src.split(/^diff --git /m).filter(Boolean)) {
-            const header = chunk.split('\n')[0] || '';
-            const match = header.match(/b\/(.+)$/);
-            const filename = match ? match[1].trim() : 'unknown';
+            const filename = gitChunkFilename(chunk);
             const at = chunk.indexOf('\n@@');
             if (at < 0) {
                 files.push(classifyHunkless(chunk, filename));
@@ -95,6 +93,26 @@ export function parseUnifiedDiff(text) {
     // and report analysis against it. An empty list lets the tool say plainly
     // that it found no changed files.
     return [];
+}
+
+/**
+ * The new-side path of one `diff --git` chunk.
+ *
+ * The `+++ b/` line names it unambiguously, so it wins; a deletion names the
+ * old side on `--- a/`, and a hunkless rename on `rename to`. Only then the
+ * header, split at its LAST ` b/`: matching the first `b/` anywhere read
+ * `a/.github/x b/.github/x` as `workflows/x b/.github/x`, because `.github/`,
+ * `db/` and `web/` all contain `b/`, and static analysis then skipped the file.
+ */
+export function gitChunkFilename(chunk) {
+    const plus = chunk.match(/^\+\+\+ (?:b\/)?(.+?)\t?$/m);
+    if (plus && plus[1] !== '/dev/null') return plus[1].trim();
+    const minus = chunk.match(/^--- (?:a\/)?(.+?)\t?$/m);
+    if (minus && minus[1] !== '/dev/null') return minus[1].trim();
+    const renamed = chunk.match(/\nrename to (.+)/);
+    if (renamed) return renamed[1].trim();
+    const header = (chunk.split('\n')[0] || '').match(/^a\/(.+) b\/(.+)$/);
+    return header ? header[2].trim() : 'unknown';
 }
 
 /** The `--- old` / `+++ new` form, with no `diff --git` header. */

@@ -136,6 +136,7 @@ export function renderPolicyNote(stats) {
     if (stats.droppedByConfidence) bits.push(`${stats.droppedByConfidence} below the confidence floor`);
     if (stats.droppedByScore) bits.push(`${stats.droppedByScore} below the value-score floor`);
     if (stats.notVerified) bits.push(`${stats.notVerified} not verified by the rubric check`);
+    if (stats.observations) bits.push(`${stats.observations} observation(s) below the posting threshold`);
     if (stats.suppressedAsDuplicate) bits.push(`${stats.suppressedAsDuplicate} already commented on`);
     if (!bits.length) return '';
     return `<sub>Only blocking findings are posted inline — ${bits.join('; ')}.</sub>`;
@@ -171,6 +172,31 @@ export function renderNotVerifiedSection(findings = [], options = {}) {
 }
 
 /**
+ * Findings the rubric scored below the posting threshold but above the
+ * observation floor. Shown so a real minor defect is not lost; never inline,
+ * never blocking.
+ */
+export function renderObservationsSection(findings = [], options = {}) {
+    const { maxItems = 20 } = options;
+    if (!findings.length) return '';
+    const out = [
+        '',
+        '### Observations',
+        '',
+        '_Scored below the posting threshold. Not blocking; worth a look._',
+        '',
+    ];
+    for (const f of findings.slice(0, maxItems)) {
+        const score = Number.isFinite(f?.rubric?.score) ? ` _(score ${f.rubric.score})_` : '';
+        out.push(`${renderBullet(f)}${score}`);
+    }
+    if (findings.length > maxItems) {
+        out.push(`- _…and ${findings.length - maxItems} more (see the RepoSpector panel)._`);
+    }
+    return out.join('\n');
+}
+
+/**
  * `.repospector.yaml` warnings and checks that did not run (completeness
  * contract: a check that did not run is reported, never read as "no findings").
  */
@@ -190,5 +216,5 @@ export function renderQualityNotes({ configWarnings = [], lensReport = [] } = {}
 
 export default {
     renderDeferredSections, renderEscalationSection, renderPolicyNote,
-    renderNotVerifiedSection, renderQualityNotes,
+    renderNotVerifiedSection, renderObservationsSection, renderQualityNotes,
 };

@@ -230,10 +230,16 @@ export function partitionForPosting(findings, options = {}) {
     // Spec §2.5: a finding the rubric check could not score is kept but never
     // posted inline, in either posting mode. It is listed under "Not verified".
     const notVerified = [];
+    // Scored below the posting threshold: listed, never inline.
+    const observations = [];
 
     for (const f of kept) {
         if (f?.rubric?.status === RUBRIC_STATUS.UNSCORED) {
             notVerified.push(f);
+            continue;
+        }
+        if (f?.observation === true) {
+            observations.push(f);
             continue;
         }
         const sev = postingSeverity(f);
@@ -296,8 +302,9 @@ export function partitionForPosting(findings, options = {}) {
 
     stats.inline = postable.length;
     stats.notVerified = notVerified.length;
+    stats.observations = observations.length;
 
-    return { inline: postable, suggestions, nitpicks, escalations, notVerified, stats };
+    return { inline: postable, suggestions, nitpicks, escalations, notVerified, observations, stats };
 }
 
 // Re-exported so the many existing importers of this module keep working, and so

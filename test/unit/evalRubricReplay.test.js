@@ -85,13 +85,17 @@ describe('replayRubric', () => {
         expect(rep.status).toEqual({ scored: 2, unscored: 1, bypassed: 1 });
         expect(rep.postable).toEqual({ true_positive: 1, false_positive: 0, unadjudicated: 1 });
         expect(rep.notVerified.unadjudicated).toBe(1);
-        expect(rep.dropped.true_positive).toBe(1);
+        // 60 is below the posting threshold but above the observation floor.
+        expect(rep.observations.true_positive).toBe(1);
+        expect(rep.dropped.true_positive).toBe(0);
     });
 
     it('a lower threshold keeps what a higher one drops', () => {
         const c = caseWith([{ file: 'a.js', line: 2, source: 'llm', rubric: scored(60) }]);
         expect(replayRubric([c], { threshold: 50, verdictFor }).postable.unadjudicated).toBe(1);
-        expect(replayRubric([c], { threshold: 80, verdictFor }).dropped.unadjudicated).toBe(1);
+        expect(replayRubric([c], { threshold: 80, verdictFor }).observations.unadjudicated).toBe(1);
+        const low = caseWith([{ file: 'a.js', line: 2, source: 'llm', rubric: scored(40) }]);
+        expect(replayRubric([low], { threshold: 80, verdictFor }).dropped.unadjudicated).toBe(1);
     });
 
     it('re-applies the pre-existing cap from the raw score', () => {

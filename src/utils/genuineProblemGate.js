@@ -108,6 +108,7 @@ export function filterGenuineProblems(findings = [], options = {}) {
     const minRubricScore = rubricMode ? Number(options.minRubricScore) : null;
     const kept = [];
     const notVerified = [];
+    const observations = [];
     const dropped = [];
     const reasons = {};
 
@@ -157,6 +158,7 @@ export function filterGenuineProblems(findings = [], options = {}) {
             // Per finding, so the kept list keeps its input order.
             const r = filterByRubric([withRubricDefault(finding)], { minRubricScore });
             if (r.postable.length) kept.push(r.postable[0]);
+            else if (r.observations.length) observations.push(r.observations[0]);
             else if (r.notVerified.length) notVerified.push(r.notVerified[0]);
             else reject(r.dropped[0] ?? finding, 'rubric-score');
             continue;
@@ -227,13 +229,24 @@ export function filterGenuineProblems(findings = [], options = {}) {
         validationStatus: validationStatusOf(f),
     }));
 
+    // Scored below the posting threshold but above the observation floor:
+    // shown in the summary, never inline, never blocking.
+    const observed = observations.map((f) => ({
+        ...f,
+        blocking: false,
+        observation: true,
+        validationStatus: validationStatusOf(f),
+    }));
+
     return {
-        findings: [...marked, ...unverified],
+        findings: [...marked, ...observed, ...unverified],
         dropped,
         notVerified: unverified,
+        observations: observed,
         stats: {
             input: (findings || []).length,
             kept: kept.length,
+            observations: observed.length,
             notVerified: unverified.length,
             dropped: dropped.length,
             minConfidence,
