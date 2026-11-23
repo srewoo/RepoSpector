@@ -1,138 +1,27 @@
 {
   "name": "repospector",
-  "version": "7.8",
-  "description": "RepoSpector \u2014 AI-powered code review Chrome extension for GitHub & GitLab. Reviews pull requests, chats with your codebase using local RAG, detects bugs and security vulnerabilities, scans dependencies (OSV), and generates unit tests.",
-  "author": "AI RepoSpector Team",
-  "license": "MIT",
-  "workspaces": [
-    "packages/*",
-    "apps/*"
-  ],
+  "private": true,
   "type": "module",
+  "workspaces": [
+    "packages/core",
+    "packages/eval",
+    "packages/mcp",
+    "packages/extension"
+  ],
   "scripts": {
-    "test": "jest",
-    "test:coverage": "jest --coverage",
-    "eval": "node eval/score.js --corpus eval/fixtures/synthetic.json",
-    "eval:fetch": "node eval/fetch-github.js",
-    "eval:run": "node eval/run.js",
-    "eval:real": "node eval/score.js --corpus eval/corpus/public-prs.json --misses",
-    "eval:inject": "node eval/inject.js",
-    "eval:injected": "node eval/score.js --corpus eval/corpus/injected.json --misses",
-    "eval:gate": "node eval/score.js --corpus eval/fixtures/synthetic.json --gate",
-    "lint": "eslint src/**/*.js test/**/*.js",
-    "lint:fix": "eslint src/**/*.js test/**/*.js --fix",
-    "dev": "vite",
-    "build:css": "tailwindcss -i ./src/input.css -o ./src/popup/index.css",
-    "build": "npm run build:css && node build-isolated.js",
-    "package": "npm run build && mkdir -p build && cd dist && zip -r ../build/ai-RepoSpector.zip .",
-    "validate": "npm run lint && npm test",
-    "eval:gates": "node eval/gate-replay.js --corpus eval/corpus/public-prs.json",
-    "eval:gates:injected": "node eval/gate-replay.js --corpus eval/corpus/injected.json",
-    "eval:content": "node eval/fetch-content.js"
+    "build": "tsc -b packages/core packages/extension packages/eval packages/mcp && npm run build -w @repospector/extension",
+    "typecheck": "tsc -b packages/core packages/extension packages/eval packages/mcp --pretty",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm test",
+    "audit:prod": "npm audit --omit=dev --audit-level=low",
+    "audit:all": "npm audit"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "fake-indexeddb": "^6.0.0",
-    "@babel/core": "^7.23.0",
-    "@babel/preset-env": "^7.28.5",
-    "@rollup/plugin-babel": "^6.1.0",
-    "@rollup/plugin-commonjs": "^29.0.0",
-    "@rollup/plugin-node-resolve": "^16.0.3",
-    "@rollup/plugin-replace": "^6.0.3",
-    "@rollup/plugin-terser": "^0.4.4",
-    "@testing-library/jest-dom": "^6.1.4",
-    "@types/chrome": "^0.0.251",
-    "@types/jest": "^29.5.8",
-    "@types/node": "^20.9.0",
-    "@vitejs/plugin-react": "^4.7.0",
-    "autoprefixer": "^10.4.22",
-    "babel-jest": "^29.7.0",
-    "babel-loader": "^10.0.0",
-    "copy-webpack-plugin": "^13.0.0",
-    "esbuild": "^0.27.0",
-    "eslint": "^8.52.0",
-    "jest": "^29.7.0",
-    "jest-environment-jsdom": "^29.7.0",
-    "postcss": "^8.5.6",
-    "rollup": "^4.53.3",
-    "tailwindcss": "^3.4.17",
-    "typescript": "^5.2.2",
-    "vite": "^6.4.1",
-    "webpack": "^5.99.9",
-    "webpack-cli": "^6.0.1"
+    "@types/node": "22.19.1",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0"
   },
-  "jest": {
-    "testEnvironment": "jsdom",
-    "setupFilesAfterEnv": [
-      "<rootDir>/test/setup.js"
-    ],
-    "moduleNameMapper": {
-      "^@/(.*)$": "<rootDir>/src/$1"
-    },
-    "transform": {
-      "^.+\\.js$": "babel-jest"
-    },
-    "transformIgnorePatterns": [
-      "node_modules/(?!(@testing-library/jest-dom|js-tiktoken)/)"
-    ],
-    "testPathIgnorePatterns": [
-      "/node_modules/",
-      "/dist/",
-      "/build/",
-      "/apps/api/",
-      "/packages/mcp/"
-    ],
-    "collectCoverageFrom": [
-      "src/**/*.js",
-      "!src/**/*.test.js"
-    ]
-  },
-  "eslintConfig": {
-    "env": {
-      "browser": true,
-      "es2021": true,
-      "jest": true,
-      "webextensions": true
-    },
-    "extends": "eslint:recommended",
-    "parserOptions": {
-      "ecmaVersion": "latest",
-      "sourceType": "module"
-    },
-    "rules": {
-      "no-console": [
-        "warn",
-        {
-          "allow": [
-            "warn",
-            "error"
-          ]
-        }
-      ],
-      "no-unused-vars": [
-        "error",
-        {
-          "argsIgnorePattern": "^_",
-          "varsIgnorePattern": "^_",
-          "caughtErrorsIgnorePattern": "^_"
-        }
-      ]
-    }
-  },
-  "dependencies": {
-    "@xenova/transformers": "^2.17.2",
-    "clsx": "^2.1.1",
-    "framer-motion": "^12.23.24",
-    "js-tiktoken": "^1.0.21",
-    "lucide-react": "^0.554.0",
-    "mermaid": "^11.12.2",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
-    "react-markdown": "^10.1.0",
-    "react-zoom-pan-pinch": "^3.7.0",
-    "remark-gfm": "^4.0.1",
-    "tailwind-merge": "^3.4.0",
-    "tree-sitter-wasms": "^0.1.13",
-    "web-tree-sitter": "^0.25.10"
+  "engines": {
+    "node": ">=22"
   }
 }

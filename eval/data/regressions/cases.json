@@ -1,0 +1,766 @@
+[
+  {
+    "id": "https://github.com/vercel/next.js/pull/96301",
+    "repo": "vercel/next.js",
+    "number": 96301,
+    "title": "fix(next/image): improve test coverage for unsupported image types",
+    "golden": [
+      {
+        "comment": "getSharp() in image-optimizer.ts blocks every VipsForeignLoad operation and then unblocks only an allowlist of Heif/Jpeg/Nsgif/Png/Tiff/Webp loaders; SVG is missing. Because sharp's block list is process-global and permanent, after the first /_next/image optimization any later Sharp SVG input (e.g. ImageResponse/next/og rasterizing through Sharp) fails with an unsupported-format error and crashes the response.",
+        "severity": "High"
+      }
+    ],
+    "language": "typescript",
+    "evidence": {
+      "fix_url": "https://github.com/vercel/next.js/pull/96681",
+      "fix_kind": "fix",
+      "quote": "Introduced by #96301, which aligned the Sharp allowlist with `detectContentType()` but missed SVG.",
+      "original_locations": [
+        {
+          "file": "packages/next/src/server/image-optimizer.ts",
+          "lines": "95-105"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/vercel/next.js/pull/94703",
+    "repo": "vercel/next.js",
+    "number": 94703,
+    "title": "Strip internal dev request-id headers from userland `headers()`",
+    "golden": [
+      {
+        "comment": "In getHeaders (request-store.ts) the new cleaned.delete(NEXT_REQUEST_ID_HEADER / NEXT_HTML_REQUEST_ID_HEADER) calls assume `cleaned` is a copy, but HeadersAdapter.from returns an existing Headers instance unchanged, so the deletes mutate the shared request headers. The server later reads those request-id headers from the raw request (dev debug channel), so e.g. rendering a redirect target after a server action in dev loses them and breaks the channel.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "typescript",
+    "evidence": {
+      "fix_url": "https://github.com/vercel/next.js/pull/95116",
+      "fix_kind": "fix",
+      "quote": "This regressed redirects from a server action that reads `headers()` when `cacheComponents` is enabled in `next dev`, introduced by #94703.",
+      "original_locations": [
+        {
+          "file": "packages/next/src/server/async-storage/request-store.ts",
+          "lines": "36-47"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/microsoft/vscode/pull/287050",
+    "repo": "microsoft/vscode",
+    "number": 287050,
+    "title": "Fix janky scrolling in markdown preview with code blocks",
+    "golden": [
+      {
+        "comment": "In preview-src/index.ts the scroll handler no longer decrements scrollDisabledCount (it just returns while it is > 0), and only the onUpdateView doScroll path was switched to a timer-based reset. The remaining `scrollDisabledCount += 1` sites (initial load, fragment/line reveal, resize) never get reset, so after page load the counter stays at 1 and blocks all preview-to-editor scroll sync until something else resets it.",
+        "severity": "High"
+      }
+    ],
+    "language": "typescript",
+    "evidence": {
+      "fix_url": "https://github.com/microsoft/vscode/pull/307763",
+      "fix_kind": "fix",
+      "quote": "markdown: fix scroll sync regressions introduced in #287050",
+      "original_locations": [
+        {
+          "file": "extensions/markdown-language-features/preview-src/index.ts",
+          "lines": "132-139"
+        },
+        {
+          "file": "extensions/markdown-language-features/preview-src/index.ts",
+          "lines": "378-390"
+        },
+        {
+          "file": "extensions/markdown-language-features/src/preview/preview.ts",
+          "lines": "235-245"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/microsoft/vscode/pull/302508",
+    "repo": "microsoft/vscode",
+    "number": 302508,
+    "title": "feat: add autoAttachReferences option to chat session extension point",
+    "golden": [
+      {
+        "comment": "ChatWidget._autoAttachInstructions now returns early when `!contribution?.autoAttachReferences`, but `contribution` is undefined for every chat session that has no chatSessions extension-point contribution (including the default local chat), so instruction, skill, agent and slash-command auto-attachment is silently disabled for normal chats. The check needs to distinguish no contribution (keep enabled) from a contribution that sets the flag false.",
+        "severity": "High"
+      }
+    ],
+    "language": "typescript",
+    "evidence": {
+      "fix_url": "https://github.com/microsoft/vscode/pull/303277",
+      "fix_kind": "fix",
+      "quote": "Fixes a regression introduced in #302508 where _autoAttachInstructions was silently skipped for all chat sessions without an explicit chatSessions extension point contribution (including the default local chat).",
+      "original_locations": [
+        {
+          "file": "src/vs/workbench/contrib/chat/browser/widget/chatWidget.ts",
+          "lines": "2711-2715"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/n8n-io/n8n/pull/28973",
+    "repo": "n8n-io/n8n",
+    "number": 28973,
+    "title": "fix(core): Persist execution context before writing to db",
+    "golden": [
+      {
+        "comment": "In WorkflowRunner.run, the new 'lightweight' contextWorkflow is built with `staticData: data.workflowData.staticData`, i.e. a second Workflow wrapped around the same static-data object the webhook just wrote through its own Workflow. Creating the second ObservableObject resets the top-level __dataChanged flag the caller checks before persisting, so node static data written in a trigger's webhook() (counters, cursors, dedup records) is silently not saved. The context workflow doesn't need static data.",
+        "severity": "High"
+      }
+    ],
+    "language": "typescript",
+    "evidence": {
+      "fix_url": "https://github.com/n8n-io/n8n/pull/42081",
+      "fix_kind": "fix",
+      "quote": "Introduced by #28973.",
+      "original_locations": [
+        {
+          "file": "packages/cli/src/workflow-runner.ts",
+          "lines": "205-228"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/excalidraw/excalidraw/pull/10578",
+    "repo": "excalidraw/excalidraw",
+    "number": 10578,
+    "title": "feat: stop using CSS filters for dark mode (static canvas)",
+    "golden": [
+      {
+        "comment": "normalizeInputColor (ColorInput.tsx) only prepends '#' when tinycolor's getFormat() === 'hex'. An 8-digit hex-with-alpha typed without '#' is reported as 'hex8', so it is returned as-is (the added test even asserts 'ff000080' stays unprefixed) and applied as an invalid color string instead of '#ff000080'; hex colors with alpha entered in the color input break.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "typescript",
+    "evidence": {
+      "fix_url": "https://github.com/excalidraw/excalidraw/pull/10773",
+      "fix_kind": "fix",
+      "quote": "fix: hex8 regression #10578",
+      "original_locations": [
+        {
+          "file": "packages/excalidraw/components/ColorPicker/ColorInput.tsx",
+          "lines": "21-41"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/excalidraw/excalidraw/pull/11492",
+    "repo": "excalidraw/excalidraw",
+    "number": 11492,
+    "title": "fix(editor): Arrows with text are rendered blurry in PNG export with larger scale",
+    "golden": [
+      {
+        "comment": "In renderElement's export path for arrows with bound text, the label hole is now cut by fillRect with the canvas background color (or clearRect when the background is transparent) directly on the shared export canvas after drawing the arrow. That paints over or erases whatever elements are rendered beneath the arrow's label area, so exported images no longer match the editor (shapes/images under a labeled arrow get a background-colored or transparent rectangle).",
+        "severity": "Medium"
+      }
+    ],
+    "language": "typescript",
+    "evidence": {
+      "fix_url": "https://github.com/excalidraw/excalidraw/pull/11637",
+      "fix_kind": "fix",
+      "quote": "#11492 switched labeled arrows on export from a temp-canvas blit to direct vector drawing (fixing high-scale blur), but kept the \"punch the label hole afterwards\" model.",
+      "original_locations": [
+        {
+          "file": "packages/element/src/renderElement.ts",
+          "lines": "914-962"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/pandas-dev/pandas/pull/69496",
+    "repo": "pandas-dev/pandas",
+    "number": 69496,
+    "title": "BUG: agg with an empty list or dict raises \"No objects to concatenate\" (GH#39609)",
+    "golden": [
+      {
+        "comment": "In `_agg_list_like_frame_reductions` (pandas/core/apply.py), `not func_names` evaluates truthiness of the container. When `func_names` is an ndarray or `pd.Index` (e.g. `df.agg(np.array([\"sum\",\"min\"]))`), this raises `ValueError: truth value is ambiguous` instead of aggregating like the list spelling; use a length check.",
+        "severity": "Low"
+      }
+    ],
+    "language": "python",
+    "evidence": {
+      "fix_url": "https://github.com/pandas-dev/pandas/pull/70227",
+      "fix_kind": "fix",
+      "quote": "Follow-up to GH-69496, which added `not func_names` to the `DataFrame.agg` list-of-names fast path. That evaluates array truthiness, so `df.agg(np.array([\"sum\", \"min\"]))` and `df.agg(pd.Index([\"sum\", \"min\"]))` (and their empty versions) raise `ValueError: The truth value of ... is ambiguous` instead of matching the list spelling.",
+      "original_locations": [
+        {
+          "file": "pandas/core/apply.py",
+          "lines": "1149-1152"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/pandas-dev/pandas/pull/66066",
+    "repo": "pandas-dev/pandas",
+    "number": 66066,
+    "title": "BUG: read_csv(engine=\"pyarrow\") parse_dates does not parse numeric-looking dates",
+    "golden": [
+      {
+        "comment": "In _finalize_index (pandas/io/parsers/arrow_parser_wrapper.py) the index column is unconditionally overwritten with date_converter(...) output whenever parse_dates applies. For a non-date index (e.g. int64 with parse_dates=True) the converter falls back to strings, so the index silently changes dtype from int64 to str; only replace the column when parsing succeeds.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "python",
+    "evidence": {
+      "fix_url": "https://github.com/pandas-dev/pandas/pull/71873",
+      "fix_kind": "fix",
+      "quote": "Regression from GH-66066 (in 3.1.0): with `engine=\"pyarrow\"`, an `index_col` that `parse_dates` fails to parse as dates comes back as strings, where 3.0.6 and the c/python engines keep its dtype.",
+      "original_locations": [
+        {
+          "file": "pandas/io/parsers/arrow_parser_wrapper.py",
+          "lines": "322-333"
+        },
+        {
+          "file": "pandas/io/parsers/arrow_parser_wrapper.py",
+          "lines": "431-441"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/pandas-dev/pandas/pull/63890",
+    "repo": "pandas-dev/pandas",
+    "number": 63890,
+    "title": "ENH: Make print_thing respect display.precision for float sequence",
+    "golden": [
+      {
+        "comment": "`_pprint_seq` now rounds every float to `display.precision` inside `pprint_thing`, but `pprint_thing` is also used by `raise_assert_detail` to build the `[left]/[right]` lines of testing assertion messages. Values differing below the display precision (e.g. 1.0 vs 1.000000001 with `check_exact=True`) will print identically, and the PR even loosens an existing test regex to accommodate it; the precision rounding should be opt-in for display only.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "python",
+    "evidence": {
+      "fix_url": "https://github.com/pandas-dev/pandas/pull/71989",
+      "fix_kind": "fix",
+      "quote": "Since 3.1.0 (#63890), floats inside sequences are printed with `display.precision`. `raise_assert_detail` formats the `[left]`/`[right]` lines with `pprint_thing`, so differences below that precision disappear from assertion messages",
+      "original_locations": [
+        {
+          "file": "pandas/io/formats/printing.py",
+          "lines": "133-143"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/pydantic/pydantic/pull/13573",
+    "repo": "pydantic/pydantic",
+    "number": 13573,
+    "title": "Optimize type lookup logic in core schema generation",
+    "golden": [
+      {
+        "comment": "In the bare-type dispatch table in `_generate_schema.py`, `collections.abc.MutableSequence` is mapped to `self._sequence_schema(Any)` rather than `self._list_schema(Any)` (as it was in LIST_TYPES before this refactor). Unparameterized `MutableSequence` fields then use an isinstance(Sequence) check, so a `str` is accepted and a `tuple` is not coerced to a list.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "python",
+    "evidence": {
+      "fix_url": "https://github.com/pydantic/pydantic/pull/13690",
+      "fix_kind": "fix",
+      "quote": "Unreleased regression from #13573 (\"Optimize type lookup logic in core schema generation\", b75fadb, 2026-08-03).",
+      "original_locations": [
+        {
+          "file": "pydantic/_internal/_generate_schema.py",
+          "lines": "375-375"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/pydantic/pydantic/pull/13714",
+    "repo": "pydantic/pydantic",
+    "number": 13714,
+    "title": "Reflect `str_min_length` and `str_max_length` config in the JSON schema",
+    "golden": [
+      {
+        "comment": "`GenerateJsonSchema.str_schema` now injects config-level `str_min_length`/`str_max_length` into every string schema. `decimal_schema()` builds its serialization string branch through `str_schema()`, so Decimal fields get minLength/maxLength constraints that validation never applies, and a model's own `model_dump(mode='json')` output can fail its schema.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "python",
+    "evidence": {
+      "fix_url": "https://github.com/pydantic/pydantic/pull/14254",
+      "fix_kind": "fix",
+      "quote": "Since #13714, `str_min_length` and `str_max_length` from the config end up in the `Decimal` JSON Schema, because `decimal_schema()` builds its string branch with `str_schema()`.",
+      "original_locations": [
+        {
+          "file": "pydantic/json_schema.py",
+          "lines": "801-807"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/apache/airflow/pull/72173",
+    "repo": "apache/airflow",
+    "number": 72173,
+    "title": "Reduce Iceberg snapshot watcher thread use",
+    "golden": [
+      {
+        "comment": "`IcebergTableSnapshotTrigger.run` now calls `await store.aget(...)` and `await store.aset(...)` on the asset state store, but the accessor available in the supported Airflow versions only has sync `get`/`set`. The first poll will raise AttributeError and the triggerer will crash-loop the watcher; the tests only pass because they replace the store with a MagicMock that has `aget`/`aset` assigned.",
+        "severity": "High"
+      }
+    ],
+    "language": "python",
+    "evidence": {
+      "fix_url": "https://github.com/apache/airflow/pull/72312",
+      "fix_kind": "fix",
+      "quote": "https://github.com/apache/airflow/pull/72173 moved the watermark read and write onto the store's `aget`/`aset`. Those accessors exist in no released Airflow.",
+      "original_locations": [
+        {
+          "file": "providers/apache/iceberg/src/airflow/providers/apache/iceberg/triggers/iceberg.py",
+          "lines": "135-135"
+        },
+        {
+          "file": "providers/apache/iceberg/src/airflow/providers/apache/iceberg/triggers/iceberg.py",
+          "lines": "161-161"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/apache/airflow/pull/57531",
+    "repo": "apache/airflow",
+    "number": 57531,
+    "title": "KubernetesPodTriggerer reads pod logs instead of KubernetesPodOperator",
+    "golden": [
+      {
+        "comment": "In KubernetesPodOperator.trigger_reentry (operators/pod.py) the `on_operator_resuming` callback invocation is deleted together with the `event[\"status\"] == \"running\"` re-defer branch, because it sat inside the `!= \"running\"` guard. The callback is a documented extension point, so user callbacks overriding it silently stop being called on resume; the PR also removes the test assertion for it instead of keeping the call.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "python",
+    "evidence": {
+      "fix_url": "https://github.com/apache/airflow/pull/76035",
+      "fix_kind": "fix",
+      "quote": "`on_operator_resuming` is documented as a supported callback, but it has had no call site since #57531: that change removed the `event[\"status\"] == \"running\"` re-defer branch from `trigger_reentry`, and the invocation sat inside the adjacent `event[\"status\"] != \"running\"` guard.",
+      "original_locations": [
+        {
+          "file": "providers/cncf/kubernetes/src/airflow/providers/cncf/kubernetes/operators/pod.py",
+          "lines": "899-905"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/containerd/containerd/pull/12821",
+    "repo": "containerd/containerd",
+    "number": 12821,
+    "title": "fix: propagate `context deadline exceeded` error properly",
+    "golden": [
+      {
+        "comment": "In shimTask.State (core/runtime/v2/shim.go) and getProcessState (plugins/services/tasks/local.go), returning the deadline error instead of falling back to an UNKNOWN state means a timeout is treated as if the task is gone. If a shim is briefly unresponsive (e.g. slow cleanup during Delete), Get will fail and List will omit that task, so clients and CRI lose visibility of a task that still exists.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "go",
+    "evidence": {
+      "fix_url": "https://github.com/containerd/containerd/pull/14488",
+      "fix_kind": "revert",
+      "quote": "Propagating State deadline errors causes Get to fail and List to omit tasks when a shim is temporarily unresponsive, such as during slow cleanup in Delete.",
+      "original_locations": [
+        {
+          "file": "core/runtime/v2/shim.go",
+          "lines": "838-840"
+        },
+        {
+          "file": "plugins/services/tasks/local.go",
+          "lines": "352-352"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/containerd/containerd/pull/13438",
+    "repo": "containerd/containerd",
+    "number": 13438,
+    "title": "remotes: close fetch reader immediately on EOF",
+    "golden": [
+      {
+        "comment": "Fetch in core/remotes/handlers.go now wraps the source in closeOnEOFReadSeeker, which closes the underlying reader at EOF and makes Seek return an error afterwards. content.Copy rewinds the source when the destination writer requests a retry (e.g. an upload retried after a 408), so any retry after the body was fully read will fail with 'seek on closed reader' instead of replaying the upload.",
+        "severity": "High"
+      }
+    ],
+    "language": "go",
+    "evidence": {
+      "fix_url": "https://github.com/containerd/containerd/pull/14194",
+      "fix_kind": "revert",
+      "quote": "Closing the source reader at EOF prevents `content.Copy` from rewinding it when the destination writer requests a retry, causing uploads to fail with `seek on closed reader`.",
+      "original_locations": [
+        {
+          "file": "core/remotes/handlers.go",
+          "lines": "175-186"
+        },
+        {
+          "file": "core/remotes/handlers.go",
+          "lines": "431-470"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/cli/cli/pull/12596",
+    "repo": "cli/cli",
+    "number": 12596,
+    "title": "fix: clarify scope error while creating issues for projects",
+    "golden": [
+      {
+        "comment": "handleResponse in api/client.go now replaces any GraphQL INSUFFICIENT_SCOPES error with a new fmt.Errorf message (\"your authentication token is missing required scopes ...\"). ProjectsV2IgnorableError in api/queries_projects_v2.go decides whether to skip project fields by substring-matching err.Error() against \"field requires one of the following scopes: ['read:project']\", so with the rewritten message it never matches and `gh pr view`/`gh issue view` fail for tokens lacking read:project instead of degrading gracefully.",
+        "severity": "High"
+      }
+    ],
+    "language": "go",
+    "evidence": {
+      "fix_url": "https://github.com/cli/cli/pull/12915",
+      "fix_kind": "revert",
+      "quote": "This PR introduced a change that adjusted the stringified error message returned in GQL response when there were missing scopes. However, that error message was interrogated by [`ProjectsV2IgnorableError`]",
+      "original_locations": [
+        {
+          "file": "api/client.go",
+          "lines": "180-189"
+        },
+        {
+          "file": "api/client.go",
+          "lines": "194-214"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/traefik/traefik/pull/12029",
+    "repo": "traefik/traefik",
+    "number": 12029,
+    "title": "Avoid allocations in readLoop by using sync.Pool",
+    "golden": [
+      {
+        "comment": "In pkg/udp/conn.go the pooled buffer is sent to the connection as buf[:n] and later returned with readBufferPool.Put(msg), so the pool receives a slice whose length is the previous datagram size rather than maxDatagramSize. The next readBufferPool.Get().([]byte) then returns a short buffer and ReadFrom truncates any larger UDP datagram.",
+        "severity": "High"
+      }
+    ],
+    "language": "go",
+    "evidence": {
+      "fix_url": "https://github.com/traefik/traefik/pull/12267",
+      "fix_kind": "revert",
+      "quote": "This pull request reverts the changes of https://github.com/traefik/traefik/pull/12029 as it seems to introduce a regression with UDP entrypoints.",
+      "original_locations": [
+        {
+          "file": "pkg/udp/conn.go",
+          "lines": "162-185"
+        },
+        {
+          "file": "pkg/udp/conn.go",
+          "lines": "266-273"
+        },
+        {
+          "file": "pkg/udp/conn.go",
+          "lines": "315-322"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/go-gitea/gitea/pull/35716",
+    "repo": "go-gitea/gitea",
+    "number": 35716,
+    "title": "Refactor legacy code, fix LFS auth bypass, fix symlink bypass (#35708)",
+    "golden": [
+      {
+        "comment": "writeAuthorizedStringForKey in models/asymkey/ssh_key_authorized_keys.go now calls ssh.ParseAuthorizedKey on key.Content for every key. regeneratePrincipalKeys in services/asymkey/ssh_key_authorized_principals.go routes KeyTypePrincipal entries through the same function, but a principal is a plain string, not a public key, so parsing always fails and WriteAuthorizedStringForValidKey silently swallows the error. Regenerating authorized_principals therefore writes an empty file and all principal-based SSH logins stop working.",
+        "severity": "High"
+      }
+    ],
+    "language": "go",
+    "evidence": {
+      "fix_url": "https://github.com/go-gitea/gitea/pull/36213",
+      "fix_kind": "fix",
+      "quote": "Commit ac6d38e4b7a0a565077229984a3720b2b6a0688b introduced a regression in writing of the authorized_principals file, resulting in an empty file.",
+      "original_locations": [
+        {
+          "file": "models/asymkey/ssh_key_authorized_keys.go",
+          "lines": "43-75"
+        },
+        {
+          "file": "services/asymkey/ssh_key_authorized_principals.go",
+          "lines": "90-93"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/prometheus/prometheus/pull/20169",
+    "repo": "prometheus/prometheus",
+    "number": 20169,
+    "title": "promql: enable unquoted UTF-8 names by default",
+    "golden": [
+      {
+        "comment": "The grouping_label rule in promql/parser/generated_parser.y now rejects any label containing a character that needs quoting via labelNameRequiresQuoting, which includes ':'. Existing queries and recording rules such as `sum by (a:b) (foo)` or `foo + on (a:b) bar` parsed before and will now fail with 'invalid label name for grouping', and the updated test even asserts that rejection.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "go",
+    "evidence": {
+      "fix_url": "https://github.com/prometheus/prometheus/pull/20335",
+      "fix_kind": "fix",
+      "quote": "Follow-up to #20169. Enabling unquoted UTF-8 names by default made `sum by (a:b) (foo)` and `foo + on (a:b) bar` fail with `invalid label name for grouping: \"a:b\"`. Both parsed before.",
+      "original_locations": [
+        {
+          "file": "promql/parser/generated_parser.y",
+          "lines": "426-432"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/trinodb/trino/pull/29501",
+    "repo": "trinodb/trino",
+    "number": 29501,
+    "title": "Avoid BigDecimal/BigInteger allocations in decimal bucket-hash",
+    "golden": [
+      {
+        "comment": "PartitionTransforms.hashShortDecimal/hashLongDecimal allocate one byte[] outside the lambda and reuse it for every row, with a comment claiming the Hasher is single-threaded per driver. The bucket function is shared by all drivers of a task, so concurrent drivers overwrite each other's scratch bytes and rows get hashed into the wrong bucket (silent wrong results in bucketed Iceberg decimal joins/writes under parallelism). Allocate the buffer per call or use a thread-confined one.",
+        "severity": "High"
+      }
+    ],
+    "language": "java",
+    "evidence": {
+      "fix_url": "https://github.com/trinodb/trino/pull/31476",
+      "fix_kind": "fix",
+      "quote": "Regression from #29501, first released in 482",
+      "original_locations": [
+        {
+          "file": "plugin/trino-iceberg/src/main/java/io/trino/plugin/iceberg/PartitionTransforms.java",
+          "lines": "660-682"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/apache/kafka/pull/20403",
+    "repo": "apache/kafka",
+    "number": 20403,
+    "title": "KAFKA-19638: Set dummy ProcessorRecordContext for processor init",
+    "golden": [
+      {
+        "comment": "TopologyTestDriver.getStateStore now unconditionally installs a dummy ProcessorRecordContext (null topic, -1 offset/partition, timestamp 0) on the task's processor context on every lookup and never restores it. If a store handle is fetched while a record's context is active (interleaved interactive query or a test seam resolving the store mid-processing), the in-flight record's metadata is wiped, and later direct store writes get timestamp 0. Only set the dummy context when none exists yet.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "java",
+    "evidence": {
+      "fix_url": "https://github.com/apache/kafka/pull/22590",
+      "fix_kind": "fix",
+      "quote": "regression introduced by KAFKA-19638 (#20403)",
+      "original_locations": [
+        {
+          "file": "streams/test-utils/src/main/java/org/apache/kafka/streams/TopologyTestDriver.java",
+          "lines": "919-925"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/elastic/elasticsearch/pull/147504",
+    "repo": "elastic/elasticsearch",
+    "number": 147504,
+    "title": "DenseVectorQuery: lazy filter eval; use bulk scorer for *_flat vector indices",
+    "golden": [
+      {
+        "comment": "DenseVectorBulkScorer.score in DenseVectorQuery ignores the return value of scorer.iterator().advance(min) and goes on to call nextDocsAndScores even if the vector iterator is already exhausted. For a filtered exact kNN search where the filter is served as a cached bit set (higher cost, so ConjunctionDISI leaves it un-advanced) and matches only docs without a vector value, the vector iterator hits NO_MORE_DOCS while the filter iterator is still at -1, and the bulk() conjunction then throws 'Sub-iterators of ConjunctionDISI are not on the same document!'. Check for NO_MORE_DOCS after advance and return early.",
+        "severity": "High"
+      }
+    ],
+    "language": "java",
+    "evidence": {
+      "fix_url": "https://github.com/elastic/elasticsearch/pull/160540",
+      "fix_kind": "fix",
+      "quote": "This was introduced in https://github.com/elastic/elasticsearch/pull/147504",
+      "original_locations": [
+        {
+          "file": "server/src/main/java/org/elasticsearch/search/vectors/DenseVectorQuery.java",
+          "lines": "341-362"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/apache/druid/pull/18259",
+    "repo": "apache/druid",
+    "number": 18259,
+    "title": "Upgrade pac4j extension",
+    "golden": [
+      {
+        "comment": "In Pac4jFilter.doFilter the AuthenticationResult is built with a null context (new AuthenticationResult(uid, authorizerName, name, null)), whereas the previous pac4j integration stored the user profile in the context under 'profile'. After this upgrade, any authorizer that relies on OIDC claims or group attributes from the AuthenticationResult context gets nothing, silently breaking attribute-based authorization for existing deployments. Populate the context from the pac4j profile.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "java",
+    "evidence": {
+      "fix_url": "https://github.com/apache/druid/pull/20222",
+      "fix_kind": "fix",
+      "quote": "PR #18259 (pac4j extension upgrade) dropped the `AuthenticationResult` context by passing `null` when building the result in `Pac4jFilter`.",
+      "original_locations": [
+        {
+          "file": "extensions-core/druid-pac4j/src/main/java/org/apache/druid/security/pac4j/Pac4jFilter.java",
+          "lines": "108-116"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/apache/pulsar/pull/24551",
+    "repo": "apache/pulsar",
+    "number": 24551,
+    "title": "[fix][broker] Fix Broker OOM due to too many waiting cursors and reuse a recycled OpReadEntry incorrectly",
+    "golden": [
+      {
+        "comment": "ManagedCursorImpl.cancelPendingReadRequest handles the 'DelayCheckForNewEntriesTask is RUNNING but not done' case (Case 5) by calling cancelPendingReadRequest() again. The task runs checkForNewEntries while holding pendingReadOpMutex on the same thread and only moves to DONE afterwards, so a cancel reached from within that path sees RUNNING forever. The synchronized monitor is reentrant, so the method recurses until StackOverflowError instead of letting the task finish; use a non-recursive design.",
+        "severity": "High"
+      }
+    ],
+    "language": "java",
+    "evidence": {
+      "fix_url": "https://github.com/apache/pulsar/pull/24569",
+      "fix_kind": "fix",
+      "quote": "The test `ReplicatorTest.testCloseReplicatorStartProducer` was consistently failing due to critical issues introduced in PR #24551.",
+      "original_locations": [
+        {
+          "file": "managed-ledger/src/main/java/org/apache/bookkeeper/mledger/impl/ManagedCursorImpl.java",
+          "lines": "1072-1100"
+        },
+        {
+          "file": "managed-ledger/src/main/java/org/apache/bookkeeper/mledger/impl/ManagedCursorImpl.java",
+          "lines": "1181-1228"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/rails/rails/pull/59053",
+    "repo": "rails/rails",
+    "number": 59053,
+    "title": "Skip static file candidates whose top-level entry doesn't exist in public/",
+    "golden": [
+      {
+        "comment": "In ActionDispatch::Static::FileHandler#each_candidate_filepath, the new top_level_exists probe uses File.exist? on the bare name (e.g. app.js, page, or index), so a request for a file that exists only precompressed (public/app.js.gz, page.html.gz, index.html.gz) is never yielded as a candidate and falls through to the app instead of being served gzip/br. This triggers for every top-level precompressed-only asset when the client sends Accept-Encoding, which previously worked.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "ruby",
+    "evidence": {
+      "fix_url": "https://github.com/rails/rails/pull/59725",
+      "fix_kind": "fix",
+      "quote": "#59053 (unreleased) stopped `ActionDispatch::Static` from serving top-level files that exist only precompressed.",
+      "original_locations": [
+        {
+          "file": "actionpack/lib/action_dispatch/middleware/static.rb",
+          "lines": "183-220"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/rails/rails/pull/59118",
+    "repo": "rails/rails",
+    "number": 59118,
+    "title": "Render collection items into one buffer when nothing needs them apart",
+    "golden": [
+      {
+        "comment": "The new early return in CollectionRenderer#render_collection (layout.nil? && !will_cache?) routes to collection_into_buffer, bypassing collection_with_template and build_rendered_collection. Subclasses that override those hooks to give each item its own scope and merge results (e.g. Jbuilder's collection renderer for json.array! with partial:) will have every item written into one shared scope, producing wrong output. The fast path should be limited to the base renderer class.",
+        "severity": "High"
+      }
+    ],
+    "language": "ruby",
+    "evidence": {
+      "fix_url": "https://github.com/rails/rails/pull/59155",
+      "fix_kind": "fix",
+      "quote": "This Pull Request has been created because #59118 broke Jbuilder's collection partials.",
+      "original_locations": [
+        {
+          "file": "actionview/lib/action_view/renderer/collection_renderer.rb",
+          "lines": "169-192"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/mastodon/mastodon/pull/36971",
+    "repo": "mastodon/mastodon",
+    "number": 36971,
+    "title": "Increase HTTP read timeout for expensive S3 batch delete operation",
+    "golden": [
+      {
+        "comment": "In AttachmentBatch#remove_files, the per-request options hash (http_read_timeout) is passed as a second positional argument to bucket.delete_objects. Aws::S3::Bucket#delete_objects takes a single options hash (only Aws::S3::Client#delete_objects accepts request options separately), so this raises ArgumentError and every S3-backed media batch deletion fails (and is retried by the rescue block).",
+        "severity": "High"
+      }
+    ],
+    "language": "ruby",
+    "evidence": {
+      "fix_url": "https://github.com/mastodon/mastodon/pull/36996",
+      "fix_kind": "revert",
+      "quote": "Supersedes #36994 and fix an issue introduced in https://github.com/mastodon/mastodon/pull/36971",
+      "original_locations": [
+        {
+          "file": "app/lib/attachment_batch.rb",
+          "lines": "112-130"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/mastodon/mastodon/pull/36087",
+    "repo": "mastodon/mastodon",
+    "number": 36087,
+    "title": "Fix accpeted quotes sometimes not generating notifications",
+    "golden": [
+      {
+        "comment": "Removing notify_quoted_account! from FanOutOnWriteService and notifying only from ActivityPub::Activity::QuoteRequest#accept_quote_request! means quotes that never go through a QuoteRequest, such as a local user quoting another local user's post (auto-accepted), no longer generate a Quote notification for the quoted account. The fan-out notification should be kept for the local/already-accepted case.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "ruby",
+    "evidence": {
+      "fix_url": "https://github.com/mastodon/mastodon/pull/36091",
+      "fix_kind": "fix",
+      "quote": "Fix regression from #36087 which broke local quote notifications",
+      "original_locations": [
+        {
+          "file": "app/services/fan_out_on_write_service.rb",
+          "lines": "40-75"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/n8n-io/n8n/pull/27280",
+    "repo": "n8n-io/n8n",
+    "number": 27280,
+    "title": "refactor(editor): Migrate canvas operations to workflowDocumentStore connections (no-changelog)",
+    "golden": [
+      {
+        "comment": "In useCanvasOperations.initializeWorkspace, setNodes is called on the directly-returned initializedDocumentStore, but the new setConnections call goes through the computed workflowDocumentStore?.value?. That computed is keyed on the current workflowId, which is empty after resetWorkspace(), so it is undefined and the optional chain silently skips setConnections: workflows initialize with nodes but no connections (e.g. the workflow preview, where AI agent sub-node connections are lost). Use initializedDocumentStore for both calls.",
+        "severity": "High"
+      }
+    ],
+    "language": "typescript",
+    "evidence": {
+      "fix_url": "https://github.com/n8n-io/n8n/pull/27552",
+      "fix_kind": "fix",
+      "quote": "**Regression introduced in:** #27280",
+      "original_locations": [
+        {
+          "file": "packages/frontend/editor-ui/src/app/composables/useCanvasOperations.ts",
+          "lines": "2344-2349"
+        }
+      ]
+    }
+  }
+]

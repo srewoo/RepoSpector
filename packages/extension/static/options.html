@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RepoSpector settings</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <h1>RepoSpector settings</h1>
+  <p id="status" role="status" class="muted"></p>
+  <section aria-labelledby="hosts-h">
+    <h2 id="hosts-h">Git hosts</h2>
+    <p class="muted">RepoSpector can read pages and APIs only on hosts you add here. Chrome asks you to allow each one.</p>
+    <ul id="hosts" class="rows"></ul>
+    <form id="add">
+      <label for="kind">Type</label>
+      <select id="kind" name="kind">
+        <option value="github">GitHub (github.com or Enterprise)</option>
+        <option value="gitlab">GitLab (gitlab.com or self-managed)</option>
+      </select>
+      <label for="origin">Host address</label>
+      <input id="origin" name="origin" placeholder="https://github.com" required autocomplete="off" inputmode="url">
+      <div class="actions"><button type="submit" class="primary">Add host</button></div>
+    </form>
+  </section>
+  <section aria-labelledby="model-h">
+    <h2 id="model-h">Model</h2>
+    <div id="model"></div>
+  </section>
+  <section aria-labelledby="keys-h">
+    <h2 id="keys-h">Keys and access tokens</h2>
+    <div id="keys"></div>
+  </section>
+  <section aria-labelledby="feedback-h">
+    <h2 id="feedback-h">Feedback</h2>
+    <div id="feedback"></div>
+  </section>
+  <section aria-labelledby="meaning-h">
+    <h2 id="meaning-h">Meaning-based matching</h2>
+    <div id="meaning"></div>
+  </section>
+  <section aria-labelledby="index-h">
+    <h2 id="index-h">Saved code index</h2>
+    <div id="saved-index"></div>
+  </section>
+  <section aria-labelledby="local-h">
+    <h2 id="local-h">Local mode</h2>
+    <div id="local-mode"></div>
+  </section>
+  <footer class="links muted"><a href="help.html" target="_blank">Help</a> · <a href="privacy.html" target="_blank">Privacy policy</a></footer>
+  <script type="module" src="options.js"></script>
+</body>
+</html>

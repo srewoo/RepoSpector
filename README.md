@@ -1,216 +1,67 @@
-# 🛡️ RepoSpector — AI Code Review for GitHub & GitLab
+# RepoSpector
 
-RepoSpector is a Manifest V3 Chrome extension that brings an AI reviewer to your
-pull/merge requests. It reviews diffs, chats with your codebase, runs static
-analysis, and generates unit tests — using your own API key for any of several
-LLM providers, with local embeddings that keep indexing on your machine.
+Open-source AI code review for GitHub and GitLab. See `RepoSpector.md` for the product and technical spec, and `PLAN.md` for build status.
 
-> **Note:** RepoSpector began life as a unit-test generator. It is now a full
-> code-review assistant; test generation is one feature among several.
+This repo currently contains the foundation: the shared review core, the eval harness, and a local MCP server that runs reviews on your own Claude Code or Codex session with no API key. The Chrome extension is not built yet.
 
-## ✨ Features
+## Layout
 
-### PR / MR review
-- **Two-phase review pipeline** — skip-rule gating (docs-only, draft, oversized,
-  failing pipeline) → diff chunking, with chunks reviewed in parallel
-  (`chunkConcurrency`, default 3; results merged in chunk order) → per-file deep
-  LLM review → static-analysis merge → assigned-hunks normalization → a
-  canonical verdict report.
-- **Review-quality pipeline** — multi-finder recall pass (including history,
-  code-comment, rules-file and prior-PR-comment lenses) → citation enforcement →
-  deterministic evidence gates → an independent per-finding **rubric scorer**
-  (0-100; only findings scoring ≥ `minRubricScore`, default 80, are reported) →
-  fix recommendation. Findings the scorer could not score are listed under
-  "Not verified" and never posted inline, and a review with any "Not verified"
-  finding is reported as partial — it never approves. Lenses and checks that
-  could not run (including CI checks the token could not read) are listed
-  with the reason. The LLM refuter (`llmRefutation`) and the 1-10 value scorer
-  (`valueScoring`) remain available, off by default. Runs on every PR regardless of size.
-- **Incremental re-review on push** — after the first review, a new push only
-  re-reads the files whose diff actually changed; findings on untouched files
-  are carried forward.
-  **Upgrade note:** findings carried forward from a review made before the
-  rubric scorer shipped have no rubric score, so they show as "Not verified"
-  and non-blocking until their files are re-reviewed. The PR page polls for new commits and offers a
-  re-review (or runs one automatically when auto-review is on).
-- **Inline findings posted to the PR** — comments are validated against the
-  diff before posting, deduplicated per line, and carry rationale, a rule
-  citation, evidence, a full-SHA permalink to the reviewed code, and a
-  one-click ```suggestion patch where available. Posting re-checks the PR first
-  and refuses if it has been closed, merged or returned to draft since the
-  review. Findings the rubric check could not score are listed in the summary
-  under "Not verified" and never posted inline.
-- **Persistent sessions** — reviews, threads, and metrics are stored in
-  IndexedDB with a 30-day retention window.
-- **Adaptive learning** — records which findings you act on to tune future noise.
+| Path | What it is |
+| --- | --- |
+| `packages/core` | Finding and verdict schemas, fingerprints, diff parser, evidence check, judge, risk tier, specialist selection, prompts, run state machine. No I/O; runs in Node and the browser. |
+| `packages/eval` | Golden-case format and a scorer for precision, recall and F1. |
+| `packages/mcp` | Local MCP server (`repospector-mcp`) and the Claude Code plugin in `packages/mcp/plugin`. |
 
-### Codebase chat with RAG
-- **Hybrid retrieval** combining a BM25 keyword index and an HNSW vector index.
-- **Local embeddings** via `@xenova/transformers` running in an MV3 offscreen
-  document — model weights and the ONNX WASM runtime are bundled, so indexing
-  works offline and nothing leaves your machine.
-- **Incremental indexing** — a hash-diff manifest re-embeds only changed chunks.
+## Develop
 
-### Static analysis
-- ESLint and Semgrep-style pattern checks, secret scanning, dependency
-  vulnerability checks against [OSV](https://osv.dev), and end-of-life detection
-  via [endoflife.date](https://endoflife.date).
-- A confidence scorer fuses overlapping findings and suppresses low-signal noise.
-
-### Test generation
-- Generates Unit, Integration, E2E, or comprehensive tests with coverage
-  tracking, edge-case analysis, and syntax/quality gates.
-- **PR-scoped generation** — one click writes tests for the exported symbols a
-  PR adds without coverage, appending to the repository's existing test file
-  when one exists and using real call sites from the code graph for
-  arguments. Output is gated by syntax and quality validators.
-
-### Code knowledge graph
-- Tree-sitter parsing (also in the offscreen document), symbol extraction, a
-  call graph, `TESTED_BY` coverage edges, and change-impact analysis.
-  Change-impact analysis is a review input in its own right: see [graph-impact findings](docs/core-abilities/graph-impact-findings.md).
-
-### Multi-provider, bring-your-own-key
-- OpenAI, Anthropic, Google, Groq, Mistral, HuggingFace, **OpenRouter**,
-  **NVIDIA NIM**, **AWS Bedrock**, and local models (Ollama). Keys are stored
-  encrypted (AES-GCM with PBKDF2 key derivation).
-- **AWS Bedrock** authenticates with SigV4-signed IAM credentials rather than a
-  key, and reaches the whole catalogue through the Converse API — Anthropic,
-  Nova, Llama, Mistral, Cohere and the rest — with the model list read live from
-  your account. See [docs/core-abilities/bedrock-provider.md](docs/core-abilities/bedrock-provider.md).
-- **OpenRouter** and **NVIDIA NIM** are gateways: one key in front of models
-  from every vendor, over the OpenAI wire format, with the list read live from
-  the gateway. See [docs/core-abilities/gateway-providers.md](docs/core-abilities/gateway-providers.md).
-
-## 🚀 Installation
-
-### From source (development)
-
-```bash
-# Replace with your fork/clone URL.
-git clone https://github.com/<your-org>/repospector.git
-cd repospector
+```sh
 npm install
-npm run build      # builds CSS + the isolated extension bundle into dist/
+npm run check   # typecheck + tests
+npm run build
 ```
 
-Then load it in Chrome:
-1. Open `chrome://extensions/`
-2. Enable **Developer mode**
-3. Click **Load unpacked** and select the `dist/` directory
+Node 22 or later.
 
-### Configure a provider
+## Use the MCP server locally
 
-1. Click the RepoSpector icon, then the settings gear.
-2. Choose a provider and paste your API key (e.g. OpenAI keys start with `sk-`).
-   For local models, point at your Ollama server (`http://localhost:11434`).
-3. Save. Keys are encrypted before they touch storage.
-
-## 📖 Usage
-
-- **Review a PR/MR:** open a pull/merge request on GitHub or GitLab and use the
-  RepoSpector panel to run a review. Findings appear inline and in the panel;
-  open a thread on any finding to ask for an explanation or a fix.
-- **Chat with the codebase:** index a repository, then ask questions — retrieval
-  pulls the most relevant code (vector + keyword) into the prompt.
-- **Static analysis:** run it standalone or as part of a PR review; results are
-  merged and confidence-scored alongside the LLM findings.
-- **Generate tests:** select code or a file and choose a test type and context
-  level (Minimal / Smart / Full), or, on a PR review, use the **Generate
-  Tests** quick action (or, on a missing-test finding, its **Write Test**
-  button) to generate tests for the exported symbols that PR added without
-  coverage.
-
-### Supported platforms
-
-| Platform | PR/MR review | Post review back | Code extraction & chat |
-|---|---|---|---|
-| GitHub (github.com) | ✅ | ✅ | ✅ |
-| GitLab (gitlab.com) | ✅ | ✅ | ✅ |
-| Bitbucket, Azure DevOps, SourceForge, Codeberg, Gitea, SourceHut, Pagure | ✗ | ✗ | ✅ |
-
-**PR/MR review and comment posting are GitHub.com and GitLab.com only.** The
-other origins appear in `src/manifest.json` because the content script can read
-code from them for chat and test generation — `parsePullRequestUrl` recognises
-only GitHub and GitLab, and `postReview` throws for anything else.
-
-GitHub Enterprise and self-managed GitLab are **not** supported: the API base
-URLs are fixed to `api.github.com` and `gitlab.com/api/v4`, and the manifest
-requests no enterprise host permissions.
-
-## 🏗️ Architecture
-
-```
-┌─ popup (React) ──────────────┐        ┌─ content script ─────────────┐
-│ PR review UI, chat, settings │◀──────▶│ diff extraction + inline     │
-└──────────────┬───────────────┘        │ overlays on git platforms    │
-               │ chrome.runtime          └──────────────┬───────────────┘
-               ▼ messages                                │
-┌─ background service worker ──────────────────────────▼─┐
-│ messageRouter.dispatch → per-domain handlers            │
-│ review · chat/RAG · static analysis · test-gen · docs   │
-└──────────────┬───────────────────────────┬─────────────┘
-               │                            │ (WASM/ML can't run in a SW)
-               ▼                            ▼
-┌─ services ───────────────┐   ┌─ offscreen document ─────┐
-│ ReviewOrchestrator,      │   │ transformers.js embeddings│
-│ MultiPassReviewEngine,   │   │ + tree-sitter parsing     │
-│ RAG (BM25 + HNSW), ...   │   └───────────────────────────┘
-└──────────────────────────┘
+```sh
+npm run build
+claude mcp add repospector -- node /absolute/path/to/packages/mcp/dist/index.js
 ```
 
-- **`@repospector/review-core`** (`packages/review-core`) holds the shared review
-  orchestration (schema, skip rules, chunker, normalizer, orchestrator) so the
-  extension and the backend stay in sync.
-- **Aegis backend** (`apps/api`) is an optional Express + Postgres + Redis/BullMQ
-  service for what an extension can't do — real `git clone`, cross-repo analysis,
-  webhook-triggered reviews, and metered billing. It is disabled in the shipped
-  extension; see `docs/adr/0001-backend-service.md`.
+The server reviews the git repo it starts in (or `--repo <dir>`). Then load the skill in `packages/mcp/plugin/skills/repospector` and run `/repospector`.
 
-## 🧪 Testing
+Version 0.7.0 is not on npm yet. The npm name `repospector-mcp` already holds the previous codebase (0.6.0), so the plugin pins `@0.7.0`, which fails until this version is published, rather than silently running the old one. `@repospector/core` is also unpublished; publishing needs either that package or a bundled build.
 
-```bash
-npm test              # Jest unit + integration suite
-npm run test:coverage # with coverage
-npm run lint          # ESLint
-npm run validate      # lint + test
+## How a review runs
+
+1. `plan_review` diffs head against base (by default your working tree, including untracked files, against the merge-base with main). It skips lockfiles, generated, binary and deleted files, rates the risk, and picks specialists.
+2. Each specialist subagent calls `submit_findings`. While reviewing it can call `get_context(runId, symbol)` to see where a function, class or field is defined and used at the reviewed revision; `plan_review` lists the `changedSymbols` worth checking. Candidate files are found by text search and then parsed with tree-sitter (Python, Go, Java, Ruby, JavaScript, TypeScript, TSX), so definitions, calls and the calling function are exact; other languages fall back to text matches marked `kind: "text"`. It is a tool the agent calls, not context pushed into every prompt: on Martian's held-out PRs, pushing caller context into the review prompt did not raise recall. A finding is rejected if its location or evidence points at lines that don't exist.
+3. `verify_batch` closes review and returns each finding's claim and cited code for a fresh verifier. The specialist's reasoning and confidence are withheld so the verifier checks the code, not the argument.
+4. `finalize` refuses unless every finding has exactly one verdict citing real code. Refuted and low-confidence findings are kept and labeled `suspected`, after the `verified` ones; only duplicates are removed. On Martian's held-out PRs, deleting refuted findings cost more real bugs than it saved noise.
+
+**Code graph.** `plan_review` starts building a per-commit code graph in the background (definitions, calls with their calling function, and extends/implements links, parsed with tree-sitter). It is stored locally in SQLite under `$REPOSPECTOR_CACHE_DIR` (default `~/.cache/repospector`), keyed by file content, so later commits only re-parse changed files. Nothing in it leaves your machine. It needs Node 22.13 or later for `node:sqlite`; on older Node, `get_context` parses matching files on demand instead. Delete the cache directory at any time to reset it.
+
+5. `post_review` (optional, on request) puts findings on a GitHub pull request or GitLab merge request as drafts: a pending review on GitHub, draft notes on GitLab. Only you see them until you publish. It uses your existing `gh` or `glab` login (GitHub Enterprise and self-managed GitLab work via the URL's host); the server stores no token. Without a `gh`/`glab` login it posts nothing and returns the draft (`handoff`) for your agent to post with a GitHub or GitLab MCP server you have connected, with rules it must follow: confirm with you, check the PR head and existing markers, never submit or publish (`via`: `auto` default, `cli`, `agent`). It previews by default (`dryRun`), refuses if the PR head is not the reviewed commit, puts findings outside the changed lines in the review summary, skips findings already posted (hidden fingerprint marker), and defuses @mentions and secrets in the text.
+
+6. `record_feedback` stores your reaction to a finding (accepted or rejected, with a reason) on this machine. On later reviews, a finding you rejected, or one similar to 3 or more rejected comments in the same category, is shown as `suspected` with the reason; it is never hidden. `export_feedback` merges your reactions into `.RepoSpector/feedback.jsonl` so the team shares them by committing the file; every review reads that file too. Similarity is word overlap for now; the spec's on-device embeddings can replace it behind the same function.
+
+What the server can and cannot guarantee: it enforces order and completeness. It cannot prove the verifier ran in a fresh context; that is up to the client following the skill.
+
+Confidence is labeled "uncalibrated" until calibration tables are measured on the golden set.
+
+## Score a reviewer
+
+```sh
+node packages/eval/dist/cli.js score --cases cases.json --predictions predictions.json [--tolerance 5] [--split heldout] [--json]
 ```
 
-Tests exercise real modules (see `test/unit/` and `test/integration/`). The
-harness (`test/setup.js`) provides Chrome API mocks plus a real WebCrypto and
-URL implementation so encryption and URL-parsing code runs for real.
+`predictions.json` maps case id to an array of `{ file, startLine, endLine, claim }`. A prediction matches a labeled issue in the same file within the line tolerance, one to one. Line matching is deterministic but stricter than an LLM judge: a correct finding placed on a different line counts as a miss. Use it to compare setups on the same cases, not as a substitute for Martian's judged scores.
 
-## 🔧 Development
+## Known gaps
 
-```
-src/
-├── background/       # service worker: index.js + messageRouter.js
-├── content/          # content script, diff overlays, code extraction
-├── offscreen/        # WASM/ML host (embeddings + tree-sitter)
-├── popup/            # React UI (components, hooks)
-├── services/         # review, RAG, static analysis, graph, LLM, storage
-├── utils/            # sanitizer, chunking, diff parser, languageMap, prompts
-└── manifest.json
-packages/review-core/ # shared review orchestration (extension + backend)
-apps/api/             # Aegis backend (optional, disabled in the extension)
-```
-
-Build: `npm run build` runs `build:css` then `build-isolated.js` to produce
-`dist/`. `npm run package` zips `dist/` for the Chrome Web Store.
-
-## 🔒 Security
-
-- API keys and tokens are encrypted at rest (AES-GCM + PBKDF2).
-- Host permissions are limited to the supported git platforms, the configured
-  LLM provider endpoints, OSV, and endoflife.date; web-accessible resources are
-  scoped to the git-platform origins rather than all URLs.
-- Local embeddings avoid sending your code to a third-party embedding service.
-
-## 📄 License
-
-See `LICENSE`.
-
----
-
-**RepoSpector** — AI code review, codebase chat, static analysis, and test
-generation for GitHub & GitLab.
+- The golden sets are small (Martian's 50 PRs, 30 regression cases); gains under ~5 recall points cannot be resolved yet.
+- The feedback filter matches by word overlap; the embedding model in the spec is not built yet.
+- Runs live in memory and are lost when the server restarts.
+- The Chrome extension (`packages/extension`) is not yet on the Chrome Web Store, and has not posted to a real pull request yet.
+- The extension's local mode needs `repospector-mcp` 0.7.0, which is not on npm yet (npm has the old 0.6.0). Until it is published, register the host from a checkout: `node packages/mcp/dist/index.js native install --extension-id <id> --repo <path>`.

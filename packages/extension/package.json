@@ -1,0 +1,26 @@
+{
+  "name": "@repospector/extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.6.0",
+    "@huggingface/tokenizers": "0.2.0",
+    "@repospector/core": "0.1.0",
+    "@vscode/tree-sitter-wasm": "0.3.1",
+    "onnxruntime-web": "1.31.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  },
+  "exports": {
+    "./engine": {
+      "types": "./dist/tsc/pipeline/engine.d.ts",
+      "default": "./dist/tsc/pipeline/engine.js"
+    }
+  }
+}

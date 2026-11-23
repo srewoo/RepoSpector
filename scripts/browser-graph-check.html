@@ -1,0 +1,34 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>RepoSpector graph: browser check</title>
+<!-- Serve the repo root over http (not file://), then open /scripts/browser-graph-check.html. -->
+<script src="/node_modules/@vscode/tree-sitter-wasm/wasm/tree-sitter.js"></script>
+<pre id="out">running…</pre>
+<script type="module">
+  import { createExtractor } from '/packages/core/dist/graph/extract.js';
+  const WASM = '/node_modules/@vscode/tree-sitter-wasm/wasm/';
+  const out = document.getElementById('out');
+  try {
+    const ts = window.Parser; // UMD global: { Parser, Language, Query }
+    await ts.Parser.init({ locateFile: (f) => WASM + f });
+    // In a browser, Language.load takes bytes; fetch them so it works the same in an extension.
+    const ex = createExtractor(ts, async (f) => new Uint8Array(await (await fetch(WASM + f)).arrayBuffer()));
+    const samples = {
+      'a.py': 'class Svc(Base):\n    def run(self):\n        return helper()\n',
+      'a.go': 'package a\ntype S struct{ Base }\nfunc (s *S) Get() error { return fetch() }\n',
+      'A.java': 'class A extends B { int f() { return g(); } }\n',
+      'a.rb': 'class T < Base\n  def ids\n    scope_for(1)\n  end\nend\n',
+      'a.tsx': 'class Q extends React.Component {}\nexport function Page() { return <Dialog onClose={close} />; }\n',
+    };
+    const result = {};
+    for (const [path, src] of Object.entries(samples)) {
+      const s = await ex.extractSymbols(path, src);
+      result[path] = { defs: s.defs.map((d) => `${d.kind} ${d.name}`), calls: s.calls.map((c) => `${c.name}<${c.caller ?? '-'}`), inherits: s.inherits.map((i) => `${i.child}<${i.base}`) };
+    }
+    out.textContent = 'OK ' + JSON.stringify(result);
+    console.log('GRAPH_CHECK_OK', JSON.stringify(result));
+  } catch (e) {
+    out.textContent = 'FAIL ' + e;
+    console.error('GRAPH_CHECK_FAIL', String(e));
+  }
+</script>

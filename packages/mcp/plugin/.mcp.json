@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "repospector": { "command": "npx", "args": ["-y", "repospector-mcp@0.7.0"] }
+  }
+}

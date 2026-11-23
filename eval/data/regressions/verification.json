@@ -1,0 +1,219 @@
+[
+  {
+    "url": "https://github.com/vercel/next.js/pull/97821",
+    "language": "typescript",
+    "verdict": "drop",
+    "reason": "Revert confirms cause, but the defect depends on deep Next.js adapter semantics (seeded fallback placeholders' short lifetime drives regeneration) and was only surfaced by a Vercel deploy-only e2e test; the PR deliberately recorded the lifetime as a design choice that maintainers later redesigned. Not fairly detectable from the diff.",
+    "proposed_comment": "Cache lifetime stamped onto blocking-route fallback entries: in fallbackCacheControl (build/index.ts) and handleAppMeta (adapter/build-complete.ts), the manifest now records fallbackRevalidate/fallbackExpire for blocking PPR routes (fallback: null), and handleAppMeta copies that lifetime into the initialExpiration/initialRevalidate of the segment and RSC-template fallback entries. Those entries are placeholders whose missing/short lifetime is what triggers regeneration into the real specialized shell, so giving them a long lifetime makes blocking routes serve the placeholder as static content and the app shell for a non-prerendered param never arrives."
+  },
+  {
+    "url": "https://github.com/vercel/next.js/pull/96301",
+    "language": "typescript",
+    "verdict": "keep",
+    "reason": "Fix PR quote verbatim; diff adds block(VipsForeignLoad)+unblock allowlist without VipsForeignLoadSvg in getSharp. A reviewer can see SVG missing given detectContentType returns SVG. 138 lines, merged 2026-07-28.",
+    "proposed_comment": "getSharp() in image-optimizer.ts blocks every VipsForeignLoad operation and then unblocks only an allowlist of Heif/Jpeg/Nsgif/Png/Tiff/Webp loaders; SVG is missing. Because sharp's block list is process-global and permanent, after the first /_next/image optimization any later Sharp SVG input (e.g. ImageResponse/next/og rasterizing through Sharp) fails with an unsupported-format error and crashes the response."
+  },
+  {
+    "url": "https://github.com/vercel/next.js/pull/94703",
+    "language": "typescript",
+    "verdict": "keep",
+    "reason": "Fix quote verbatim; diff adds cleaned.delete(...) on HeadersAdapter.from result which does not copy, and the added comment wrongly claims the raw headers are unaffected. Mutation visible in diff.",
+    "proposed_comment": "In getHeaders (request-store.ts) the new cleaned.delete(NEXT_REQUEST_ID_HEADER / NEXT_HTML_REQUEST_ID_HEADER) calls assume `cleaned` is a copy, but HeadersAdapter.from returns an existing Headers instance unchanged, so the deletes mutate the shared request headers. The server later reads those request-id headers from the raw request (dev debug channel), so e.g. rendering a redirect target after a server action in dev loses them and breaks the channel."
+  },
+  {
+    "url": "https://github.com/microsoft/vscode/pull/287050",
+    "language": "typescript",
+    "verdict": "correct",
+    "reason": "Fix confirms regressions. First defect (scroll handler stops decrementing scrollDisabledCount but other += 1 sites remain untimed) is in the diff. The second (#isScrolling reset in scrollTo early return) is a merge leftover not in the diff's lines, so the bundled comment is trimmed to the main defect.",
+    "proposed_comment": "Markdown preview scroll sync: the scroll handler no longer decrements scrollDisabledCount and only the onUpdateView path was switched to the 200ms timer reset, while the initial-load, fragment/line-reveal and resize paths still do `scrollDisabledCount += 1`. After page load the counter stays at 1 and blocks all preview-to-editor sync until something else resets it. In preview.ts, the early-return guard in scrollTo() also still resets #isScrolling, letting editor scroll events re-trigger forward sync mid reverse-sync (editor jumps)."
+  },
+  {
+    "url": "https://github.com/microsoft/vscode/pull/302508",
+    "language": "typescript",
+    "verdict": "keep",
+    "reason": "Fix quote verbatim; diff adds early return on !contribution?.autoAttachReferences where contribution is undefined when no _lockedAgent/contribution, disabling auto-attach for default chats. Clear, in-diff bug.",
+    "proposed_comment": "ChatWidget._autoAttachInstructions now returns early when `!contribution?.autoAttachReferences`, but `contribution` is undefined for every chat session that has no chatSessions extension-point contribution (including the default local chat), so instruction, skill, agent and slash-command auto-attachment is silently disabled for normal chats. The check needs to distinguish no contribution (keep enabled) from a contribution that sets the flag false."
+  },
+  {
+    "url": "https://github.com/n8n-io/n8n/pull/28973",
+    "language": "typescript",
+    "verdict": "keep",
+    "reason": "Fix PR says 'Introduced by #28973' and explains ObservableObject flag reset from a second Workflow over the same staticData; the diff passes staticData into the new contextWorkflow despite its own comment saying no staticData loading. Requires reading ObservableObject but feasible with repo access.",
+    "proposed_comment": "In WorkflowRunner.run, the new 'lightweight' contextWorkflow is built with `staticData: data.workflowData.staticData`, i.e. a second Workflow wrapped around the same static-data object the webhook just wrote through its own Workflow. Creating the second ObservableObject resets the top-level __dataChanged flag the caller checks before persisting, so node static data written in a trigger's webhook() (counters, cursors, dedup records) is silently not saved. The context workflow doesn't need static data."
+  },
+  {
+    "url": "https://github.com/excalidraw/excalidraw/pull/10578",
+    "language": "typescript",
+    "verdict": "keep",
+    "reason": "Fix PR title 'hex8 regression #10578'; diff replaces getColor (which prepended # to any valid hex incl. 8-digit) with normalizeInputColor checking only getFormat()==='hex', and adds a test asserting the unprefixed hex8 output. Changed lines 1457 <= 1500.",
+    "proposed_comment": "normalizeInputColor (ColorInput.tsx) only prepends '#' when tinycolor's getFormat() === 'hex'. An 8-digit hex-with-alpha typed without '#' is reported as 'hex8', so it is returned as-is (the added test even asserts 'ff000080' stays unprefixed) and applied as an invalid color string instead of '#ff000080'; hex colors with alpha entered in the color input break."
+  },
+  {
+    "url": "https://github.com/excalidraw/excalidraw/pull/11492",
+    "language": "typescript",
+    "verdict": "keep",
+    "reason": "Fix quote present in fix body; diff replaces temp-canvas blit with fillRect/clearRect of the hole on the shared export canvas after drawing the arrow, overpainting elements beneath. A deliberate approach but genuinely wrong output, visible in the diff.",
+    "proposed_comment": "In renderElement's export path for arrows with bound text, the label hole is now cut by fillRect with the canvas background color (or clearRect when the background is transparent) directly on the shared export canvas after drawing the arrow. That paints over or erases whatever elements are rendered beneath the arrow's label area, so exported images no longer match the editor (shapes/images under a labeled arrow get a background-colored or transparent rectangle)."
+  },
+  {
+    "url": "https://github.com/pandas-dev/pandas/pull/69496",
+    "language": "python",
+    "verdict": "keep",
+    "reason": "Fix PR 70227 quote is in its body. Diff adds `or not func_names` where func_names is a cast of self.func that can be an ndarray/Index, so truthiness raises ValueError. Real and in-diff, but only affects an uncommon input spelling, so Low.",
+    "proposed_comment": "In `_agg_list_like_frame_reductions` (pandas/core/apply.py), `not func_names` evaluates truthiness of the container. When `func_names` is an ndarray or `pd.Index` (e.g. `df.agg(np.array([\"sum\",\"min\"]))`), this raises `ValueError: truth value is ambiguous` instead of aggregating like the list spelling; use a length check."
+  },
+  {
+    "url": "https://github.com/pandas-dev/pandas/pull/66066",
+    "language": "python",
+    "verdict": "correct",
+    "reason": "Fix PR 71873 quote is verbatim. Diff applies date_converter to every index_col when parse_dates is truthy and writes the result back, so non-date index columns become strings. The golden bundles a second function and overstates severity (pyarrow engine only, non-date index with parse_dates).",
+    "proposed_comment": "In `_finalize_index` (arrow_parser_wrapper.py) the index column is unconditionally overwritten with `date_converter(...)` output whenever `parse_dates` applies. When the index values are not dates (e.g. integer/float/bool index with `parse_dates=True`), the converter falls back to strings, so the index silently changes dtype from int64 to str; the result should only replace the column when parsing succeeds. `_maybe_restore_string_dtype` has the same issue for index columns listed in `parse_dates`."
+  },
+  {
+    "url": "https://github.com/pandas-dev/pandas/pull/63890",
+    "language": "python",
+    "verdict": "keep",
+    "reason": "Fix PR 71989 quote is verbatim. Diff makes _pprint_seq round floats to display.precision inside pprint_thing, and loosens the existing assertion regex in test_assert_extension_array_equal_not_exact, which a reviewer can see. Unintended side effect on assertion messages.",
+    "proposed_comment": "`_pprint_seq` now rounds every float to `display.precision` inside `pprint_thing`, but `pprint_thing` is also used by `raise_assert_detail` to build the `[left]/[right]` lines of testing assertion messages. Values differing below the display precision (e.g. 1.0 vs 1.000000001 with `check_exact=True`) will print identically, and the PR even loosens an existing test regex to accommodate it; the precision rounding should be opt-in for display only."
+  },
+  {
+    "url": "https://github.com/pydantic/pydantic/pull/13573",
+    "language": "python",
+    "verdict": "keep",
+    "reason": "Fix PR 13690 quote is verbatim. Diff removes MutableSequence from LIST_TYPES and maps it to _sequence_schema(Any) in the new bare-type table while the subscripted table maps it to _list_schema; clearly visible.",
+    "proposed_comment": "In the bare-type dispatch table in `_generate_schema.py`, `collections.abc.MutableSequence` is mapped to `self._sequence_schema(Any)` rather than `self._list_schema(Any)` (as it was in LIST_TYPES before this refactor). Unparameterized `MutableSequence` fields then use an isinstance(Sequence) check, so a `str` is accepted and a `tuple` is not coerced to a list."
+  },
+  {
+    "url": "https://github.com/pydantic/pydantic/pull/13714",
+    "language": "python",
+    "verdict": "keep",
+    "reason": "Fix PR 14254 quote is verbatim. Diff injects config str_min/max_length inside str_schema(), which decimal_schema() reuses for its string branch, so Decimal serialization schema gets constraints validation never applies. Verifiable by reading decimal_schema.",
+    "proposed_comment": "`GenerateJsonSchema.str_schema` now injects config-level `str_min_length`/`str_max_length` into every string schema. `decimal_schema()` builds its serialization string branch through `str_schema()`, so Decimal fields get minLength/maxLength constraints that validation never applies, and a model's own `model_dump(mode='json')` output can fail its schema."
+  },
+  {
+    "url": "https://github.com/apache/airflow/pull/72173",
+    "language": "python",
+    "verdict": "keep",
+    "reason": "Fix PR 72312 states aget/aset exist in no released Airflow and quotes match. The diff switches to store.aget/aset and rewrites tests with MagicMock plus AsyncMock; a reviewer can check the accessor class and the provider's apache-airflow floor at that commit. Slight reliance on repo state, but discoverable.",
+    "proposed_comment": "`IcebergTableSnapshotTrigger.run` now calls `await store.aget(...)` and `await store.aset(...)` on the asset state store, but the accessor available in the supported Airflow versions only has sync `get`/`set`. The first poll will raise AttributeError and the triggerer will crash-loop the watcher; the tests only pass because they replace the store with a MagicMock that has `aget`/`aset` assigned."
+  },
+  {
+    "url": "https://github.com/apache/airflow/pull/57531",
+    "language": "python",
+    "verdict": "correct",
+    "reason": "Fix PR 76035 quote is in its body, and the diff deletes the on_operator_resuming invocation in trigger_reentry. But the golden says the test is 'left asserting on_pod_cleanup under the old comment'; this PR's diff actually deletes the on_operator_resuming assertion block and its comment from test_execute_async_callbacks, so that sentence is wrong for this diff.",
+    "proposed_comment": "In `KubernetesPodOperator.trigger_reentry` the `on_operator_resuming` callback invocation is deleted along with the `event[\"status\"] == \"running\"` re-defer branch, because it sat inside the `!= \"running\"` guard. User callbacks overriding `on_operator_resuming` silently stop being called on resume; the test is also left asserting `on_pod_cleanup` under the old comment, so it keeps passing."
+  },
+  {
+    "url": "https://github.com/containerd/containerd/pull/12821",
+    "language": "go",
+    "verdict": "keep",
+    "reason": "Revert PR 14488 body/commit contains the quoted text. Diff makes getProcessState return the deadline error, so Get fails and addTasks (List) hits `continue` and drops the task. The PR deliberately propagated the error for nerdctl, but dropping a live task from List on timeout is a genuine defect a reviewer could flag.",
+    "proposed_comment": "In shimTask.State (core/runtime/v2/shim.go) and getProcessState (plugins/services/tasks/local.go), returning the deadline error instead of falling back to an UNKNOWN state means a timeout is treated as if the task is gone. If a shim is briefly unresponsive (e.g. slow cleanup during Delete), Get will fail and List will omit that task, so clients and CRI lose visibility of a task that still exists."
+  },
+  {
+    "url": "https://github.com/containerd/containerd/pull/13438",
+    "language": "go",
+    "verdict": "keep",
+    "reason": "Revert PR 14194 body contains the quote verbatim. Diff adds closeOnEOFReadSeeker whose Seek errors after EOF close, and content.Copy handles ErrReset by seeking the source, so retries after full read fail. Visible from the diff plus repo.",
+    "proposed_comment": "Fetch in core/remotes/handlers.go now wraps the source in closeOnEOFReadSeeker, which closes the underlying reader at EOF and makes Seek return an error afterwards. content.Copy rewinds the source when the destination writer requests a retry (e.g. an upload retried after a 408), so any retry after the body was fully read will fail with 'seek on closed reader' instead of replaying the upload."
+  },
+  {
+    "url": "https://github.com/cli/cli/pull/12596",
+    "language": "go",
+    "verdict": "correct",
+    "reason": "Revert PR 12915 confirms cause (quote present). Original comment's mechanism is slightly off: ProjectsV2IgnorableError substring-matches err.Error() against \"field requires one of the following scopes: ['read:project']\", not the original GraphQL error object; the replacement message no longer contains that substring.",
+    "proposed_comment": "handleResponse in api/client.go now converts any GraphQL INSUFFICIENT_SCOPES error into a plain fmt.Errorf before it reaches callers. Code that detects a missing read:projects scope by inspecting the original GraphQL error (e.g. ProjectsV2IgnorableError, used to degrade gracefully in `gh pr view` and `gh issue view`) will no longer match, so those commands fail outright for tokens without the projects scope instead of skipping the project fields."
+  },
+  {
+    "url": "https://github.com/traefik/traefik/pull/12029",
+    "language": "go",
+    "verdict": "correct",
+    "reason": "Revert PR 12267 states it reverts 12029 for a UDP regression (quote verbatim, though it gives no mechanism). The Put(msg) of buf[:n] shrinking pooled buffers is real in the diff. The golden bundles a speculative second claim (buffers returned while still held) and a hindsight sentence about broken UDP traffic.",
+    "proposed_comment": "In pkg/udp/conn.go the pooled buffer is handed to the connection as buf[:n] and later returned with Put(msg), so the pool receives a slice whose length is the previous datagram size rather than maxDatagramSize. The next Get().([]byte) then yields a short buffer and ReadFrom truncates larger UDP packets; buffers may also be returned while a consumer still holds them, risking data corruption. This shows up as broken traffic on UDP entrypoints."
+  },
+  {
+    "url": "https://github.com/go-gitea/gitea/pull/35716",
+    "language": "go",
+    "verdict": "keep",
+    "reason": "Fix PR 36213 says this commit made authorized_principals empty; quote verbatim. Diff shows regeneratePrincipalKeys now calls WriteAuthorizedStringForValidKey, which ParseAuthorizedKey-fails on principal strings and returns nil after a debug log. Comment is accurate and one defect.",
+    "proposed_comment": "writeAuthorizedStringForKey in models/asymkey/ssh_key_authorized_keys.go now calls ssh.ParseAuthorizedKey on key.Content for every key. regeneratePrincipalKeys in services/asymkey/ssh_key_authorized_principals.go routes KeyTypePrincipal entries through the same function, but a principal is a plain string, not a public key, so parsing always fails and WriteAuthorizedStringForValidKey silently swallows the error. Regenerating authorized_principals therefore writes an empty file and all principal-based SSH logins stop working."
+  },
+  {
+    "url": "https://github.com/prometheus/prometheus/pull/20169",
+    "language": "go",
+    "verdict": "keep",
+    "reason": "Follow-up fix PR 20335 quote is verbatim in body. Diff drops the EnableUnquotedUTF8Names guard so labelNameRequiresQuoting rejects ':' in grouping labels, and the PR's own test asserts the rejection. Deliberate but a real backward-compat break for queries that parsed before.",
+    "proposed_comment": "The grouping_label rule in promql/parser/generated_parser.y now rejects any label containing a character that needs quoting via labelNameRequiresQuoting, which includes ':'. Existing queries and recording rules such as `sum by (a:b) (foo)` or `foo + on (a:b) bar` parsed before and will now fail with 'invalid label name for grouping', and the updated test even asserts that rejection."
+  },
+  {
+    "url": "https://github.com/trinodb/trino/pull/29501",
+    "language": "java",
+    "verdict": "keep",
+    "reason": "Fix PR #31476 body says buffer reuse caused cross-driver overwrites and 'Regression from #29501'. Original diff adds a shared byte[] outside the lambda with a (wrong) single-threaded comment; a reviewer can spot it. Merged 2026-06-08, 58 lines.",
+    "proposed_comment": "PartitionTransforms.hashShortDecimal/hashLongDecimal allocate one byte[] outside the lambda and reuse it for every row, with a comment claiming the Hasher is single-threaded per driver. The bucket function is shared by all drivers of a task, so concurrent drivers overwrite each other's scratch bytes and rows get hashed into the wrong bucket (silent wrong results in bucketed Iceberg decimal joins/writes under parallelism). Allocate the buffer per call or use a thread-confined one."
+  },
+  {
+    "url": "https://github.com/apache/kafka/pull/20403",
+    "language": "java",
+    "verdict": "keep",
+    "reason": "Fix PR #22590 says 'regression introduced by KAFKA-19638 (#20403)' and describes the unconditional setRecordContext in getStateStore; the diff adds exactly that line. Test-utility scope, so Medium is the ceiling.",
+    "proposed_comment": "TopologyTestDriver.getStateStore now unconditionally installs a dummy ProcessorRecordContext (null topic, -1 offset/partition, timestamp 0) on the task's processor context on every lookup and never restores it. If a store handle is fetched while a record's context is active (interleaved interactive query or a test seam resolving the store mid-processing), the in-flight record's metadata is wiped, and later direct store writes get timestamp 0. Only set the dummy context when none exists yet."
+  },
+  {
+    "url": "https://github.com/elastic/elasticsearch/pull/147504",
+    "language": "java",
+    "verdict": "keep",
+    "reason": "Fix PR #160540 says 'introduced in #147504'; its diff only adds the NO_MORE_DOCS check on the advance() return value in DenseVectorBulkScorer.score, which the original code ignored. Defect is in lines the original PR added; 1095 changed lines, merged in range.",
+    "proposed_comment": "DenseVectorBulkScorer.score in DenseVectorQuery ignores the return value of scorer.iterator().advance(min) and goes on to call nextDocsAndScores even if the vector iterator is already exhausted. For a filtered exact kNN search where the filter is served as a cached bit set (higher cost, so ConjunctionDISI leaves it un-advanced) and matches only docs without a vector value, the vector iterator hits NO_MORE_DOCS while the filter iterator is still at -1, and the bulk() conjunction then throws 'Sub-iterators of ConjunctionDISI are not on the same document!'. Check for NO_MORE_DOCS after advance and return early."
+  },
+  {
+    "url": "https://github.com/apache/druid/pull/18259",
+    "language": "java",
+    "verdict": "keep",
+    "reason": "Fix PR #20222 explicitly says #18259 dropped the AuthenticationResult context by passing null; original diff replaces ImmutableMap.of(\"profile\", profile) with null. Hand-written change, merged 2025-09-02, fix merged 2026-11-17 (in range).",
+    "proposed_comment": "In Pac4jFilter.doFilter the AuthenticationResult is built with a null context (new AuthenticationResult(uid, authorizerName, name, null)), whereas the previous pac4j integration stored the user profile in the context under 'profile'. After this upgrade, any authorizer that relies on OIDC claims or group attributes from the AuthenticationResult context gets nothing, silently breaking attribute-based authorization for existing deployments. Populate the context from the pac4j profile."
+  },
+  {
+    "url": "https://github.com/apache/pulsar/pull/24551",
+    "language": "java",
+    "verdict": "correct",
+    "reason": "Fix PR #24569 confirms #24551 caused infinite recursion in ManagedCursorImpl#cancelPendingReadRequest; the Case 5 self-call is in the original diff. Original comment bundles the failed-CAS branch (a never-expected path) and overstates Critical; trimmed to one defect and lowered severity.",
+    "proposed_comment": "ManagedCursorImpl.cancelPendingReadRequest handles the case where DelayCheckForNewEntriesTask is RUNNING but not done by calling cancelPendingReadRequest() again ('Case 5'), and the failed-CAS branch does the same. The task sets RUNNING and runs checkForNewEntries while holding pendingReadOpMutex on the same thread, so if a cancel is triggered from within that path the reentrant lock is never released, the state never leaves RUNNING, and the method recurses until StackOverflowError. Recursing under a reentrant monitor cannot let the other thread make progress; use a non-recursive wait/retry or CAS-based design."
+  },
+  {
+    "url": "https://github.com/rails/rails/pull/59053",
+    "language": "ruby",
+    "verdict": "correct",
+    "reason": "Fix confirms; probe of bare top-level name in each_candidate_filepath skips precompressed-only files. In diff. Severity lowered since precompressed-only files (no uncompressed original) are an uncommon setup.",
+    "proposed_comment": "In ActionDispatch::Static::FileHandler#each_candidate_filepath, the new top_level_exists probe uses File.exist? on the bare name (e.g. app.js, page, or index), so a request for a file that exists only precompressed (public/app.js.gz, page.html.gz, index.html.gz) is never yielded as a candidate and falls through to the app instead of being served gzip/br. This triggers for every top-level precompressed-only asset when the client sends Accept-Encoding, which previously worked."
+  },
+  {
+    "url": "https://github.com/rails/rails/pull/59118",
+    "language": "ruby",
+    "verdict": "keep",
+    "reason": "Fix PR says #59118 broke Jbuilder collection partials; diff's early return to collection_into_buffer bypasses collection_with_template/build_rendered_collection which subclasses override. A reviewer can see overridable hooks being skipped.",
+    "proposed_comment": "The new early return in CollectionRenderer#render_collection (layout.nil? && !will_cache?) routes to collection_into_buffer, bypassing collection_with_template and build_rendered_collection. Subclasses that override those hooks to give each item its own scope and merge results (e.g. Jbuilder's collection renderer for json.array! with partial:) will have every item written into one shared scope, producing wrong output. The fast path should be limited to the base renderer class."
+  },
+  {
+    "url": "https://github.com/mastodon/mastodon/pull/36971",
+    "language": "ruby",
+    "verdict": "keep",
+    "reason": "Revert body says it fixes an issue introduced by #36971; the superseded PR #36994 states Aws::S3::Bucket#delete_objects takes one hash unlike Client#delete_objects. Diff passes two positional args to bucket.delete_objects.",
+    "proposed_comment": "In AttachmentBatch#remove_files, the per-request options hash (http_read_timeout) is passed as a second positional argument to bucket.delete_objects. Aws::S3::Bucket#delete_objects takes a single options hash (only Aws::S3::Client#delete_objects accepts request options separately), so this raises ArgumentError and every S3-backed media batch deletion fails (and is retried by the rescue block)."
+  },
+  {
+    "url": "https://github.com/mastodon/mastodon/pull/36087",
+    "language": "ruby",
+    "verdict": "keep",
+    "reason": "Fix quote verbatim; diff removes notify_quoted_account! from FanOutOnWriteService and only adds notification in the remote QuoteRequest path, so local quotes lose notification. Fair from the diff.",
+    "proposed_comment": "Removing notify_quoted_account! from FanOutOnWriteService and notifying only from ActivityPub::Activity::QuoteRequest#accept_quote_request! means quotes that never go through a QuoteRequest, such as a local user quoting another local user's post (auto-accepted), no longer generate a Quote notification for the quoted account. The fan-out notification should be kept for the local/already-accepted case."
+  },
+  {
+    "url": "https://github.com/n8n-io/n8n/pull/27280",
+    "language": "typescript",
+    "verdict": "keep",
+    "reason": "Fix PR #27552 (merged 2026-03-25) body says 'Regression introduced in: #27280' and describes exactly this bug (setConnections via computed workflowDocumentStore?.value skipped after resetWorkspace, setNodes used the direct initializedDocumentStore). The diff of #27280 changed that exact line; the comment is accurate and specific, with no hindsight references. Metadata checks out: merged 2026-03-23, 361 changed lines. High severity is reasonable since the preview broke for all workflows.",
+    "proposed_comment": "In useCanvasOperations.initializeWorkspace, setNodes is called on the directly-returned initializedDocumentStore, but the new setConnections call goes through the computed workflowDocumentStore?.value?. That computed is keyed on the current workflowId, which is empty after resetWorkspace(), so it is undefined and the optional chain silently skips setConnections: workflows initialize with nodes but no connections (e.g. the workflow preview, where AI agent sub-node connections are lost). Use initializedDocumentStore for both calls."
+  }
+]

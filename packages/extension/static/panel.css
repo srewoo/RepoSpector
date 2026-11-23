@@ -1,0 +1,105 @@
+/* Direction: packages/extension/DESIGN.md (calm tool, ENERGY 1 / RHYTHM 1 / MOTION 1).
+   Every colour pair below was measured with the antislop contrast checker; ratios are in DESIGN.md. */
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --subtle: #f4f5f7;
+  --fg: #1b1f23;
+  --muted: #545d68;
+  --line: #8a939e;
+  --accent: #0b6e63;
+  --on-accent: #ffffff;
+  --error: #b42318;
+  --ui: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --code: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a;
+    --subtle: #1c2025;
+    --fg: #e6e8eb;
+    --muted: #a3acb6;
+    --line: #6e7781;
+    --accent: #5cc8b6;
+    --on-accent: #14171a;
+    --error: #ff8a7a;
+  }
+}
+
+body { margin: 0; padding: 16px; font: 14px/1.5 var(--ui); color: var(--fg); background: var(--bg); overflow-wrap: anywhere; }
+h1 { font-size: 16px; margin: 0 0 16px; }
+h2 { font-size: 15px; margin: 0 0 8px; }
+p { margin: 0 0 12px; }
+code, .code { font-family: var(--code); font-size: 13px; }
+.muted { color: var(--muted); font-size: 13px; }
+.error { color: var(--error); }
+
+/* Sections separate by a subtle surface and space, not shadows (DESIGN.md: flat). */
+section { background: var(--subtle); border-radius: 6px; padding: 16px; margin-bottom: 16px; max-width: 560px; }
+
+button {
+  font: inherit; min-height: 36px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--fg); cursor: pointer;
+}
+button:not(:disabled):hover { border-color: var(--fg); }
+/* The accent marks the one primary action per form, nothing else (DESIGN.md: one accent). */
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+button.primary:not(:disabled):hover { border-color: var(--fg); }
+button:disabled { cursor: not-allowed; color: var(--muted); }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+label { display: block; margin: 12px 0 4px; font-weight: 600; }
+input, select {
+  font: inherit; min-height: 36px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--fg); width: 100%; box-sizing: border-box;
+}
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+
+.rows { padding: 0; margin: 0 0 12px; list-style: none; }
+.rows li { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.rows li:last-child { border-bottom: 0; }
+.row-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.row-buttons { display: flex; gap: 8px; }
+.row-status { margin: 4px 0 0; font-size: 13px; }
+
+/* Side panel: the PR under review is the focal point. */
+.target { font-family: var(--code); font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+
+/* Findings read like review notes: file:line in the code font, then the claim (DESIGN.md identity motif). */
+.claim { margin: 4px 0; }
+.label { font-size: 13px; font-weight: 600; }
+/* The accent's second sanctioned use (DESIGN.md): the "Verified" label. Text colour, 6.13:1 light / 8.90:1 dark. */
+.label.verified { color: var(--accent); }
+ul.notes { padding-left: 18px; margin: 12px 0 0; }
+
+/* Finding rows: the checkbox picks a finding for posting; its file:line is the checkbox label. */
+label.pick { display: flex; align-items: center; gap: 8px; margin: 0; font-weight: 400; cursor: pointer; }
+input[type="checkbox"] { width: 18px; height: 18px; min-height: 0; margin: 0; accent-color: var(--accent); flex: none; }
+.feedback { margin-top: 8px; }
+.feedback .row-buttons { flex-wrap: wrap; }
+.feedback button { font-size: 13px; }
+/* A chosen reaction reads as pressed by inverting, not by colour: the accent stays with the primary action. */
+.feedback button[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.feedback label { margin: 8px 0 4px; font-weight: 400; }
+.reason { display: flex; gap: 8px; }
+.reason input { flex: 1; }
+a { color: var(--fg); text-decoration: underline; }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Reader context under a finding: collapsed by default, so the list stays scannable. */
+details.context { margin: 8px 0 0; }
+details.context summary { cursor: pointer; font-size: 13px; color: var(--muted); min-height: 24px; }
+details.context summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+ul.places { margin: 4px 0 8px; padding-left: 18px; font-size: 13px; }
+ul.places li { padding: 2px 0; border: 0; }
+.context-section { margin: 0 0 12px; }
+
+/* Help and privacy pages: a readable column of text. */
+body.doc main { max-width: 680px; margin: 0 auto; }
+body.doc h2 { margin-top: 28px; }
+body.doc li { margin-bottom: 6px; }
+body.doc dt { font-weight: 600; margin-top: 12px; }
+body.doc dd { margin: 4px 0 0 0; }
+ul.toc { padding-left: 18px; }
+footer.links { margin-top: 24px; font-size: 13px; }
+pre.command { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
