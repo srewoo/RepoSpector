@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { fetchClient } from '../src/hosts/fetch-client.js';
 import { pages } from '../src/hosts/json.js';
+import { GitHubHost } from '../src/hosts/github.js';
+import { GitLabHost } from '../src/hosts/gitlab.js';
 
 type Seen = { url: string; init: RequestInit };
 
@@ -27,6 +29,16 @@ describe('fetchClient', () => {
     expect(h.get('authorization')).toBe(`Bearer ${TOKEN}`);
     expect(h.get('accept')).toBe('application/vnd.github.v3.diff');
     expect(f.seen[0]?.init.credentials).toBe('omit');
+  });
+
+  it('reads one file at a commit: GitHub contents as raw, GitLab raw file, paths encoded', async () => {
+    const gh = fakeFetch({ 'https://api.github.com/repos/o/r/contents/src/a%20b/c.ts?ref=abc123': { body: 'export const x = 1;' } });
+    const ghHost = new GitHubHost({ host: 'github.com', owner: 'o', repo: 'r', number: 1 }, fetchClient({ kind: 'github', base: 'https://api.github.com', token: TOKEN, fetchImpl: gh.impl }));
+    expect(await ghHost.fileAt('src/a b/c.ts', 'abc123')).toBe('export const x = 1;');
+    expect(new Headers(gh.seen[0]?.init.headers).get('accept')).toBe('application/vnd.github.raw');
+    const gl = fakeFetch({ 'https://gitlab.example/api/v4/projects/g%2Fp/repository/files/src%2Fc.rb/raw?ref=abc123': { body: 'def x; end' } });
+    const glHost = new GitLabHost({ host: 'gitlab.example', project: 'g/p', iid: 1 }, fetchClient({ kind: 'gitlab', base: 'https://gitlab.example/api/v4', fetchImpl: gl.impl }));
+    expect(await glHost.fileAt('src/c.rb', 'abc123')).toBe('def x; end');
   });
 
   it('follows next links on the same origin and returns all pages', async () => {

@@ -46,6 +46,15 @@ describe('extractSymbols', () => {
     expect(calls(tsx)).toEqual(['Dialog@2<Page']);
   });
 
+  it('js/ts: private methods and getters (#name), function-valued class fields, and this.#calls with their caller', async () => {
+    const src = 'class Ky {\n  #cancel(v) {\n    return v;\n  }\n  get #left() { return 1; }\n  #arrow = () => 1;\n  handle = function () {};\n  data = 3;\n  run() { this.#cancel(1); this.#arrow(); }\n}\n';
+    for (const file of ['a.js', 'a.ts', 'a.tsx']) {
+      const r = await extractSymbols(file, src);
+      expect(r?.defs.map((d) => d.name), file).toEqual(['Ky', '#cancel', '#left', '#arrow', 'handle', 'run']);
+      expect(r?.calls.map((c) => `${c.name}<${c.caller}`), file).toEqual(['#cancel<run', '#arrow<run']);
+    }
+  });
+
   it('records extends and implements links', async () => {
     const inh = (r: Awaited<ReturnType<typeof extractSymbols>>) => r?.inherits.map((i) => `${i.child}<${i.base}@${i.line}`);
     expect(inh(await extractSymbols('a.py', 'class A(Base, mixins.Audited):\n    pass\n'))).toEqual(['A<Base@1', 'A<Audited@1']);

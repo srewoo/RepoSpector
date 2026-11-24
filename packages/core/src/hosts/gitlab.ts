@@ -42,6 +42,11 @@ export class GitLabHost implements ReviewHost {
     return text;
   }
 
+  /** One file's text at a commit (the repository-context pass reads only the files it needs). */
+  fileAt(path: string, sha: string): Promise<string> {
+    return this.api.get(`projects/${encodeURIComponent(this.t.project)}/repository/files/${encodeURIComponent(path)}/raw?ref=${encodeURIComponent(sha)}`, { accept: 'raw' });
+  }
+
   async hunks(): Promise<PostableHunks> {
     return postableHunks(await this.diff());
   }

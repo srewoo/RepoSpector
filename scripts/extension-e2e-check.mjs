@@ -141,7 +141,7 @@ async function attach(t) {
   };
 }
 
-const OPEN_INDEX = `new Promise((res, rej) => { const r = indexedDB.open('repospector-index', 1); r.onupgradeneeded = () => { r.result.createObjectStore('graphs', { keyPath: 'key' }).createIndex('repo', 'repo'); r.result.createObjectStore('symbols'); }; r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); })`;
+const OPEN_INDEX = `new Promise((res, rej) => { const r = indexedDB.open('repospector-index', 2); r.onupgradeneeded = () => { r.result.createObjectStore('graphs', { keyPath: 'key' }).createIndex('repo', 'repo'); r.result.createObjectStore('symbols'); }; r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); })`;
 
 const READ_RUN = (id) => `new Promise((res, rej) => { const o = indexedDB.open('repospector', 1); o.onsuccess = () => { const g = o.result.transaction('runs').objectStore('runs').get('${id}'); g.onsuccess = () => { res(g.result ?? null); o.result.close(); }; g.onerror = () => rej(g.error); }; o.onerror = () => rej(o.error); })`;
 
@@ -154,7 +154,7 @@ try {
   const js = await page(`${base}/options.html`);
 
   const runId = 'e2e-run-0001';
-  const start = { type: 'review:start', runId, target: PR, apiBase: 'https://api.github.com', provider: 'ollama', model: 'stand-in', ollamaUrl: `http://localhost:${MODEL_PORT}`, prices: { model: 'stand-in', inPerM: 0, outPerM: 0 } };
+  const start = { type: 'review:start', runId, target: PR, apiBase: 'https://api.github.com', provider: 'ollama', model: 'stand-in', ollamaUrl: `http://localhost:${MODEL_PORT}`, prices: { model: 'stand-in', inPerM: 0, outPerM: 0 }, repoContext: false }; // resume wiring only; repository context: scripts/extension-context-check.mjs
   check((await js(`chrome.runtime.sendMessage({ type: 'offscreen:ensure' })`))?.ok === true, 'service worker created the offscreen document');
   await js(`chrome.runtime.sendMessage(${JSON.stringify(start)})`);
 

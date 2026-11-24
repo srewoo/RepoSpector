@@ -1,4 +1,5 @@
 import {
+  DEFINITIONS_ADDENDUM,
   assessRisk,
   changedSymbols,
   isSecretPath,
@@ -16,6 +17,7 @@ import {
   type SkippedFile,
 } from '@repospector/core';
 import type { GitRepo, Head } from './git.js';
+import { repoDefinitions, type DefinitionsDeps, type PlanDefinitions } from './repo-definitions.js';
 import { RevisionSource } from './source.js';
 
 /** Upper bound on diff text handed to agents; files past it are listed as not reviewed. */
@@ -46,6 +48,8 @@ export interface ReviewPlan {
   readonly contextPack: string;
   /** Functions, classes and fields the reviewed diff defines, changes or removes: lookup targets for get_context. */
   readonly changedSymbols: ChangedSymbol[];
+  /** Definitions of what the diff calls, put in the context pack (absent when not looked up). */
+  readonly definitions?: PlanDefinitions;
   readonly source: RevisionSource;
 }
 
@@ -86,7 +90,8 @@ async function collectUntracked(repo: GitRepo, source: RevisionSource, skipped: 
   return diff;
 }
 
-export async function buildPlan(repo: GitRepo, base: string | undefined, head: Head, depth: Depth): Promise<ReviewPlan> {
+/** Pass `lookup` to add the definitions of what the diff calls to the context pack. */
+export async function buildPlan(repo: GitRepo, base: string | undefined, head: Head, depth: Depth, lookup?: Pick<DefinitionsDeps, 'graph' | 'waitMs'>): Promise<ReviewPlan> {
   const headSha = head === 'worktree' ? head : await repo.resolveCommit(head);
   const baseSha = base ? await repo.resolveCommit(base) : await repo.defaultBase(headSha === 'worktree' ? 'HEAD' : headSha);
   const source = new RevisionSource(repo, headSha);
@@ -115,8 +120,11 @@ export async function buildPlan(repo: GitRepo, base: string | undefined, head: H
   }
 
   const rules = await readRules(source);
+  const reviewed = included.map((i) => i.chunk).join('');
+  const defs = lookup && included.length ? await repoDefinitions(reviewed, { repo, head: headSha, source, ...lookup }) : undefined;
   const contextPack = [
-    wrapUntrusted('diff', redactSecrets(included.map((i) => i.chunk).join(''))),
+    wrapUntrusted('diff', redactSecrets(reviewed)),
+    defs?.text ? `${DEFINITIONS_ADDENDUM.replace('<definitions>', 'The repository content of kind "definitions"')}\n${wrapUntrusted('definitions', defs.text)}` : '',
     rules ? wrapUntrusted('team-rules', redactSecrets(rules)) : '',
   ]
     .filter(Boolean)
@@ -139,7 +147,8 @@ export async function buildPlan(repo: GitRepo, base: string | undefined, head: H
     skipped,
     notIncluded,
     contextPack,
-    changedSymbols: changedSymbols(included.map((i) => i.chunk).join('')),
+    changedSymbols: changedSymbols(reviewed),
+    ...(defs ? { definitions: defs.summary } : {}),
     source,
   };
 }

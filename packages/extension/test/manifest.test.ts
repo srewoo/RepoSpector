@@ -20,8 +20,8 @@ describe('manifest', () => {
   it('uses a minimal permission set', () => {
     // scripting: inject the diff-marker script on demand, only into tabs on hosts the user granted.
     expect(manifest.permissions).toEqual(['sidePanel', 'storage', 'offscreen', 'scripting']);
-    // Local mode only: requested when the user turns it on.
-    expect(manifest.optional_permissions).toEqual(['nativeMessaging']);
+    // No optional API permissions: local mode (native messaging) is not in the store build.
+    expect(manifest.optional_permissions).toBeUndefined();
   });
 
   it('allows WebAssembly (tree-sitter) but no remote or inline script', () => {

@@ -17,6 +17,8 @@ export const StartMessageSchema = z.strictObject({
   prices: z.nullable(z.strictObject({ model: z.string(), inPerM: z.number(), outPerM: z.number() })),
   /** The user turned on meaning-based feedback matching and downloaded the model. */
   semanticFeedback: z.optional(z.boolean()),
+  /** Read the repository at the PR head for a second, context-aware pass (default on). */
+  repoContext: z.optional(z.boolean()),
 });
 export type StartMessage = z.infer<typeof StartMessageSchema>;
 

@@ -8,6 +8,7 @@ const ModelId = z.string().check(z.regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/));
 export const ModelSettingsSchema = z.strictObject({
   provider: z.enum(['anthropic', 'openai', 'gemini', 'ollama']),
   preset: z.enum(['best', 'balanced', 'low']),
+  /** The model picked from the provider's list (or typed); overrides the preset. */
   customModel: z.optional(ModelId),
   ollamaModel: z.optional(ModelId),
   /** Where Ollama listens; localhost only (any port), so a setting cannot point the extension elsewhere. */
@@ -27,7 +28,11 @@ export function resolveModel(s: ModelSettings): ResolvedModel {
     if (!s.ollamaModel) throw new Error('choose an Ollama model you have pulled, e.g. qwen3:32b');
     return { provider: 'ollama', model: s.ollamaModel, prices: { model: s.ollamaModel, inPerM: 0, outPerM: 0 } };
   }
-  if (s.customModel) return { provider: s.provider, model: s.customModel, prices: null };
+  if (s.customModel) {
+    // A picked model that is one of the presets keeps its dated price.
+    const known = (Object.values(PRESETS[s.provider]) as ModelChoice[]).find((c) => c.model === s.customModel);
+    return { provider: s.provider, model: s.customModel, prices: known ?? null };
+  }
   const choice = PRESETS[s.provider][s.preset as Preset];
   return { provider: s.provider, model: choice.model, prices: choice };
 }

@@ -30,12 +30,15 @@ async function refresh(): Promise<void> {
   unmount?.();
   unmount = undefined;
   if (hosts.length === 0) {
-    view.replaceChildren(el('p', { textContent: 'Add GitHub or GitLab in settings, then open a pull request or merge request to review it here.' }), openSettings('Open settings', true));
+    view.replaceChildren(
+      el('p', { textContent: 'Welcome to RepoSpector. Finish setup in two steps: add your own AI provider API key and pick a model, then connect GitHub or GitLab.' }),
+      openSettings('Finish setup', true),
+    );
     return;
   }
   const target = url ? detectReviewPage(url, hosts) : null;
   if (!target) {
-    view.replaceChildren(el('p', { textContent: 'Open a pull request or merge request on one of your hosts to review it here.' }), el('p', { className: 'muted', textContent: `Your hosts: ${hosts.map((h) => h.origin.replace(/^https:\/\//, '')).join(', ')}.` }), openSettings('Manage hosts', false));
+    view.replaceChildren(el('p', { textContent: 'Open a pull request or merge request on one of your hosts to review it here.' }), el('p', { className: 'muted', textContent: `Your hosts: ${hosts.map((h) => h.origin.replace(/^https:\/\//, '')).join(', ')}.` }), openSettings('Connect another service', false));
     return;
   }
   const name = target.kind === 'github' ? `${target.owner}/${target.repo} #${target.number}` : `${target.project} !${target.iid}`;

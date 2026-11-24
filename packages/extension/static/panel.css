@@ -103,3 +103,80 @@ body.doc dd { margin: 4px 0 0 0; }
 ul.toc { padding-left: 18px; }
 footer.links { margin-top: 24px; font-size: 13px; }
 pre.command { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
+
+/* Settings: the get-started checklist and the collapsed Advanced group. */
+ol.checklist { margin: 0; padding-left: 0; list-style: none; }
+ol.checklist li { padding: 4px 0; }
+ol.checklist .mark { display: inline-block; width: 1.5em; font-weight: 600; }
+ol.checklist li.done { color: var(--muted); }
+ol.checklist li.done .mark { color: var(--accent); }
+details.advanced { max-width: 560px; margin-bottom: 16px; }
+details.advanced > summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
+details.advanced > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+details.advanced[open] > summary { margin-bottom: 8px; }
+[hidden] { display: none !important; }
+h3 { font-size: 14px; margin: 16px 0 0; }
+.row-status.ok { color: var(--fg); }
+
+/* Review progress: one segment per step. Done steps fill; the current one carries a moving stripe.
+   The only self-moving element in the UI (user request, 2026-11-24); still under reduced motion. */
+.progress { display: flex; gap: 4px; margin: 4px 0 8px; }
+.progress .seg { flex: 1; height: 8px; border-radius: 4px; background: var(--subtle); border: 1px solid var(--line); box-sizing: border-box; }
+.progress .seg.done { background: var(--accent); border-color: var(--accent); }
+.progress .seg.active {
+  border-color: var(--accent);
+  background: repeating-linear-gradient(-45deg, var(--accent) 0 6px, transparent 6px 12px);
+  background-size: 17px 100%;
+  animation: rs-stripe 0.8s linear infinite;
+}
+@keyframes rs-stripe { to { background-position: 17px 0; } }
+@media (prefers-reduced-motion: reduce) { .progress .seg.active { animation: none; } }
+.progress-head { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+ol.steps { list-style: none; padding: 0; margin: 0 0 12px; font-size: 13px; }
+ol.steps li { padding: 2px 0; color: var(--muted); }
+ol.steps li.active { color: var(--fg); font-weight: 600; }
+ol.steps .mark { display: inline-block; width: 1.5em; }
+ol.steps li.done .mark { color: var(--accent); }
+
+
+/* Results (side panel). Summary card, callouts for what limited a review, one card per finding,
+   folded secondary information, and an action bar that stays in view. */
+section.summary { max-width: none; padding: 12px 16px; margin-bottom: 12px; }
+section.summary h2 { font-size: 16px; margin: 0 0 8px; }
+section.summary .tags { margin-bottom: 8px; }
+section.summary p { margin: 0; }
+.tags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+/* A tag's word is the signal; colour only supports it. */
+.tag { display: inline-flex; align-items: center; font-size: 12px; font-weight: 600; line-height: 1; padding: 4px 8px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; color: var(--muted); }
+.tag.impact-high { color: var(--error); }
+.tag.impact-medium { color: var(--fg); }
+.tag.status-verified { color: var(--accent); }
+.callout { margin: 0 0 12px; padding: 8px 12px; background: var(--subtle); border-left: 3px solid var(--line); border-radius: 0 6px 6px 0; font-size: 13px; }
+.callout.warn { border-left-color: var(--error); }
+.callout.ok { border-left-color: var(--accent); }
+ol.findings { list-style: none; padding: 0; margin: 0 0 12px; display: grid; gap: 8px; }
+.finding { background: var(--subtle); border-radius: 6px; padding: 12px; }
+.finding .file { font-family: var(--code); font-size: 13px; }
+.finding .file .name { font-weight: 600; }
+.finding .file .line { color: var(--muted); }
+/* The folder sits under the name, aligned after the checkbox (18 px box + 8 px gap). */
+.finding .path { font-size: 12px; color: var(--muted); margin: 2px 0 8px 26px; overflow-wrap: anywhere; }
+.finding > .tags { margin: 8px 0; }
+.finding .claim { margin: 0 0 8px; }
+.finding.is-suspected .claim { color: var(--muted); }
+details.why summary { cursor: pointer; font-size: 13px; color: var(--muted); min-height: 24px; }
+details.why summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+details.why p { font-size: 13px; margin: 4px 0 8px; }
+.segmented { display: flex; flex-wrap: wrap; }
+.segmented button { font-size: 13px; padding: 6px 10px; border-radius: 0; margin-left: -1px; }
+.segmented button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+.segmented button:last-child { border-radius: 0 6px 6px 0; }
+.segmented button:focus-visible { position: relative; z-index: 1; }
+details.about { margin: 0 0 12px; }
+details.about > summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
+details.about > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.actionbar { position: sticky; bottom: 0; z-index: 2; background: var(--bg); border-top: 1px solid var(--line); margin: 0 -16px; padding: 12px 16px; }
+.actionbar .actions { margin-top: 0; }
+.actionbar p { margin: 0 0 8px; }
+.actionbar p:last-child { margin: 8px 0 0; }
+.actionbar p:empty { display: none; }

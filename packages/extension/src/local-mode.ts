@@ -1,4 +1,5 @@
 import type { FindingContext } from '@repospector/core';
+import { MCP_VERSION } from './versions.js';
 
 /** Must match the host name `repospector-mcp native install` registers. */
 export const NATIVE_HOST = 'com.repospector.local';
@@ -49,5 +50,5 @@ export async function localContext(repo: string, sha: string, findings: readonly
 }
 
 /** Global install, not npx: Chrome starts the program by a fixed path, and npx's cache can be cleaned. */
-export const MCP_VERSION = '0.7.0';
+export { MCP_VERSION };
 export const installCommand = (extensionId: string): string => `npm install -g repospector-mcp@${MCP_VERSION}\nrepospector-mcp native install --extension-id ${extensionId} --repo /path/to/your/clone`;

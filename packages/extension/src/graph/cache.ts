@@ -64,6 +64,14 @@ export function memoryCache(): IndexCache {
 }
 
 const DB = 'repospector-index';
+/**
+ * Bump when core's parser queries change: stored symbols were extracted with the old queries and
+ * would silently miss what the new ones find. The upgrade clears the saved index. A test pins
+ * INDEX_QUERIES_SHA to the current queries so a query change without a bump fails.
+ * v2 (2026-11-24): JS/TS private members (#name) and function-valued class fields.
+ */
+export const INDEX_DB_VERSION = 2;
+export const INDEX_QUERIES_SHA = '98a7e90df331';
 const GRAPHS = 'graphs';
 const SYMBOLS = 'symbols';
 
@@ -86,8 +94,10 @@ function done(t: IDBTransaction): Promise<void> {
 export function idbCache(): IndexCache {
   const open = (): Promise<IDBDatabase> =>
     new Promise((resolve, reject) => {
-      const r = indexedDB.open(DB, 1);
+      const r = indexedDB.open(DB, INDEX_DB_VERSION);
       r.onupgradeneeded = () => {
+        // Any older version was built with older queries: start the index again.
+        for (const name of [GRAPHS, SYMBOLS]) if (r.result.objectStoreNames.contains(name)) r.result.deleteObjectStore(name);
         r.result.createObjectStore(GRAPHS, { keyPath: 'key' }).createIndex('repo', 'repo');
         r.result.createObjectStore(SYMBOLS);
       };

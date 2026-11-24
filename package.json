@@ -9,12 +9,14 @@
     "packages/extension"
   ],
   "scripts": {
-    "build": "tsc -b packages/core packages/extension packages/eval packages/mcp && npm run build -w @repospector/extension",
-    "typecheck": "tsc -b packages/core packages/extension packages/eval packages/mcp --pretty",
+    "build": "node scripts/sync-versions.mjs && tsc -b packages/core packages/extension packages/eval packages/mcp && npm run build -w @repospector/extension",
+    "typecheck": "node scripts/sync-versions.mjs && tsc -b packages/core packages/extension packages/eval packages/mcp --pretty",
     "test": "vitest run",
     "check": "npm run typecheck && npm test",
     "audit:prod": "npm audit --omit=dev --audit-level=low",
-    "audit:all": "npm audit"
+    "audit:all": "npm audit",
+    "package:extension": "npm run build && npm run package -w @repospector/extension",
+    "release:mcp": "npm run release -w repospector-mcp --"
   },
   "devDependencies": {
     "@types/node": "22.19.1",

@@ -5,8 +5,8 @@ import type { PostableHunks, PostPlan } from '../post.js';
  * `projects/g%2Fp/merge_requests/1`). Implemented by the gh/glab CLIs (MCP) and by fetch (Chrome).
  */
 export interface ApiClient {
-  /** Raw response text. `paginate`: every page, in a form `pages()` flattens. `accept: 'diff'`: unified diff (GitHub). */
-  get(path: string, opts?: { readonly accept?: 'diff'; readonly paginate?: boolean }): Promise<string>;
+  /** Raw response text. `paginate`: every page, in a form `pages()` flattens. `accept: 'diff'`: unified diff (GitHub). `accept: 'raw'`: a file's bytes as text. */
+  get(path: string, opts?: { readonly accept?: 'diff' | 'raw'; readonly paginate?: boolean }): Promise<string>;
   /** JSON body; returns raw response text. */
   post(path: string, body: unknown): Promise<string>;
 }

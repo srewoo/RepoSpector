@@ -42,7 +42,11 @@ export interface InstallResult {
 export async function install(opts: { extensionId: string; repos: readonly string[]; manifestDirs?: readonly string[] | undefined; env?: NodeJS.ProcessEnv }): Promise<InstallResult> {
   if (platform() === 'win32') throw new Error('Windows is not supported by this command yet: register the host manifest under HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.repospector.local by hand (see Chrome docs)');
   const env = opts.env ?? process.env;
-  const hostJs = join(dirname(fileURLToPath(import.meta.url)), 'host.js');
+  // dist/native/host.js next to this file (tsc build), or dist/native/host.js under the bundle's dist/ (npm package).
+  const here = dirname(fileURLToPath(import.meta.url));
+  // Third case: running from source (tests), the built host is in dist/native.
+  const hostJs = [join(here, 'host.js'), join(here, 'native', 'host.js'), join(here, '..', '..', 'dist', 'native', 'host.js')].find((p) => existsSync(p));
+  if (!hostJs) throw new Error(`could not find the native host program next to ${here}; reinstall repospector-mcp`);
   const launcher = join(configDir(env), 'native-host.sh');
   mkdirSync(dirname(launcher), { recursive: true, mode: 0o700 });
   writeFileSync(launcher, launcherScript(process.execPath, hostJs), { mode: 0o755 });

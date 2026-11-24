@@ -1,0 +1,28 @@
+{
+  "brand": "RepoSpector",
+  "tagline": "A second look at every pull request",
+  "brief": "Open-source AI code review for GitHub and GitLab, in Chrome and through MCP, with your own model key. It finds bugs in a pull request, checks each finding with a second pass, ranks them, and marks the lines that matter. It should feel calm, precise and trustworthy: a tool, not a mascot.",
+  "adjectives": ["precise", "calm", "trustworthy", "a second look"],
+  "criteria": "Success: avoids the category's magnifiers, eyes, bugs, robots and animal mascots; recognisable as a 16 px Chrome toolbar icon on light and dark toolbars; works in one colour.",
+  "industry": "developer-tools",
+  "nav": ["Docs", "Chrome extension", "MCP server"],
+  "brand_color": "#0B6E63",
+  "greyscale": false,
+  "designer": "RepoSpector",
+  "round": 2,
+  "concepts": [
+    {
+      "name": "Gutter R",
+      "symbol": "svg/repospector-symbol.svg",
+      "lockup": "svg/repospector-horizontal.svg",
+      "idea": "An R built from the editor's line gutter, with the review marker sitting in its bowl.",
+      "rationale": [
+        "Ties straight to the name and reads at 16 px in the Chrome toolbar",
+        "The square marker echoes the RS badge RepoSpector places beside diff lines",
+        "One outline on a 32-unit stroke grid, 0 and 45 degree angles only"
+      ]
+    }
+  ],
+  "recommendation": "Gutter R: the chosen direction, refined into a single outline, with a small-size cut for 16 and 32 px.",
+  "next_steps": ["Trademark search before wide use", "Use the light teal variant on dark surfaces", "Apply in the Chrome Web Store listing"]
+}

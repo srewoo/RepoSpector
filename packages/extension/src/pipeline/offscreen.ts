@@ -1,4 +1,4 @@
-import { GraphStartSchema, MAX_DOWNLOAD_BYTES, type GraphEvent, type GraphJob, type GraphStart } from '../graph/messages.js';
+import { GraphStartSchema, MAX_DOWNLOAD_BYTES, type GraphEvent, type GraphJob, type GraphStart, type LocateReply, type LocateRequest } from '../graph/messages.js';
 import type { FindingContext } from '@repospector/core';
 import type { ContextState, RunRecord } from './engine.js';
 import { StartMessageSchema, type ActiveRunsReply } from './messages.js';
@@ -11,10 +11,32 @@ import { getRun, putRun, RUN_CHANNEL } from './store.js';
 const worker = new Worker('worker.js', { type: 'module' });
 const active = new Set<string>();
 
-worker.onmessage = (ev: MessageEvent<{ type: string; runId: string }>) => {
-  if (ev.data.type === 'started') active.add(ev.data.runId);
-  if (ev.data.type === 'finished') active.delete(ev.data.runId);
+worker.onmessage = (ev: MessageEvent<{ type: string; runId: string } | LocateRequest>) => {
+  const m = ev.data;
+  if (m.type === 'locate') return locate(m as LocateRequest);
+  if (m.type === 'started') active.add((m as { runId: string }).runId);
+  if (m.type === 'finished') active.delete((m as { runId: string }).runId);
 };
+
+/**
+ * Repository-context pass: the review worker asks where the names the diff calls are defined. The
+ * graph worker builds or reuses the saved index at the PR head (so "where is this code used" is
+ * instant afterwards) and answers; the review worker then fetches only those files.
+ */
+function locate(req: LocateRequest): void {
+  const w = new Worker('graph-worker.js');
+  const reply = (r: LocateReply): void => {
+    w.terminate();
+    worker.postMessage(r);
+  };
+  w.onmessage = (ev: MessageEvent<GraphEvent>) => {
+    const e = ev.data;
+    if (e.type === 'done') reply(e.definitions ? { type: 'located', reqId: req.reqId, source: e.source, files: e.files, definitions: e.definitions } : { type: 'locate-failed', reqId: req.reqId, message: 'the index gave no answer' });
+    else if (e.type === 'error') reply({ type: 'locate-failed', reqId: req.reqId, message: e.message });
+  };
+  w.onerror = (e) => reply({ type: 'locate-failed', reqId: req.reqId, message: `the indexer stopped: ${e.message}` });
+  w.postMessage({ ...req.job, maxDownloadBytes: MAX_DOWNLOAD_BYTES } satisfies GraphJob);
+}
 
 const channel = new BroadcastChannel(RUN_CHANNEL);
 const graphs = new Set<string>();

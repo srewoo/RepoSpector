@@ -55,7 +55,7 @@ interface Classified {
 
 const visible = (h: WordHit): boolean => !isSecretPath(h.file) && !isSkippablePath(h.file);
 
-async function parseFiles(files: readonly string[], source: RevisionSource): Promise<Map<string, FileSymbols>> {
+export async function parseFiles(files: readonly string[], source: RevisionSource): Promise<Map<string, FileSymbols>> {
   const parsed = new Map<string, FileSymbols>();
   await source.preload(files);
   for (const f of files) {

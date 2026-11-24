@@ -3,11 +3,18 @@
 // navigation with focus-ring check, and a click-through of every control with console errors.
 // Usage: node scripts/extension-ui-check.mjs "<Chrome for Testing binary>" "$PWD/packages/extension/dist/extension"
 import { spawn } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const [chromeBin, extDir] = process.argv.slice(2);
+const [chromeBin, builtDir] = process.argv.slice(2);
+// Test-only copy of the build with the model provider and GitHub pre-granted, because headless Chrome
+// cannot click a permission prompt. Model-list calls are intercepted (see mock), so nothing leaves the machine.
+const extDir = mkdtempSync(join(tmpdir(), 'rs-ui-ext-'));
+cpSync(builtDir, extDir, { recursive: true });
+const testManifest = JSON.parse(readFileSync(join(extDir, 'manifest.json'), 'utf8'));
+testManifest.host_permissions = ['https://api.anthropic.com/*', 'https://github.com/*', 'https://api.github.com/*'];
+writeFileSync(join(extDir, 'manifest.json'), JSON.stringify(testManifest));
 const port = 9334;
 const chrome = spawn(chromeBin, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), 'rs-ui-'))}`, `--disable-extensions-except=${extDir}`, `--load-extension=${extDir}`, '--no-first-run', 'about:blank'], { stdio: 'ignore' });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -49,8 +56,16 @@ async function open(url) {
   let id = 0;
   const pending = new Map();
   const errors = [];
+  const mocks = [];
   ws.addEventListener('message', (m) => {
     const d = JSON.parse(m.data);
+    if (d.method === 'Fetch.requestPaused') {
+      const hit = mocks.find((x) => d.params.request.url.startsWith(x.prefix));
+      ws.send(JSON.stringify(hit
+        ? { id: 1e6 + Math.floor(Math.random() * 1e6), method: 'Fetch.fulfillRequest', params: { requestId: d.params.requestId, responseCode: hit.status, responseHeaders: [{ name: 'content-type', value: 'application/json' }, ...Object.entries(hit.headers).map(([name, value]) => ({ name, value }))], body: Buffer.from(JSON.stringify(hit.json)).toString('base64') } }
+        : { id: 1e6 + Math.floor(Math.random() * 1e6), method: 'Fetch.continueRequest', params: { requestId: d.params.requestId } }));
+      if (hit) hit.calls.push({ url: d.params.request.url, headers: d.params.request.headers });
+    }
     if (d.id && pending.has(d.id)) (pending.get(d.id)(d), pending.delete(d.id));
     if (d.method === 'Runtime.exceptionThrown') errors.push(d.params.exceptionDetails.exception?.description ?? d.params.exceptionDetails.text);
     if (d.method === 'Runtime.consoleAPICalled' && d.params.type === 'error') errors.push(d.params.args.map((a) => a.value ?? a.description).join(' '));
@@ -58,6 +73,17 @@ async function open(url) {
   const send = (method, params = {}) => new Promise((r) => { const i = ++id; pending.set(i, r); ws.send(JSON.stringify({ id: i, method, params })); });
   await send('Runtime.enable');
   const js = async (expr) => (await send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true })).result?.result?.value;
+  // As if the user clicked: permissions.request needs a user gesture.
+  const click = async (expr) => (await send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true, userGesture: true })).result?.result?.value;
+  /** Answers requests starting with prefix with a canned JSON reply; records each call. */
+  const mock = async (prefix, status, json, headers = {}) => {
+    const m = { prefix, status, json, headers, calls: [] };
+    const old = mocks.findIndex((x) => x.prefix === prefix);
+    if (old >= 0) mocks.splice(old, 1);
+    mocks.push(m);
+    await send('Fetch.enable', { patterns: mocks.map((x) => ({ urlPattern: `${x.prefix}*` })) });
+    return m;
+  };
   const view = async (width, dark) => {
     await send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
     await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: dark ? 'dark' : 'light' }] });
@@ -69,7 +95,12 @@ async function open(url) {
     return js(`(() => { const e = document.activeElement; const s = getComputedStyle(e); return { name: e.getAttribute('aria-label') || e.labels?.[0]?.textContent || e.textContent.trim().slice(0, 40) || e.tagName, ring: s.outlineStyle !== 'none' && parseFloat(s.outlineWidth) >= 2 }; })()`);
   };
   await sleep(800);
-  return { js, view, tab, errors, close: () => ws.close() };
+  const shot = async (file) => {
+    await send('Emulation.setDeviceMetricsOverride', { width: 800, height: Math.ceil(await js('document.documentElement.scrollHeight')), deviceScaleFactor: 1, mobile: false });
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(file, Buffer.from((await send('Page.captureScreenshot', { format: 'png' })).result.data, 'base64'));
+  };
+  return { js, click, mock, view, tab, shot, errors, close: () => ws.close() };
 }
 
 async function audit(p, label) {
@@ -99,49 +130,104 @@ try {
   if (!sw) throw new Error('extension did not load');
   const base = sw.url.replace('/sw.js', '');
 
-  // Side panel, no hosts.
+  // Side panel, nothing set up.
   let panel = await open(`${base}/sidepanel.html`);
-  check((await panel.js('document.body.innerText')).includes('Add GitHub or GitLab in settings'), 'side panel (no hosts): explains next step');
+  check((await panel.js('document.body.innerText')).includes('Finish setup'), 'side panel (new user): points to setup');
+  if (process.env.SHOT_DIR) { await panel.view(400, false); await panel.shot(`${process.env.SHOT_DIR}/panel.png`); }
   await audit(panel, 'side panel (no hosts)');
   await keyboard(panel, 'side panel', 1);
   panel.close();
 
-  // Options: click-through.
+  // Options: a new user's path, top to bottom. Provider and GitHub calls are answered by mocks.
   const o = await open(`${base}/options.html`);
   const status = () => o.js("document.getElementById('status').innerText");
-  await o.js("(() => { document.getElementById('origin').value = 'https://gitlab.example/group'; document.querySelector('#add button').click(); })()");
-  check((await status()).includes('without a path'), 'Add host with a path: explains the expected format');
-  await o.js("(() => { document.getElementById('origin').value = 'https://github.com'; document.querySelector('#add button').click(); })()"); await sleep(500);
-  check(/not granted|could not ask/i.test(await status()), `Add host (headless, no permission prompt): reports the permission outcome: "${await status()}"`);
-  await o.js("chrome.storage.local.set({hosts:[{kind:'github',origin:'https://github.com'}]})"); await sleep(400);
-  check((await o.js("document.getElementById('hosts').innerText")).includes('GitHub at github.com'), 'host list shows the added host');
-  await o.js("(() => { document.getElementById('pass1').value='correct horse battery'; document.getElementById('pass2').value='different passphrase'; document.querySelector('#keys form').requestSubmit(); })()");
-  check((await status()).includes('do not match'), 'vault: mismatched passphrases are explained');
-  await o.js("(() => { document.getElementById('pass2').value='correct horse battery'; document.querySelector('#keys form').requestSubmit(); })()"); await sleep(1500);
-  check(!!(await o.js("!!document.getElementById('secret-value')")), 'vault: created and unlocked');
-  check((await o.js("document.getElementById('keys').innerText")).includes('No keys or tokens yet.'), 'keys: empty state names the next action');
-  await o.js("(() => { document.getElementById('secret-for').value='provider:anthropic'; document.getElementById('secret-value').value='sk-ant-api03-UICHECK'; document.querySelector('#keys form').requestSubmit(); })()"); await sleep(600);
-  check((await o.js("document.getElementById('keys').innerText")).includes('provider:anthropic'), 'keys: saved key listed by name');
-  check(!(await o.js("document.body.innerText")).includes('UICHECK'), 'keys: the key value is never displayed');
-  await o.js("[...document.querySelectorAll('#keys button')].find(b => b.textContent === 'Test key').click()"); await sleep(800);
-  const rowStatus = await o.js("document.querySelector('#keys .row-status').innerText");
-  check(/permission|not granted|user gesture/i.test(rowStatus), `Test key (headless, no permission prompt): row reports the outcome: "${rowStatus}"`);
-  await o.js("(() => { const p = document.getElementById('provider'); p.value = 'ollama'; p.dispatchEvent(new Event('change')); })()");
-  check(await o.js("!document.getElementById('ollamaModel').hidden && document.getElementById('preset').disabled"), 'model: Ollama shows its model field and disables presets');
-  await o.js("document.getElementById('test').click()"); await sleep(600);
-  check((await status()).length > 0, `Test this model: reports a result: "${await status()}"`);
-  const localText = await o.js("document.getElementById('local-mode').innerText");
-  check(localText.includes('npm install -g repospector-mcp@0.7.0') && localText.includes('native install --extension-id'), 'local mode: shows the install commands for this extension');
-  await o.js("[...document.querySelectorAll('#local-mode button')].find(b => b.textContent === 'Turn on local mode').click()"); await sleep(600);
-  check(/not granted|could not ask|is on/i.test(await status()), `Turn on local mode (headless, no permission prompt): reports the outcome: "${await status()}"`);
-  check(/Download the model \(22 MB\) and turn on/.test(await o.js("document.getElementById('meaning').innerText")), 'meaning-based matching: off by default, offers the download with its size');
+  const text = (id) => o.js(`document.getElementById('${id}').innerText`);
+  const keyStatus = () => o.js("document.getElementById('api-key-status')?.innerText ?? ''");
+  const connectStatus = () => o.js("document.getElementById('connect-status')?.innerText ?? ''");
+  await sleep(400);
+  check(/○ ?Add your own AI provider API key/.test(await text('checklist')), 'checklist: first step is the API key');
+  check(await o.js("!!document.getElementById('api-key') && !!document.getElementById('key-pass1')"), 'step 1: key field shown straight away, with the passphrase that will encrypt it');
+  check(/Create one on Anthropic/.test(await text('model')), 'step 1: links to the provider key page');
+  check(await o.js("!document.getElementById('model-pick')") && /Your models appear here once your key is checked/.test(await text('model')), 'step 1: no model list before a key is checked');
+  check((await o.js("document.getElementById('origin').value")) === 'https://github.com', 'step 2: github.com pre-filled');
+  await o.js("(() => { const k = document.getElementById('kind'); k.value = 'gitlab'; k.dispatchEvent(new Event('change')); })()");
+  check((await o.js("document.getElementById('origin').value")) === 'https://gitlab.com', 'step 2: switching to GitLab pre-fills gitlab.com');
+  await o.js("(() => { const k = document.getElementById('kind'); k.value = 'github'; k.dispatchEvent(new Event('change')); })()");
+
+  const saveKey = "[...document.querySelectorAll('#model button')].find(b => b.textContent === 'Check and save key').click()";
+  const fill = (key, p1, p2) => `document.getElementById('api-key').value='${key}'; document.getElementById('key-pass1').value='${p1}'; document.getElementById('key-pass2').value='${p2}';`;
+  await o.js(`(() => { ${fill('sk-ant-api03-UICHECK', 'correct horse battery', 'different one here')} ${saveKey}; })()`);
+  check(/do not match/.test(await keyStatus()), 'save key: mismatched passphrases are explained next to the button');
+  // Wrong key: the provider says 401. Nothing may be saved, not even the vault.
+  const models = await o.mock('https://api.anthropic.com/v1/models', 401, { type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key' } });
+  await o.click(`(() => { ${fill('sk-ant-WRONG', 'correct horse battery', 'correct horse battery')} ${saveKey}; })()`); await sleep(1500);
+  check(/Anthropic rejected this key \(401\).*The key was not saved\./.test(await keyStatus()), `wrong key: says so and saves nothing: "${await keyStatus()}"`);
+  check(/No keys saved yet/.test(await text('vault')) && await o.js("!document.getElementById('model-pick')"), 'wrong key: no vault, no model list');
+  // Right key: the list is what the key can use; the recommended model is saved automatically.
+  await o.mock('https://api.anthropic.com/v1/models', 200, { data: [{ id: 'claude-x-preview', display_name: 'Claude X' }, { id: 'claude-sonnet-5-5', display_name: 'Claude Sonnet 5.5' }], has_more: false });
+  await o.click(`(() => { ${fill('sk-ant-api03-UICHECK', 'correct horse battery', 'correct horse battery')} ${saveKey}; })()`); await sleep(2500);
+  check((await keyStatus()) === 'Key works: 2 models available.' && /Reviews will use claude-sonnet-5-5 \(recommended\)/.test(await status()), `right key: saved, list loaded, recommended model chosen: "${await keyStatus()}" / "${await status()}"`);
+  const call = (await o.mock('https://api.anthropic.com/v1/models', 200, { data: [{ id: 'claude-x-preview', display_name: 'Claude X' }, { id: 'claude-sonnet-5-5', display_name: 'Claude Sonnet 5.5' }], has_more: false })) && models;
+  check(call.calls.length >= 1 && call.calls.every((x) => !x.url.includes('UICHECK') && !x.url.includes('WRONG')), 'model list: the key is never in a URL');
+  check(/Anthropic API key saved/.test(await text('model')) && /Check again/.test(await text('model')), 'step 1: saved key row with Check again / Replace / Remove');
+  check(!(await o.js("document.body.innerText")).includes('UICHECK'), 'the key value is never displayed');
+  const options = await o.js("[...document.getElementById('model-pick').options].map(x => x.textContent)");
+  check(options[0]?.startsWith('Claude Sonnet 5.5 (claude-sonnet-5-5) · Recommended') && options[1] === 'Claude X (claude-x-preview)' && options.length === 3, `model list: only the key's models, recommended first: ${JSON.stringify(options)}`);
+  check(/Reviews use claude-sonnet-5-5/.test(await text('model')), 'model: says which model reviews use');
+  await o.js("(() => { const p = document.getElementById('model-pick'); p.value = 'claude-x-preview'; p.dispatchEvent(new Event('change')); })()");
+  check(/Price not listed/.test(await text('model')), 'model: unknown price is said plainly');
+  await o.click("[...document.querySelectorAll('#model button')].find(b => b.textContent === 'Save model').click()"); await sleep(600);
+  check((await status()).includes('reviews will use claude-x-preview'), 'Save model: saves the picked model');
+  check(/Lock keys now/.test(await text('vault')), 'key security: vault created by the first good key');
+
+  // Git: a wrong token is refused before anything is saved; a right one connects and names the account.
+  await o.mock('https://api.github.com/user', 401, { message: 'Bad credentials' });
+  await o.click("(() => { document.getElementById('token').value = 'ghp_WRONG'; document.getElementById('token').dispatchEvent(new Event('input')); document.querySelector('#add button[type=submit]').click(); })()"); await sleep(1200);
+  check(/GitHub rejected this token \(401\).*Nothing was saved/.test(await connectStatus()), `wrong token: says so: "${await connectStatus()}"`);
+  check(!(await o.js("document.getElementById('hosts').innerText")).includes('github.com'), 'wrong token: host not connected');
+  await o.mock('https://api.github.com/user', 200, { login: 'octo' }, { 'x-oauth-scopes': 'repo' });
+  await o.click("(() => { document.getElementById('token').value = 'ghp_UICHECK'; document.querySelector('#add button[type=submit]').click(); })()"); await sleep(1200);
+  check(/Token works: signed in as octo\. It can post draft reviews/.test(await text('hosts')), `right token: connected, names the account and what it can do: "${await text('hosts')}"`);
+  check(!(await o.js("document.body.innerText")).includes('ghp_'), 'tokens are never displayed');
+  check(/All set/.test(await o.js("document.querySelector('section.start').innerText")), 'checklist: all done, says how to start a review');
+  if (process.env.SHOT_DIR) { await o.view(800, false); await o.shot(`${process.env.SHOT_DIR}/options.png`); }
+
+  await o.js("(() => { const p = document.getElementById('provider'); p.value = 'ollama'; p.dispatchEvent(new Event('change')); })()"); await sleep(400);
+  check(await o.js("!!document.getElementById('ollamaUrl') && !document.getElementById('api-key')") && /Check connection and load models/.test(await text('model')), 'Ollama: address and a connection check, no key field');
+  await o.js("(() => { const p = document.getElementById('provider'); p.value = 'openai'; p.dispatchEvent(new Event('change')); })()"); await sleep(400);
+  check(await o.js("!!document.getElementById('api-key') && !document.getElementById('key-pass1')"), 'second provider: key field only, encryption already set up');
+  check(await o.js("!document.getElementById('local-mode') && !document.body.innerText.includes('npm install')"), 'local mode is not in the store build');
+  check(!(await o.js("document.querySelector('details.advanced').open")) && /Meaning-based matching/.test(await o.js("document.querySelector('details.advanced').textContent")), 'advanced features collapsed by default');
+  check(/Download the model \(22 MB\) and turn on/.test(await o.js("document.getElementById('meaning').textContent")), 'meaning-based matching: off by default, offers the download with its size');
   check(/Help/.test(await o.js("document.querySelector('footer').innerText")), 'settings links to help and privacy');
-  await audit(o, 'options (unlocked, 1 key, 1 host)');
-  await keyboard(o, 'options', 14);
-  await o.js("[...document.querySelectorAll('#keys button')].find(b => b.textContent === 'Lock keys now').click()"); await sleep(600);
-  check(!!(await o.js("!!document.getElementById('unlock')")), 'Lock keys now: shows the unlock form');
-  await o.js("[...document.querySelectorAll('#hosts button')][0].click()"); await sleep(600);
-  check((await status()).includes('Removed https://github.com'), 'Remove host: removes it and says so');
+  await audit(o, 'options (set up)');
+  await o.js("document.querySelector('details.advanced').open = true"); await sleep(200);
+  await audit(o, 'options (advanced open)');
+  await o.js("document.querySelector('details.advanced').open = false");
+  await keyboard(o, 'options', 12);
+  await o.js("[...document.querySelectorAll('#vault button')].find(b => b.textContent === 'Lock keys now').click()"); await sleep(800);
+  check(!!(await o.js("!!document.getElementById('key-unlock')")) && /locked/.test(await text('model')), 'Lock keys now: step 1 offers unlock in place');
+
+  // Keys locked (as after a Chrome restart or extension reload): the side panel unlocks in place.
+  const prTab = await json(`/json/new?https://github.com/sindresorhus/ky/pull/883`, 'PUT');
+  const lockedPanel = await open(`${base}/sidepanel.html`);
+  await fetch(`http://127.0.0.1:${port}/json/activate/${prTab.id}`);
+  let ptext = '';
+  for (let i = 0; i < 30 && !/Your keys are locked/.test(ptext); i++) { await sleep(300); ptext = await lockedPanel.js('document.body.innerText'); }
+  check(/Your keys are locked\. Enter your passphrase to review this pull request\./.test(ptext) && !!(await lockedPanel.js("!!document.getElementById('panel-unlock')")), 'side panel (keys locked): unlock form in the panel, not a trip to settings');
+  check((await lockedPanel.js('document.activeElement?.id')) === 'panel-unlock', 'side panel (keys locked): passphrase field has focus');
+  await lockedPanel.js("(() => { document.getElementById('panel-unlock').value = 'wrong passphrase!'; [...document.querySelectorAll('button')].find(b => b.textContent === 'Unlock keys').click(); })()"); await sleep(2500);
+  check(/That passphrase is not right/.test(await lockedPanel.js('document.body.innerText')), 'side panel: a wrong passphrase is explained in place');
+  await lockedPanel.js("(() => { document.getElementById('panel-unlock').value = 'correct horse battery'; document.getElementById('panel-unlock').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' })); })()");
+  for (let i = 0; i < 40; i++) { await sleep(400); ptext = await lockedPanel.js('document.body.innerText'); if (/Reviews \d+ KB|Could not read|rejected your saved/.test(ptext)) break; }
+  // The test's saved GitHub token is fake, so real GitHub answers 401: the panel must say the saved token was rejected.
+  check(!(await lockedPanel.js("!!document.getElementById('panel-unlock')")) && /github\.com rejected your saved access token \(401\)/.test(ptext), `side panel: Enter unlocks and goes straight to reading the PR (fake saved token → says it was rejected): ${JSON.stringify(ptext.split('\n').filter(Boolean).slice(3, 5))}`);
+  await audit(lockedPanel, 'side panel (unlocked, ready to review)');
+  check(lockedPanel.errors.length === 0, `side panel: no console errors${lockedPanel.errors.length ? `: ${lockedPanel.errors.join(' | ')}` : ''}`);
+  lockedPanel.close();
+  await o.js("[...document.querySelectorAll('#vault button')].find(b => b.textContent === 'Lock keys now')?.click()"); await sleep(600);
+  await o.js("[...document.querySelectorAll('#hosts button')].find(b => b.textContent === 'Disconnect').click()"); await sleep(600);
+  check((await status()).includes('Disconnected github.com'), `Disconnect: removes the host and says so: "${await status()}"`);
   check(o.errors.length === 0, `options: no console errors${o.errors.length ? `: ${o.errors.join(' | ')}` : ''}`);
   o.close();
 

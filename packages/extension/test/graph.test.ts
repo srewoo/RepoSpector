@@ -73,6 +73,27 @@ const job = (sha: string, over: Partial<IndexJob> = {}): IndexJob => ({ repo: 'g
 let clock = 1_000;
 const now = () => ++clock;
 
+describe('buildIndex locating definitions for the repository-context pass', () => {
+  it('finds where called names are defined across the whole repository, skipping vendored code, and saves the index', async () => {
+    const r = twoCommits();
+    const cache = memoryCache();
+    const res = await buildIndex(job(r.one, { findings: [], locate: { names: ['total', 'Cart', 'missingFn'], addedLines: [] } }), { fetch: r.fetchImpl, extractor: (await realExtractor()), cache, now });
+    // node_modules/x/index.js also defines total(); it is not indexed, so it is not offered.
+    expect(res.definitions?.found).toEqual([{ name: 'total', file: 'src/cart.py', line: 2 }, { name: 'Cart', file: 'src/cart.py', line: 1 }]);
+    expect(res.definitions?.missing).toEqual(['missingFn']);
+    // Saved: "where is this code used" for this commit needs no download afterwards.
+    const again = await buildIndex(job(r.one, { locate: { names: ['total'], addedLines: [] } }), { fetch: r.fetchImpl, extractor: (await counting()).extractor, cache, now });
+    expect(again.source).toBe('saved');
+    expect(again.definitions?.found).toHaveLength(1);
+  });
+
+  it('skips a definition the change itself adds (the reviewer already sees it)', async () => {
+    const r = twoCommits();
+    const res = await buildIndex(job(r.one, { findings: [], locate: { names: ['total'], addedLines: [['src/cart.py', [2]]] } }), { fetch: r.fetchImpl, extractor: await realExtractor(), cache: memoryCache(), now });
+    expect(res.definitions?.found).toEqual([]);
+  });
+});
+
 describe('buildIndex with the saved index', () => {
   it('downloads and parses once; the same commit is then served from the saved index with no download', async () => {
     const r = twoCommits();
@@ -181,4 +202,105 @@ describe('archivePlan', () => {
 
 it('MAX_CHANGED_FILES keeps per-file fetching well under GitHub\'s hourly token limit', () => {
   expect(MAX_CHANGED_FILES).toBeLessThanOrEqual(500);
+});
+
+describe('saved index versioning', () => {
+  it('pins the parser queries: changing them needs a new index version, or old saved symbols would miss new definitions', async () => {
+    const { createHash } = await import('node:crypto');
+    const { QUERIES } = await import('@repospector/core');
+    const { INDEX_QUERIES_SHA, INDEX_DB_VERSION } = await import('../src/graph/cache.js');
+    const sha = createHash('sha256').update(JSON.stringify(QUERIES)).digest('hex').slice(0, 12);
+    expect(sha, `parser queries changed: bump INDEX_DB_VERSION (now ${INDEX_DB_VERSION}) and set INDEX_QUERIES_SHA to ${sha}`).toBe(INDEX_QUERIES_SHA);
+  });
+});
+
+describe('buildIndex on GitLab (no archive: GitLab refuses archive downloads from extensions with 406)', () => {
+  function gitlabRepo() {
+    const dir = mkdtempSync(join(tmpdir(), 'rs-gl-'));
+    const git = (...a: string[]) => execFileSync('git', ['-C', dir, ...a], { maxBuffer: 1 << 26 });
+    mkdirSync(join(dir, 'src'));
+    writeFileSync(join(dir, 'src/cart.py'), 'class Cart:\n    def total(self, items):\n        return sum(items)\n');
+    writeFileSync(join(dir, 'src/pay.py'), 'def pay(c):\n    return c.total([1, 2])\n');
+    writeFileSync(join(dir, 'README.md'), '# hi\n');
+    git('init', '-q');
+    git('add', '.');
+    git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'one');
+    const sha = git('rev-parse', 'HEAD').toString().trim();
+    const tree = git('ls-tree', '-r', sha).toString().trim().split('\n').map((l) => {
+      const [meta, path] = l.split('\t');
+      const [, type, id] = (meta ?? '').split(' ');
+      return { path, type, id };
+    });
+    const API = 'https://gitlab.example/api/v4/projects/g%2Fp';
+    const calls: string[] = [];
+    const auth: (string | null)[] = [];
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      calls.push(url);
+      auth.push(new Headers(init?.headers).get('authorization'));
+      const m = /\/repository\/tree\?ref=[0-9a-f]+&recursive=true&per_page=100(?:&page=(\d+))?$/.exec(url);
+      if (m) {
+        // Two entries per page, so pagination is exercised; the last page has no next link.
+        const page = Number(m[1] ?? 1);
+        const slice = tree.slice((page - 1) * 2, page * 2);
+        const more = page * 2 < tree.length;
+        return Response.json(slice, { headers: more ? { link: `<${API}/repository/tree?ref=${sha}&recursive=true&per_page=100&page=${page + 1}>; rel="next"` } : {} });
+      }
+      const blob = /\/repository\/blobs\/([0-9a-f]{40})\/raw$/.exec(url);
+      if (blob) return new Response(git('cat-file', 'blob', blob[1] ?? ''));
+      return new Response(null, { status: 406 });
+    }) as typeof fetch;
+    return { sha, API, calls, auth, fetchImpl };
+  }
+
+  it('lists files with the tree API (paginated), fetches source blobs by id, never the archive, and locates definitions', async () => {
+    const r = gitlabRepo();
+    const res = await buildIndex(
+      { repo: 'gitlab.example/g/p', sha: r.sha, findings: [], archiveUrl: `${r.API}/repository/archive.tar.gz?sha=${r.sha}`, gitlabProjectApi: r.API, apiToken: 'glpat-x', maxDownloadBytes: 10_000_000, locate: { names: ['total'], addedLines: [] } },
+      { fetch: r.fetchImpl, extractor: await realExtractor(), cache: memoryCache(), now },
+    );
+    expect(r.calls.some((u) => u.includes('/archive'))).toBe(false);
+    expect(r.calls.filter((u) => u.includes('/repository/tree')).length).toBe(2);
+    // README.md is not source: listed but never fetched.
+    expect(r.calls.filter((u) => u.includes('/blobs/')).length).toBe(2);
+    expect(res.files).toBe(2);
+    expect(res.definitions?.found).toEqual([{ name: 'total', file: 'src/cart.py', line: 2 }]);
+    // The token goes only to the GitLab API, in a header.
+    expect(r.auth.every((a) => a === 'Bearer glpat-x')).toBe(true);
+  });
+
+  it('refuses to follow a next-page link to another origin', async () => {
+    const r = gitlabRepo();
+    const evil = (async (input: string | URL | Request, init?: RequestInit) => {
+      const res = await r.fetchImpl(input, init);
+      if (String(input).includes('/repository/tree')) return Response.json(await res.json(), { headers: { link: '<https://evil.example/steal>; rel="next"' } });
+      return res;
+    }) as typeof fetch;
+    await buildIndex({ repo: 'gitlab.example/g/p', sha: r.sha, findings: [], gitlabProjectApi: r.API, apiToken: 'glpat-x', maxDownloadBytes: 1, locate: { names: ['total'], addedLines: [] } }, { fetch: evil, extractor: await realExtractor(), cache: memoryCache(), now });
+    expect(r.calls.some((u) => u.startsWith('https://evil.example'))).toBe(false);
+  });
+});
+
+describe('file downloads under rate limits', () => {
+  it('waits as GitLab says on 429 and retries, instead of failing the index', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rs-429-'));
+    const git = (...a: string[]) => execFileSync('git', ['-C', dir, ...a]);
+    writeFileSync(join(dir, 'a.py'), 'def total(x):\n    return x\n');
+    git('init', '-q');
+    git('add', '.');
+    git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'one');
+    const sha = git('rev-parse', 'HEAD').toString().trim();
+    const id = git('rev-parse', `${sha}:a.py`).toString().trim();
+    let blobCalls = 0;
+    const waits: number[] = [];
+    const fetchImpl = (async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('/repository/tree')) return Response.json([{ path: 'a.py', type: 'blob', id }]);
+      blobCalls++;
+      return blobCalls === 1 ? new Response(null, { status: 429, headers: { 'retry-after': '2' } }) : new Response(git('cat-file', 'blob', id));
+    }) as typeof fetch;
+    const res = await buildIndex({ repo: 'gitlab.example/g/p', sha, findings: [], gitlabProjectApi: 'https://gitlab.example/api/v4/projects/1', maxDownloadBytes: 1, locate: { names: ['total'], addedLines: [] } }, { fetch: fetchImpl, extractor: await realExtractor(), cache: memoryCache(), now, sleep: async (ms) => void waits.push(ms) });
+    expect(waits).toEqual([2000]);
+    expect(res.definitions?.found).toEqual([{ name: 'total', file: 'a.py', line: 1 }]);
+  });
 });

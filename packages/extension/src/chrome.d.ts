@@ -13,6 +13,7 @@ declare namespace chrome {
     }
     function sendMessage<T = unknown>(message: unknown): Promise<T>;
     function sendNativeMessage<T = unknown>(application: string, message: unknown): Promise<T>;
+    const onInstalled: { addListener(cb: (details: { reason: 'install' | 'update' | 'chrome_update' | 'shared_module_update' }) => void): void };
     const onMessage: { addListener(cb: (message: unknown, sender: MessageSender, reply: (response: unknown) => void) => boolean | undefined): void };
   }
   namespace offscreen {
@@ -27,7 +28,8 @@ declare namespace chrome {
     }
     const local: StorageArea;
     const session: StorageArea;
-    const onChanged: { addListener(cb: (changes: Record<string, { newValue?: unknown; oldValue?: unknown }>, area: string) => void): void };
+    type ChangeListener = (changes: Record<string, { newValue?: unknown; oldValue?: unknown }>, area: string) => void;
+    const onChanged: { addListener(cb: ChangeListener): void; removeListener(cb: ChangeListener): void };
   }
   namespace permissions {
     interface Permissions {
@@ -43,6 +45,8 @@ declare namespace chrome {
   }
   namespace sidePanel {
     function setPanelBehavior(b: { openPanelOnActionClick: boolean }): Promise<void>;
+    /** With a tabId and enabled: false, the panel is hidden while that tab is active. */
+    function setOptions(o: { tabId?: number; path?: string; enabled?: boolean }): Promise<void>;
   }
   namespace tabs {
     interface Tab {
@@ -52,6 +56,7 @@ declare namespace chrome {
       pendingUrl?: string;
       active: boolean;
     }
+    function getCurrent(): Promise<Tab | undefined>;
     function query(q: { active?: boolean; currentWindow?: boolean; lastFocusedWindow?: boolean }): Promise<Tab[]>;
     function sendMessage<T = unknown>(tabId: number, message: unknown): Promise<T>;
     const onActivated: { addListener(cb: (info: { tabId: number }) => void): void };

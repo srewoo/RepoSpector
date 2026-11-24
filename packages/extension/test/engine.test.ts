@@ -8,7 +8,7 @@ const target: ReviewTarget = { kind: 'github', host: 'github.com', owner: 'o', r
 const DIFF = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,1 +1,2 @@\n a\n+const key = "AKIAABCDEFGHIJKLMNOP";\n';
 
 /** A provider that answers review and verify prompts from scripts, recording what it was sent. */
-function scripted(review: string, verify: string, opts: { fail?: ProviderError } = {}): ModelProvider & { prompts: CompletionRequest[] } {
+function scripted(review: string, verify: string, opts: { fail?: ProviderError; contextReview?: string } = {}): ModelProvider & { prompts: CompletionRequest[] } {
   const prompts: CompletionRequest[] = [];
   return {
     id: 'anthropic',
@@ -18,7 +18,8 @@ function scripted(review: string, verify: string, opts: { fail?: ProviderError }
       prompts.push(req);
       if (opts.fail) throw opts.fail;
       const isVerify = req.prompt.includes('<findings>');
-      return { text: isVerify ? verify : review, model: 'claude-sonnet-5-5', usage: { inputTokens: 1000, outputTokens: 100 }, stop: 'end', fallbackUsed: false };
+      const isContext = req.prompt.includes('<definitions>');
+      return { text: isVerify ? verify : isContext ? (opts.contextReview ?? '[]') : review, model: 'claude-sonnet-5-5', usage: { inputTokens: 1000, outputTokens: 100 }, stop: 'end', fallbackUsed: false };
     },
   };
 }
@@ -54,7 +55,50 @@ describe('runReview', () => {
     expect(run.usage).toEqual({ inputTokens: 2000, outputTokens: 200 });
     expect(run.costUsd).toBeCloseTo((2000 * 2 + 200 * 10) / 1e6, 9);
     expect(run.diff).toBeUndefined();
-    expect(d.saved.map((s) => s.step)).toEqual(['fetch', 'review', 'verify', 'filter', 'filter']);
+    expect(d.saved.map((s) => s.step)).toEqual(['fetch', 'context', 'review', 'verify', 'filter', 'filter']);
+  });
+
+  it('with repository context: runs the plain pass and a context pass, merges them, and marks what only the context pass found', async () => {
+    const context = '[{"file":"src/a.ts","line":2,"claim":"duplicate of the plain finding"},{"file":"src/b.ts","line":40,"claim":"Calls save() with arguments swapped"}]';
+    const verify = '[{"index":0,"keep":true,"confidence":90,"reason":"r"},{"index":1,"keep":true,"confidence":50,"reason":"r"},{"index":2,"keep":true,"confidence":70,"reason":"r"}]';
+    const p = scripted(REVIEW, verify, { contextReview: context });
+    const seen: { headSha: string }[] = [];
+    const d = deps(p, { repoContext: async (input) => (seen.push(input), { text: '### `save` at src/store.ts:3\n```\nfunction save(id, user) {}\n```\n', definitions: 1, indexedFiles: 12 }) });
+    const run = await runReview(newRun('rc1', target, p, 1_000), d);
+    expect(seen[0]?.headSha).toBe('abc');
+    const contextPrompt = p.prompts.find((x) => x.prompt.includes('<definitions>'));
+    expect(contextPrompt?.prompt).toContain('function save(id, user)');
+    // The plain pass is unchanged: no repository code in it.
+    expect(p.prompts.filter((x) => !x.prompt.includes('<definitions>') && !x.prompt.includes('<findings>')).every((x) => !x.prompt.includes('function save'))).toBe(true);
+    // 2 plain + 1 new from the context pass (its first finding is within 5 lines of a plain one).
+    expect(run.findings?.map((f) => [f.claim, f.fromContext ?? false])).toEqual([['Hard-coded AWS key', false], ['Calls save() with arguments swapped', true], ['Unused variable a', false]]);
+    expect(run.notes.at(-1)).toMatch(/1 definition of what this change calls, from 12 indexed files/);
+    // Repository code is not kept once the review is done.
+    expect(run.repoContext).toEqual({ definitions: 1, indexedFiles: 12 });
+  });
+
+  it('reviews the diff only, and says why, when the repository cannot be read', async () => {
+    const p = scripted(REVIEW, VERIFY);
+    const d = deps(p, { repoContext: async () => { throw new Error('the repository download is larger than 300 MB, so it was stopped'); } });
+    const run = await runReview(newRun('rc2', target, p, 1_000), d);
+    expect(run.status).toBe('done');
+    expect(p.prompts.some((x) => x.prompt.includes('<definitions>'))).toBe(false);
+    expect(run.notes.join(' ')).toMatch(/Repository context was not used \(the repository download is larger than 300 MB.*\), so this review read the diff only/);
+  });
+
+  it('skips the second pass (no extra cost) when nothing the change calls is defined in the repository', async () => {
+    const p = scripted(REVIEW, VERIFY);
+    const run = await runReview(newRun('rc3', target, p, 1_000), deps(p, { repoContext: async () => ({ text: '', definitions: 0, indexedFiles: 40 }) }));
+    expect(p.prompts).toHaveLength(2);
+    expect(run.notes.at(-1)).toMatch(/nothing this change calls is defined elsewhere/);
+  });
+
+  it('keeps the plain review when the context pass reply is unreadable', async () => {
+    const p = scripted(REVIEW, VERIFY, { contextReview: 'not json' });
+    const run = await runReview(newRun('rc4', target, p, 1_000), deps(p, { repoContext: async () => ({ text: 'defs', definitions: 1, indexedFiles: 2 }) }));
+    expect(run.status).toBe('done');
+    expect(run.findings).toHaveLength(2);
+    expect(run.notes.join(' ')).toMatch(/repository-context pass reply could not be read/);
   });
 
   it('orders findings by verifier confidence, refuted ones last, and keeps every finding', async () => {
@@ -64,6 +108,15 @@ describe('runReview', () => {
     const run = await runReview(newRun('r9', target, p, 1_000), deps(p));
     expect(run.findings?.map((f) => f.claim)).toEqual(['high', 'mid', 'low', 'no score', 'refuted']);
     expect(run.findings?.map((f) => f.confidence)).toEqual([90, 60, 20, undefined, 95]);
+  });
+
+  it('carries the impact rating onto findings for display, without changing the order', async () => {
+    const review = '[{"file":"a.ts","line":1,"claim":"minor"},{"file":"a.ts","line":2,"claim":"crash"},{"file":"a.ts","line":3,"claim":"unrated"}]';
+    const verify = '[{"index":0,"keep":true,"confidence":80,"impact":"low","reason":"r"},{"index":1,"keep":true,"confidence":40,"impact":"high","reason":"r"},{"index":2,"keep":true,"confidence":60,"reason":"r"}]';
+    const p = scripted(review, verify);
+    const run = await runReview(newRun('r10', target, p, 1_000), deps(p));
+    // Order is still by confidence: a likely low-impact bug stays above a doubtful high-impact one.
+    expect(run.findings?.map((f) => [f.claim, f.impact])).toEqual([['minor', 'low'], ['unrated', undefined], ['crash', 'high']]);
   });
 
   it('resumes after the review step without calling the model for it again', async () => {

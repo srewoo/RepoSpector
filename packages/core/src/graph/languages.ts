@@ -37,13 +37,19 @@ export const GRAMMAR_FILE: Record<LanguageId, string> = {
   tsx: 'tree-sitter-tsx.wasm',
 };
 
+// Private members (#name) are kept with their # so definitions and calls match each other.
 const JS_COMMON = `
 (function_declaration name: (identifier) @name) @def.function
-(method_definition name: (property_identifier) @name) @def.method
+(method_definition name: [(property_identifier) (private_property_identifier)] @name) @def.method
 (variable_declarator name: (identifier) @name value: [(arrow_function) (function_expression)]) @def.function
 (call_expression function: (identifier) @call)
-(call_expression function: (member_expression property: (property_identifier) @call))
+(call_expression function: (member_expression property: [(property_identifier) (private_property_identifier)] @call))
 (new_expression constructor: (identifier) @call)
+`;
+/** Class fields holding a function (handle = () => {}): JS and TS name the node differently. */
+const JS_FIELDS = `(field_definition property: [(property_identifier) (private_property_identifier)] @name value: [(arrow_function) (function_expression)]) @def.method
+`;
+const TS_FIELDS = `(public_field_definition name: [(property_identifier) (private_property_identifier)] @name value: [(arrow_function) (function_expression)]) @def.method
 `;
 
 const TS_TYPES = `
@@ -101,7 +107,7 @@ export const QUERIES: Record<LanguageId, string> = {
 `,
   javascript: `(class_declaration name: (identifier) @name) @def.class
 (class_declaration name: (identifier) @inherit.child (class_heritage [(identifier) @inherit.base (member_expression property: (property_identifier) @inherit.base)]))
-${JS_COMMON}`,
-  typescript: TS_TYPES + TS_INHERIT + JS_COMMON,
-  tsx: TS_TYPES + TS_INHERIT + JS_COMMON + JSX,
+${JS_COMMON}${JS_FIELDS}`,
+  typescript: TS_TYPES + TS_INHERIT + JS_COMMON + TS_FIELDS,
+  tsx: TS_TYPES + TS_INHERIT + JS_COMMON + TS_FIELDS + JSX,
 };

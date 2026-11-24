@@ -39,3 +39,13 @@ export async function archivePlan(target: ReviewTarget, apiBase: string, headSha
     origins: [],
   };
 }
+
+/**
+ * Host API fields for an index job. GitHub: fetch only changed files (with a token). GitLab: always
+ * the tree API, because GitLab refuses archive downloads from extensions (406). The token goes only
+ * to the host's API origin.
+ */
+export function indexApiFields(target: ReviewTarget, apiBase: string, hostToken: string | undefined): { githubRepoApi?: string; gitlabProjectApi?: string; apiToken?: string } {
+  const token = hostToken ? { apiToken: hostToken } : {};
+  return target.kind === 'github' ? { githubRepoApi: `${apiBase}/repos/${target.owner}/${target.repo}`, ...token } : { gitlabProjectApi: `${apiBase}/projects/${encodeURIComponent(target.project)}`, ...token };
+}

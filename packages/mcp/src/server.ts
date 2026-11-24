@@ -13,7 +13,9 @@ import { buildPlan } from './plan.js';
 import { RunStore, type StoredRun } from './store.js';
 import { formatFinal, packForVerifier, referencedFiles } from './views.js';
 
-export const VERSION = '0.7.0';
+import { VERSION } from './version.js';
+
+export { VERSION };
 
 class ToolError extends Error {}
 
@@ -43,6 +45,8 @@ export interface ServerOptions {
   readonly cacheDir?: string;
   /** How long get_context waits for a graph build before parsing on demand. */
   readonly graphWaitMs?: number;
+  /** How long plan_review waits for the graph to add definitions to the context pack (default 2 minutes). */
+  readonly definitionsWaitMs?: number;
   /** Runs gh/glab; tests pass a fake. */
   readonly cliRunner?: CliRunner;
 }
@@ -64,7 +68,7 @@ export async function createServer(opts: ServerOptions): Promise<McpServer> {
     'plan_review',
     {
       description:
-        'Start a review of this repo. Diffs head against base, rates risk, and returns the specialists to run and one shared context pack. Default: working tree (including uncommitted and untracked files) against the merge-base with main.',
+        'Start a review of this repo. Diffs head against base, rates risk, and returns the specialists to run and one shared context pack: the diff, plus the code (from the rest of the repo) of the functions and classes the diff calls. Default: working tree (including uncommitted and untracked files) against the merge-base with main.',
       inputSchema: {
         base: z.string().max(200).optional().describe('Base ref; default is the merge-base with origin/HEAD, main or master'),
         head: z.string().max(200).optional().describe('Head ref, or "worktree" (default) for uncommitted work'),
@@ -74,7 +78,7 @@ export async function createServer(opts: ServerOptions): Promise<McpServer> {
     },
     async ({ base, head, depth }) =>
       handle(async () => {
-        const plan = await buildPlan(repo, base, head ?? 'worktree', depth ?? 'standard');
+        const plan = await buildPlan(repo, base, head ?? 'worktree', depth ?? 'standard', { graph, ...(opts.definitionsWaitMs !== undefined ? { waitMs: opts.definitionsWaitMs } : {}) });
         const run = new ReviewRun(randomUUID(), plan.specialists, plan.source, () => randomUUID());
         store.add({ run, plan });
         // Build the graph for the reviewed commit (HEAD for uncommitted work) in the background.
@@ -86,7 +90,7 @@ export async function createServer(opts: ServerOptions): Promise<McpServer> {
           next:
             plan.specialists.length === 0
               ? 'Nothing to review.'
-              : 'For each specialist, start a subagent with get_agent_prompt(name) and this context pack; each calls submit_findings (an empty list is fine). Specialists can call get_context(runId, symbol) to see where a function is defined and used. Then call verify_batch.',
+              : 'For each specialist, start a subagent with get_agent_prompt(name) and this context pack; each calls submit_findings (an empty list is fine). The context pack already holds the code of functions the diff calls (see definitions); specialists can call get_context(runId, symbol) for anything else, such as callers of a changed function. Then call verify_batch.',
         };
       }),
   );

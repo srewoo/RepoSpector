@@ -1,4 +1,5 @@
 import { fetchClient, HostError } from '@repospector/core';
+import { listModels, type ListedModel } from './providers/models.js';
 import { PRESETS } from './providers/presets.js';
 import { ProviderError, type ProviderId } from './providers/types.js';
 import { apiBase, type HostSetting } from './settings.js';
@@ -38,10 +39,10 @@ async function gitlabPosting(api: ReturnType<typeof fetchClient>): Promise<strin
 
 /**
  * Checks one saved secret with the smallest real request: a git token reads its own user
- * (read-only); a model key sends one short prompt to that provider's cheapest preset model.
+ * (read-only); a model key lists the provider's models (free), passing them to `onModels`.
  * Returns a sentence for the user; throws an Error whose message says what failed.
  */
-export async function testSecret(name: string, value: string, opts: { hosts: readonly HostSetting[]; fetchImpl?: typeof fetch }): Promise<string> {
+export async function testSecret(name: string, value: string, opts: { hosts: readonly HostSetting[]; fetchImpl?: typeof fetch; onModels?: (models: readonly ListedModel[]) => Promise<void> | void }): Promise<string> {
   if (name.startsWith('host:')) {
     const origin = name.slice('host:'.length);
     const host = opts.hosts.find((h) => h.origin === origin);
@@ -62,17 +63,11 @@ export async function testSecret(name: string, value: string, opts: { hosts: rea
   }
   const provider = name.slice('provider:'.length) as Exclude<ProviderId, 'ollama'>;
   if (!(provider in PRESETS)) throw new Error(`Unknown key type: ${name}`);
-  const model = PRESETS[provider].low.model;
-  // Loaded on demand: provider code (with the Anthropic SDK) is large.
-  const { createProvider } = await import('./providers/index.js');
+  // Listing models is free (no tokens) and proves the key works; the list also fills the model picker.
   try {
-    const r = await createProvider({ id: provider, apiKey: value, model, ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}) }).complete({
-      system: 'Reply with the single word OK.',
-      prompt: 'ping',
-      maxTokens: 512,
-      effort: 'low',
-    });
-    return `Key works: ${r.model} answered.`;
+    const models = await listModels(provider, { apiKey: value, ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}) });
+    await opts.onModels?.(models);
+    return models.length === 0 ? `Key works, but ${PROVIDER_NAMES[provider]} lists no models it can use for reviews.` : `Key works: ${models.length} model${models.length === 1 ? '' : 's'} available.`;
   } catch (e) {
     if (e instanceof ProviderError && e.kind === 'auth') throw new Error(`${PROVIDER_NAMES[provider]} rejected this key. Check it was copied in full, then save it again.`);
     throw new Error((e as Error).message);

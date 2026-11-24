@@ -55,10 +55,17 @@ describe('testSecret', () => {
     await expect(testSecret('host:https://github.com', 'ghp_bad', { hosts, fetchImpl: f.impl })).rejects.toThrow(/rejected/);
   });
 
-  it('checks a model key with one short call to the cheapest preset model', async () => {
-    const f = fake(200, { model: 'gpt-6-luna', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'OK' }] }], usage: { input_tokens: 5, output_tokens: 1 } });
-    expect(await testSecret('provider:openai', 'sk-o', { hosts, fetchImpl: f.impl })).toBe('Key works: gpt-6-luna answered.');
-    expect(f.urls).toEqual(['https://api.openai.com/v1/responses']);
+  it('checks a model key by listing its models (free), and hands the list on', async () => {
+    const f = fake(200, { data: [{ id: 'gpt-6-luna', created: 2 }, { id: 'text-embedding-4', created: 3 }] });
+    let got: readonly { id: string }[] = [];
+    expect(await testSecret('provider:openai', 'sk-o', { hosts, fetchImpl: f.impl, onModels: (m) => void (got = m) })).toBe('Key works: 1 model available.');
+    expect(f.urls).toEqual(['https://api.openai.com/v1/models']);
+    expect(got.map((m) => m.id)).toEqual(['gpt-6-luna']);
+  });
+
+  it('says plainly when a model key is rejected', async () => {
+    const f = fake(401, { error: { message: 'bad key' } });
+    await expect(testSecret('provider:anthropic', 'sk-bad', { hosts, fetchImpl: f.impl })).rejects.toThrow(/Anthropic rejected this key/);
   });
 
   it('links to the token page with the scopes filled in, per host', () => {

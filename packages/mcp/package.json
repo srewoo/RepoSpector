@@ -1,6 +1,6 @@
 {
   "name": "repospector-mcp",
-  "version": "0.7.0",
+  "version": "8.0.0",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -11,5 +11,8 @@
     "@repospector/core": "0.1.0",
     "@vscode/tree-sitter-wasm": "0.3.1",
     "zod": "4.6.7"
+  },
+  "scripts": {
+    "release": "node release.mjs"
   }
 }

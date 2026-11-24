@@ -34,6 +34,12 @@ export class GitHubHost implements ReviewHost {
     return this.api.get(this.pr, { accept: 'diff' });
   }
 
+  /** One file's text at a commit (the repository-context pass reads only the files it needs). */
+  fileAt(path: string, sha: string): Promise<string> {
+    const enc = path.split('/').map(encodeURIComponent).join('/');
+    return this.api.get(`repos/${this.t.owner}/${this.t.repo}/contents/${enc}?ref=${encodeURIComponent(sha)}`, { accept: 'raw' });
+  }
+
   async existingMarkers(): Promise<Set<string>> {
     const found = new Set<string>();
     for (const c of pages<{ body?: string }>(await this.api.get(`${this.pr}/comments?per_page=100`, { paginate: true }))) markersIn(c.body ?? '', found);

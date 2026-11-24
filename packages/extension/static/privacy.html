@@ -4,12 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>RepoSpector privacy policy</title>
+  <link rel="icon" href="icons/icon-32.png">
   <link rel="stylesheet" href="panel.css">
 </head>
 <body class="doc">
   <main>
     <h1>RepoSpector privacy policy</h1>
-    <p class="muted">Effective 23 November 2026. Applies to the RepoSpector Chrome extension.</p>
+    <p class="muted">Effective 24 November 2026 (updated: repository context in reviews). Applies to the RepoSpector Chrome extension.</p>
 
     <h2>In short</h2>
     <p>RepoSpector has no server. It does not collect analytics, usage data or crash reports, and it has no account. Your code goes from your git host to your browser, and from your browser only to the AI model provider you choose. Everything RepoSpector keeps stays on your device until you delete it.</p>
@@ -17,24 +18,22 @@
     <h2>What is sent, and where</h2>
     <dl>
       <dt>Your git host (GitHub or GitLab)</dt>
-      <dd>The extension reads pull request details, diffs and, when you ask where code is used, a download of the repository at the reviewed commit, from the hosts you add in settings. It uses your access token if you saved one. When you choose to post, it creates draft comments (a pending review on GitHub, draft notes on GitLab) on that pull request, visible only to you until you publish them there.</dd>
+      <dd>The extension reads pull request details and diffs, a download of the repository at the reviewed commit (to find the code the change calls, and to show where code is used), and the few files that hold that code, from the hosts you add in settings. It uses your access token if you saved one. When you choose to post, it creates draft comments (a pending review on GitHub, draft notes on GitLab) on that pull request, visible only to you until you publish them there.</dd>
       <dt>The model provider you choose (Anthropic, OpenAI or Google)</dt>
-      <dd>To review a pull request, the extension sends that pull request's title and diff, and then the review's findings, to the provider of the model you picked, using your own API key. Strings that look like secrets (API keys, tokens, private keys) are masked before sending. Each provider's own terms and privacy policy govern what they do with requests; RepoSpector does not send them anything else. If you pick Ollama, the review runs on your own computer and nothing goes to a model provider.</dd>
+      <dd>To review a pull request, the extension sends that pull request's title and diff, then the same with excerpts of code from other files in the repository (the first 20 lines of each function, method or class the change calls, constructs or extends, at most about 60,000 characters), and then the review's findings, to the provider of the model you picked, using your own API key. Strings that look like secrets (API keys, tokens, private keys) are masked before sending. Each provider's own terms and privacy policy govern what they do with requests; RepoSpector does not send them anything else. If you pick Ollama, the review runs on your own computer and nothing goes to a model provider.</dd>
       <dt>Hugging Face (only if you turn on meaning-based matching)</dt>
       <dd>The model is downloaded once from huggingface.co, a fixed version whose files are checked before they are saved. Nothing of yours is sent to Hugging Face; matching runs on your device.</dd>
-      <dt>A program on your computer (only if you turn on local mode)</dt>
-      <dd>The extension asks the RepoSpector program you installed on your computer where code is used, sending the repository name, the commit and the finding locations. The program reads only the clones you listed when installing it, and keeps its index in its own cache folder. This stays on your computer.</dd>
     </dl>
     <p>Nothing is sent anywhere else. There are no third-party scripts, trackers or advertising.</p>
 
     <h2>What is stored on your device</h2>
     <ul>
       <li><strong>Keys and access tokens</strong>, encrypted with your passphrase (PBKDF2-SHA-256, 600,000 iterations, AES-GCM) in Chrome's extension storage; the passphrase itself is never stored. In memory-only mode they are kept until Chrome closes and never written to disk. Each key is sent only to its own service.</li>
-      <li><strong>Reviews</strong>: the findings, model, cost and status of your last 50 reviews. A review's diff is kept only while it runs, so an interrupted review can resume, and is deleted when it finishes.</li>
+      <li><strong>Reviews</strong>: the findings, model, cost and status of your last 50 reviews. A review's diff and the code excerpts from other files are kept only while it runs, so an interrupted review can resume, and are deleted when it finishes.</li>
       <li><strong>Your feedback</strong> (Useful, Not useful, Not relevant here, and any reason you type), with the finding's text, file and repository. It is used to lower similar findings in later reviews. It leaves your device only if you export it.</li>
       <li><strong>The saved code index</strong>: names and line positions of functions and classes for the last 20 commits you indexed. Never your code.</li>
       <li><strong>The matching model</strong>, if you turned on meaning-based matching (about 22 MB). Turning the setting off deletes it.</li>
-      <li><strong>Settings</strong>: the hosts you added and the model you chose.</li>
+      <li><strong>Settings</strong>: the hosts you connected, the model you chose, and the list of model names your key can use (no key is stored with it).</li>
     </ul>
     <p>You can delete feedback, saved indexes and keys in settings. Removing the extension deletes everything it stored.</p>
 
@@ -45,9 +44,7 @@
       <dt>Scripting</dt>
       <dd>Place small "RS" markers beside the lines that have findings, on pull request pages of hosts you added. The marker script reads only where lines are on the page, holds no keys and sends nothing.</dd>
       <dt>Access to specific sites (asked for at the time you need it)</dt>
-      <dd>Each git host you add and its API; the API of the model provider you choose; codeload.github.com for repository downloads from GitHub; localhost for Ollama. (The meaning-based matching model downloads from huggingface.co without any extra permission.)</dd>
-      <dt>Native messaging (asked for only if you turn on local mode)</dt>
-      <dd>Talk to the RepoSpector program installed on your computer.</dd>
+      <dd>Each git host you add and its API; the API of the model provider you choose (to list the models your key can use and to run reviews); codeload.github.com for repository downloads from GitHub (asked for when you first press Review on github.com); localhost for Ollama. (The meaning-based matching model downloads from huggingface.co without any extra permission.)</dd>
     </dl>
 
     <h2>Children</h2>

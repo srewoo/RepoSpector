@@ -3,15 +3,18 @@
   "name": "RepoSpector",
   "version": "0.1.0",
   "description": "Open-source AI code review for GitHub and GitLab with your own model key. Code goes only to the git host and the model provider you choose.",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "minimum_chrome_version": "116",
   "permissions": [
     "sidePanel",
     "storage",
     "offscreen",
     "scripting"
-  ],
-  "optional_permissions": [
-    "nativeMessaging"
   ],
   "optional_host_permissions": [
     "https://*/*",
@@ -26,7 +29,11 @@
   },
   "options_page": "options.html",
   "action": {
-    "default_title": "RepoSpector"
+    "default_title": "RepoSpector",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
   },
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"

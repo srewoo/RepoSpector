@@ -1,10 +1,11 @@
 {
   "name": "@repospector/extension",
-  "version": "0.1.0",
+  "version": "8.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node build.mjs"
+    "build": "node build.mjs",
+    "package": "node package.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "1.6.0",

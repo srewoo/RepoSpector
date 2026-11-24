@@ -47,7 +47,7 @@ scope.onmessage = (ev) => {
         now: () => Date.now(),
         onProgress: (files, bytes) => scope.postMessage({ type: 'progress', files, downloadedMB: Math.round(bytes / 1024 / 1024) }),
       });
-      scope.postMessage({ type: 'done', source: r.source, files: r.files, skipped: r.skipped, reused: r.reused, ms: Date.now() - started, context: r.context });
+      scope.postMessage({ type: 'done', source: r.source, files: r.files, skipped: r.skipped, reused: r.reused, ms: Date.now() - started, context: r.context, ...(r.definitions ? { definitions: r.definitions } : {}) });
     } catch (e) {
       scope.postMessage({ type: 'error', message: (e as Error).message, ...(e instanceof NoSavedIndex ? { noSavedIndex: true } : {}) });
     }

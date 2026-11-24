@@ -4,3 +4,5 @@ dist/
 .DS_Store
 eval/runs/
 eval/.cache/
+release/
+packages/mcp/pkg/

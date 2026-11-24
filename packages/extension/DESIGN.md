@@ -14,7 +14,7 @@ Identity motif: **findings are written like review notes**, `file:line` in the c
 
 - ENERGY 1: the panel sits beside someone's code for minutes at a time; anything loud competes with the diff.
 - RHYTHM 1: settings and findings are lists the user scans top to bottom; a uniform order is easier to scan than varied compositions. Uniformity here is deliberate.
-- MOTION 1: hover and focus states only. Nothing animates on its own.
+- MOTION 1: hover and focus states only. Nothing animates on its own, with one exception (user request, 2026-11-24): the current step of a running review carries a moving stripe so the user can see work is happening. It stops under `prefers-reduced-motion`.
 
 ## Palette
 

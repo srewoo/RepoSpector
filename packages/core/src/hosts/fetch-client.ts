@@ -52,7 +52,7 @@ export function fetchClient(opts: FetchClientOptions): ApiClient {
 
   return {
     async get(path, o = {}) {
-      const accept = o.accept === 'diff' ? 'application/vnd.github.v3.diff' : jsonAccept;
+      const accept = o.accept === 'diff' ? 'application/vnd.github.v3.diff' : o.accept === 'raw' ? (opts.kind === 'github' ? 'application/vnd.github.raw' : '*/*') : jsonAccept;
       if (!o.paginate) return (await call(url(path), { method: 'GET' }, accept)).text();
       const all: unknown[] = [];
       let next: string | undefined = url(path);

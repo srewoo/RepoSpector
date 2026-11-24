@@ -1,6 +1,11 @@
 /** Service worker: opens the side panel from the toolbar button and creates the offscreen document on request. */
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch((e: unknown) => console.error('[repospector] side panel:', e));
 
+// First install: open settings, where the get-started checklist walks through setup.
+chrome.runtime.onInstalled.addListener(({ reason }) => {
+  if (reason === 'install') chrome.runtime.openOptionsPage().catch((e: unknown) => console.error('[repospector] open settings:', e));
+});
+
 let creating: Promise<void> | undefined;
 
 async function ensureOffscreen(): Promise<void> {
