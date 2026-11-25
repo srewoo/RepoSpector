@@ -155,7 +155,7 @@ section.summary p { margin: 0; }
 .callout.warn { border-left-color: var(--error); }
 .callout.ok { border-left-color: var(--accent); }
 ol.findings { list-style: none; padding: 0; margin: 0 0 12px; display: grid; gap: 8px; }
-.finding { background: var(--subtle); border-radius: 6px; padding: 12px; }
+.finding { background: var(--subtle); border-radius: 6px; padding: 12px; min-width: 0; }
 .finding .file { font-family: var(--code); font-size: 13px; }
 .finding .file .name { font-weight: 600; }
 .finding .file .line { color: var(--muted); }
@@ -167,6 +167,17 @@ ol.findings { list-style: none; padding: 0; margin: 0 0 12px; display: grid; gap
 details.why summary { cursor: pointer; font-size: 13px; color: var(--muted); min-height: 24px; }
 details.why summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 details.why p { font-size: 13px; margin: 4px 0 8px; }
+/* Walkthrough of the change, between the summary card and the findings. */
+section.walkthrough { max-width: none; padding: 12px 16px; margin-bottom: 12px; border-left: 3px solid var(--line); }
+section.walkthrough h2 { font-size: 15px; margin: 0 0 6px; }
+section.walkthrough p { margin: 0 0 6px; }
+section.walkthrough details summary { cursor: pointer; font-size: 13px; color: var(--muted); min-height: 24px; }
+section.walkthrough details summary:focus-visible, details.fix summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Suggested fix under a finding: folded code block, or the button that asks for one. */
+.finding .fix { margin: 0 0 8px; }
+.finding .fix p { font-size: 13px; margin: 4px 0; }
+details.fix summary { cursor: pointer; font-size: 13px; color: var(--muted); min-height: 24px; }
+.finding pre.code { max-width: 100%; box-sizing: border-box; margin: 4px 0; padding: 8px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; overflow-x: auto; white-space: pre; }
 .segmented { display: flex; flex-wrap: wrap; }
 .segmented button { font-size: 13px; padding: 6px 10px; border-radius: 0; margin-left: -1px; }
 .segmented button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }

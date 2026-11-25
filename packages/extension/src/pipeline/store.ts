@@ -66,6 +66,17 @@ export async function latestRunFor(target: ReviewTarget): Promise<RunRecord | un
   }
 }
 
+/** The newest finished review of a pull request other than `exceptId`: the base of a re-review. */
+export async function latestDoneRunFor(target: ReviewTarget, exceptId: string): Promise<RunRecord | undefined> {
+  const db = await open();
+  try {
+    const all = (await done(db.transaction(RUNS).objectStore(RUNS).index('target').getAll(targetKey(target)))) as RunRecord[];
+    return all.filter((r) => r.status === 'done' && r.id !== exceptId && r.headSha).sort((a, b) => b.startedAt - a.startedAt)[0];
+  } finally {
+    db.close();
+  }
+}
+
 /** Deletes all but the newest KEEP_RUNS runs, so stored diffs and findings stay bounded. */
 export async function pruneRuns(): Promise<void> {
   const db = await open();

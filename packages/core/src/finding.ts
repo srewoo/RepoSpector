@@ -21,7 +21,14 @@ export const LineRangeSchema = z
   .strict()
   .refine((r) => r.endLine >= r.startLine, 'endLine must be >= startLine');
 
-export const FindingInputSchema = z
+/** `basis` is the field specialists are asked for; `reasoning` (older prompts) is accepted and stored under the same name. */
+const basisToReasoning = (raw: unknown): unknown => {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return raw;
+  const { basis, ...rest } = raw as Record<string, unknown>;
+  return basis !== undefined && rest.reasoning === undefined ? { ...rest, reasoning: basis } : raw;
+};
+
+const FindingObjectSchema = z
   .object({
     file: RepoPath,
     startLine: Line,
@@ -33,9 +40,16 @@ export const FindingInputSchema = z
     evidence: z.array(LineRangeSchema).min(1).max(10),
     confidence: z.number().min(0).max(1),
     symbol: z.string().min(1).max(200).optional(),
+    fix: z
+      .object({ startLine: Line, endLine: Line, replacement: z.string().max(4000) })
+      .strict()
+      .refine((x) => x.endLine >= x.startLine && x.endLine - x.startLine < 30, 'fix: endLine >= startLine, at most 30 lines')
+      .optional(),
   })
   .strict()
   .refine((f) => f.endLine >= f.startLine, 'endLine must be >= startLine');
+
+export const FindingInputSchema = z.preprocess(basisToReasoning, FindingObjectSchema);
 
 export const VerdictInputSchema = z
   .object({
@@ -47,7 +61,7 @@ export const VerdictInputSchema = z
   .strict();
 
 export type LineRange = z.infer<typeof LineRangeSchema>;
-export type FindingInput = z.infer<typeof FindingInputSchema>;
+export type FindingInput = z.infer<typeof FindingObjectSchema>;
 export type VerdictInput = z.infer<typeof VerdictInputSchema>;
 
 export interface Finding extends FindingInput {

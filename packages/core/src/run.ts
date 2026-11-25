@@ -41,6 +41,8 @@ export interface RunState {
   readonly stage: Stage;
   readonly specialists: readonly Category[];
   readonly pendingSpecialists: Category[];
+  /** Specialists that could not run (for example stopped by a safeguard); their area is not covered. */
+  readonly skippedSpecialists: { readonly specialist: Category; readonly reason: string }[];
   readonly findingCount: number;
   readonly batchId: string | null;
 }
@@ -56,15 +58,30 @@ export class ReviewRun {
   private stage: Stage = 'reviewing';
   private readonly findings: Finding[] = [];
   private readonly submitted = new Set<Category>();
+  private readonly skipped = new Map<Category, string>();
   private batchId: string | null = null;
   private nextId = 1;
 
+  private readonly planned: Category[];
+
   constructor(
     readonly id: string,
-    readonly specialists: readonly Category[],
+    specialists: readonly Category[],
     private readonly source: LineSource,
     private readonly newBatchId: () => string = () => `${id}-verify`,
-  ) {}
+  ) {
+    this.planned = [...specialists];
+  }
+
+  get specialists(): readonly Category[] {
+    return this.planned;
+  }
+
+  /** Adds a specialist while the review is still open (e.g. requirements once a linked issue arrives). */
+  addSpecialist(category: Category): void {
+    this.requireStage('reviewing');
+    if (!this.planned.includes(category)) this.planned.push(category);
+  }
 
   submitFindings(specialist: string, inputs: readonly unknown[]): SubmitResult {
     this.requireStage('reviewing');
@@ -94,7 +111,24 @@ export class ReviewRun {
     });
     this.findings.push(...accepted);
     this.submitted.add(owner);
+    // A specialist recorded as skipped that reports after all is covered again.
+    this.skipped.delete(owner);
     return { accepted, rejected };
+  }
+
+  /**
+   * Records that a specialist could not run, so the review can still be verified and finalized.
+   * Its area is reported as not covered; findings it already submitted stay. Refused once it submitted.
+   */
+  skipSpecialist(specialist: string, reason: string): void {
+    this.requireStage('reviewing');
+    const owner = this.specialists.find((s) => s === specialist);
+    if (!owner) {
+      throw new RunStateError('unknown-specialist', `"${specialist}" is not in this run's plan: ${this.specialists.join(', ')}`);
+    }
+    if (this.submitted.has(owner)) throw new RunStateError('wrong-stage', `"${owner}" already submitted; nothing to skip`);
+    this.skipped.set(owner, reason.trim().slice(0, 300) || 'not given');
+    this.submitted.add(owner);
   }
 
   /** Idempotent once verifying, so a crashed verifier can fetch the same batch again. */
@@ -134,6 +168,7 @@ export class ReviewRun {
       stage: this.stage,
       specialists: this.specialists,
       pendingSpecialists: this.pendingSpecialists(),
+      skippedSpecialists: [...this.skipped].map(([specialist, reason]) => ({ specialist, reason })),
       findingCount: this.findings.length,
       batchId: this.batchId,
     };

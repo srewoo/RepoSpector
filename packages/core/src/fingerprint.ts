@@ -2,7 +2,7 @@ import type { Category } from './finding.js';
 
 export interface FingerprintInput {
   readonly file: string;
-  readonly category: Category;
+  readonly category: Category | 'ci';
   readonly claim: string;
   readonly symbol?: string | undefined;
 }

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { mergeFeedback, parseFeedbackJsonl, toFeedbackJsonl, type FeedbackEntry } from '@repospector/core';
-import type { RevisionSource } from './source.js';
+import type { ReviewSource } from './review-source.js';
 
 /** The team's shared feedback, committed in the repo. */
 export const SHARED_FEEDBACK = '.RepoSpector/feedback.jsonl';
@@ -29,7 +29,7 @@ export class FeedbackLog {
 }
 
 /** Shared feedback at the reviewed revision; a missing or malformed file yields what parses. */
-export async function sharedFeedback(source: RevisionSource): Promise<FeedbackEntry[]> {
+export async function sharedFeedback(source: ReviewSource): Promise<FeedbackEntry[]> {
   await source.preload([SHARED_FEEDBACK]);
   const lines = source.lines(SHARED_FEEDBACK);
   return lines ? parseFeedbackJsonl(lines.join('\n')) : [];

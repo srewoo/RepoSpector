@@ -60,10 +60,10 @@ async function activeRuns(): Promise<readonly string[]> {
   }
 }
 
-async function start(ready: Ready, runId: string): Promise<void> {
+async function start(ready: Ready, runId: string, extra: Pick<StartMessage, 'fullReview' | 'fixFindingId'> = {}): Promise<void> {
   const ok = await chrome.runtime.sendMessage<{ ok: boolean; error?: string }>({ type: 'offscreen:ensure' });
   if (!ok?.ok) throw new Error(`Could not start the review runner: ${ok?.error ?? 'no reply'}`);
-  await chrome.runtime.sendMessage({ ...ready.start, runId } satisfies StartMessage);
+  await chrome.runtime.sendMessage({ ...ready.start, runId, ...extra } satisfies StartMessage);
 }
 
 /**
@@ -92,13 +92,13 @@ export function mountReview(root: HTMLElement, target: ReviewTarget, host: HostS
    * codeload.github.com, and Chrome asks for that permission only inside a click, so ask first.
    * Declining is fine: the review then reads the diff only and says why.
    */
-  const launch = (ready: Ready, runId: string) => {
+  const launch = (ready: Ready, runId: string, fullReview = false) => {
     const origins = target.kind === 'github' && target.host === 'github.com' ? [GITHUB_CODELOAD] : [];
-    void (origins.length ? chrome.permissions.request({ origins }).catch(() => false) : Promise.resolve(true)).then(() => begin(ready, runId));
+    void (origins.length ? chrome.permissions.request({ origins }).catch(() => false) : Promise.resolve(true)).then(() => begin(ready, runId, fullReview));
   };
-  const begin = (ready: Ready, runId: string) => {
+  const begin = (ready: Ready, runId: string, fullReview: boolean) => {
     showProgress('fetch', ready.start.model, Date.now());
-    start(ready, runId).catch((e: unknown) => show(el('p', { className: 'error', textContent: (e as Error).message }), button('Try again', () => void render())));
+    start(ready, runId, fullReview ? { fullReview } : {}).catch((e: unknown) => show(el('p', { className: 'error', textContent: (e as Error).message }), button('Try again', () => void render())));
   };
 
   async function render(): Promise<void> {
@@ -124,7 +124,10 @@ export function mountReview(root: HTMLElement, target: ReviewTarget, host: HostS
       const next = run.error?.kind === 'auth' ? settingsButton() : button('Try again', () => launch(ready, run.id), true);
       return show(el('p', { className: 'error', textContent: run.error?.message ?? 'The review failed.' }), el('div', { className: 'actions' }, next, ...(run.error?.kind === 'auth' ? [] : [button('Start over', fresh)])));
     }
-    if (run?.status === 'done') return show(...(await results({ run, target, apiBase: ready.start.apiBase, hostOrigin: host.origin, hostToken: ready.start.hostToken, tabId, again: fresh })));
+    if (run?.status === 'done') {
+      const askFix = (findingId: string): Promise<void> => start(ready, run.id, { fixFindingId: findingId });
+      return show(...(await results({ run, target, apiBase: ready.start.apiBase, hostOrigin: host.origin, hostToken: ready.start.hostToken, tabId, again: fresh, full: () => launch(ready, crypto.randomUUID(), true), askFix })));
+    }
 
     show(el('p', { className: 'muted', textContent: 'Measuring the change to estimate the cost…' }));
     try {

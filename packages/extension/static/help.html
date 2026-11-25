@@ -38,10 +38,13 @@
       <li><strong>Read the pull request</strong>: its title and diff, from GitHub or GitLab.</li>
       <li><strong>Read the repository</strong>: RepoSpector downloads the repository at the pull request's commit, indexes it on your device, and finds where the functions, methods and classes the change calls, constructs or extends are defined. It then fetches only those files. The index is saved, so the next review of the same repository reads only what changed. On github.com, Chrome asks once for permission to download from codeload.github.com.</li>
       <li><strong>Review twice</strong>: once with the diff alone (the review we measured), and once with that code from other files, to catch wrong arguments, ignored return values, missing error handling and similar mistakes in how the change uses existing code. The two results are merged; a finding only the second review made says "Found by the pass that read code from other files".</li>
+      <li><strong>Check against your rules, the linked issue and CI</strong>: if the pull request's base has <code>.RepoSpector/rules.md</code>, <code>REVIEW.md</code>, <code>CLAUDE.md</code> or <code>AGENTS.md</code>, one more pass reports changed lines that break a written rule ("Team rule"). If the pull request links an issue on the same host (<code>Fixes #12</code>), a pass compares the change with it ("Linked issue"). CI problems reported on lines the change adds are listed as findings ("From CI"). A short walkthrough of the change is written too.</li>
       <li><strong>Check each finding</strong> with a second pass that labels and ranks it, and rates its impact.</li>
       <li><strong>Apply your team's feedback</strong>.</li>
     </ol>
     <p>If the repository cannot be read (larger than 300 MB, private without an access token, permission declined, or languages RepoSpector does not index), the review still runs on the diff and says why. Reading code from other files makes a review cost up to about twice as much; the estimate before you start includes it. Supported languages for this: Python, Go, Java, Ruby, JavaScript and TypeScript.</p>
+
+    <p><strong>Review again</strong> after new commits reviews only the files those commits changed; earlier findings in other files stay, tagged "From earlier review". If the history was rewritten (force-push), everything is reviewed again. <strong>Review all files</strong> always reviews everything.</p>
 
     <h2 id="results">Reading a review</h2>
     <p>Each finding shows its file and line, what goes wrong, and a label from a second check:</p>
@@ -63,6 +66,7 @@
       <dd>A rare edge case, a minor or cosmetic effect, or maintainability only.</dd>
     </dl>
     <p>Impact is the model's judgement, not measured. A finding without a tag was not rated (for example when the second check's answer could not be read).</p>
+    <p><strong>Suggest a fix</strong> under a finding asks the model for the smallest change to the lines around it (one more model call). A fix is posted with the finding as a suggestion the author can apply in one click. Read it before posting: it is not tested.</p>
     <p>Findings are ordered by how likely they are to be real defects, not by impact. On our test set, the first finding was a real bug about 70% of the time, so reading from the top pays off.</p>
 
     <h2 id="post">Posting drafts</h2>
@@ -70,6 +74,7 @@
     <ul>
       <li>RepoSpector will not post if the pull request has new commits since the review, because the lines would be off. Review again first.</li>
       <li>Findings already on the pull request are not posted twice.</li>
+      <li>At most 15 findings are posted as inline comments, most likely first; the rest are listed in the review's summary, which also carries the walkthrough and the CI summary. CI problems and earlier findings are not ticked by default (CI already shows its own).</li>
       <li>Tokens need write access to pull requests: on GitHub a classic token with <code>repo</code>, or a fine-grained token with Pull requests: Read and write; on GitLab the <code>api</code> scope. <strong>Test token</strong> in settings tells you whether yours can post.</li>
     </ul>
 

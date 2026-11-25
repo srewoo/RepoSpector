@@ -12,3 +12,4 @@ export { HostError, type ApiClient, type PostResult, type ReviewHost, type Targe
 export function hostFor(target: ReviewTarget, api: ApiClient): GitHubHost | GitLabHost {
   return target.kind === 'github' ? new GitHubHost(target, api) : new GitLabHost(target, api);
 }
+export * from './extras.js';

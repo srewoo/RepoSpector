@@ -5,7 +5,7 @@ export type RiskTier = 'skip' | 'trivial' | 'standard' | 'high';
 
 export interface SkippedFile {
   readonly path: string;
-  readonly reason: 'lockfile or generated' | 'binary' | 'deleted' | 'possible secrets' | 'unreadable (binary or over 2 MB)';
+  readonly reason: 'lockfile or generated' | 'binary' | 'deleted' | 'possible secrets' | 'unreadable (binary or over 2 MB)' | 'no patch from the host (binary or too large)';
 }
 
 export interface RiskAssessment {

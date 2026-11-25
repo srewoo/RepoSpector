@@ -2,7 +2,7 @@ import { classifyHits, isSecretPath, isTestPath, isSkippablePath, redactSecrets,
 import type { GitRepo, Head } from './git.js';
 import { extractSymbols, type DefKind, type FileSymbols } from './graph/parser.js';
 import type { GraphService } from './graph/service.js';
-import type { RevisionSource } from './source.js';
+import type { ReviewSource } from './review-source.js';
 
 export const MAX_DEFINITIONS = 5;
 export const MAX_USAGES = 15;
@@ -55,7 +55,7 @@ interface Classified {
 
 const visible = (h: WordHit): boolean => !isSecretPath(h.file) && !isSkippablePath(h.file);
 
-export async function parseFiles(files: readonly string[], source: RevisionSource): Promise<Map<string, FileSymbols>> {
+export async function parseFiles(files: readonly string[], source: ReviewSource): Promise<Map<string, FileSymbols>> {
   const parsed = new Map<string, FileSymbols>();
   await source.preload(files);
   for (const f of files) {
@@ -73,7 +73,7 @@ export interface LookupOptions {
 }
 
 /** Symbols for the matching files: from the stored graph when the commit is built, else parsed now. */
-async function symbolsFor(repo: GitRepo, head: Head, source: RevisionSource, files: readonly string[], opts: LookupOptions): Promise<{ map: Map<string, FileSymbols>; index: SymbolContext['index'] }> {
+async function symbolsFor(repo: GitRepo, head: Head, source: ReviewSource, files: readonly string[], opts: LookupOptions): Promise<{ map: Map<string, FileSymbols>; index: SymbolContext['index'] }> {
   if (opts.graph) {
     try {
       const commit = head === 'worktree' ? await repo.resolveCommit('HEAD') : head;
@@ -118,9 +118,31 @@ const USE_ORDER = { call: 0, reference: 1, text: 2 } as const;
  * Definitions and uses of one identifier at the reviewed revision. Grep finds candidate files;
  * supported languages are then parsed with tree-sitter so definitions, calls and callers are exact.
  */
-export async function lookupSymbol(repo: GitRepo, head: Head, source: RevisionSource, symbol: string, opts: LookupOptions = {}): Promise<SymbolContext> {
+export async function lookupSymbol(repo: GitRepo, head: Head, source: ReviewSource, symbol: string, opts: LookupOptions = {}): Promise<SymbolContext> {
   const hits = (await repo.grepWords(head, [symbol])).filter(visible);
   const { map: parsed, index } = await symbolsFor(repo, head, source, [...new Set(hits.map((h) => h.file))], opts);
+  return describeSymbol(symbol, hits, parsed, index, source);
+}
+
+/**
+ * The same lookup over files the agent provided for a pull/merge request (no local clone): word
+ * matches in those files only, parsed with tree-sitter.
+ */
+export async function lookupInProvided(source: ReviewSource & { paths(): string[] }, symbol: string): Promise<SymbolContext> {
+  const word = new RegExp(`(^|[^\\w$])${symbol.replace(/\$/g, '\\$')}(?![\\w$])`);
+  const hits: WordHit[] = [];
+  for (const file of source.paths()) {
+    (source.lines(file) ?? []).forEach((text, i) => {
+      if (word.test(text)) hits.push({ file, line: i + 1, text });
+    });
+  }
+  const visibleHits = hits.filter(visible);
+  const parsed = await parseFiles([...new Set(visibleHits.map((h) => h.file))].slice(0, MAX_PARSED_FILES), source);
+  const ctx = describeSymbol(symbol, visibleHits, parsed, 'on-demand', source);
+  return { ...ctx, note: `Searched only the ${source.paths().length} files provided to this review. For other definitions or callers, use your GitHub/GitLab MCP code search, then provide_files before citing them. ${ctx.note}` };
+}
+
+function describeSymbol(symbol: string, hits: readonly WordHit[], parsed: ReadonlyMap<string, FileSymbols>, index: SymbolContext['index'], source: ReviewSource): SymbolContext {
   const subtypes = [...parsed].flatMap(([file, syms]) => syms.inherits.filter((i) => i.base === symbol).map((i) => ({ file, line: i.line, child: i.child })));
   const { defs, uses } = classify(symbol, hits, parsed);
   const isTest = (f: string): number => Number(isTestPath(f));

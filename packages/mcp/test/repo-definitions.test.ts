@@ -50,11 +50,11 @@ describe('definitions in the context pack', () => {
     const { repo, graph } = await open(repoWithHelper());
     const plan = await buildPlan(repo, undefined, 'worktree', 'standard', { graph, waitMs: 60_000 });
     expect(plan.definitions).toMatchObject({ used: 1, indexedFiles: 2 });
-    expect(plan.contextPack).toMatch(/kind="definitions"/);
-    expect(plan.contextPack).toMatch(/### `applyDiscount` at src\/price\.js:1/);
-    expect(plan.contextPack).toMatch(/pct over 100/);
+    expect(plan.contextPages.join("\n")).toMatch(/kind="definitions"/);
+    expect(plan.contextPages.join("\n")).toMatch(/### `applyDiscount` at src\/price\.js:1/);
+    expect(plan.contextPages.join("\n")).toMatch(/pct over 100/);
     // The guidance sits outside the untrusted block, and the diff comes first.
-    expect(plan.contextPack.indexOf('kind="diff"')).toBeLessThan(plan.contextPack.indexOf('repository content of kind "definitions"'));
+    expect(plan.contextPages.join("\n").indexOf('kind="diff"')).toBeLessThan(plan.contextPages.join("\n").indexOf('repository content of kind "definitions"'));
     graph?.close();
   });
 
@@ -64,7 +64,7 @@ describe('definitions in the context pack', () => {
     git(root, 'commit', '-q', '-am', 'change');
     const { repo, graph } = await open(root);
     const plan = await buildPlan(repo, 'main~1', 'HEAD', 'standard', { graph, waitMs: 60_000 });
-    expect(plan.contextPack).toMatch(/percent too large/);
+    expect(plan.contextPages.join("\n")).toMatch(/percent too large/);
     graph?.close();
   });
 
@@ -74,7 +74,7 @@ describe('definitions in the context pack', () => {
     const { repo, graph } = await open(root);
     const plan = await buildPlan(repo, undefined, 'worktree', 'standard', { graph, waitMs: 60_000 });
     // price.js is itself in the diff now, but applyDiscount's line is unchanged context there, so it is still shown, at its new line.
-    expect(plan.contextPack).toMatch(/### `applyDiscount` at src\/price\.js:3/);
+    expect(plan.contextPages.join("\n")).toMatch(/### `applyDiscount` at src\/price\.js:3/);
     graph?.close();
   });
 
@@ -84,7 +84,7 @@ describe('definitions in the context pack', () => {
     rmSync(join(root, 'src/price.js')); // deleted in the worktree: its committed symbols must not be used
     const { repo, graph } = await open(root);
     const plan = await buildPlan(repo, undefined, 'worktree', 'standard', { graph, waitMs: 60_000 });
-    expect(plan.contextPack).not.toMatch(/kind="definitions"/);
+    expect(plan.contextPages.join("\n")).not.toMatch(/kind="definitions"/);
     graph?.close();
   });
 
@@ -93,7 +93,7 @@ describe('definitions in the context pack', () => {
     const repo = await GitRepo.open(root);
     const plan = await buildPlan(repo, undefined, 'worktree', 'standard', { graph: undefined });
     expect(plan.definitions).toEqual({ used: 0, indexedFiles: 0, note: expect.stringMatching(/Node 22\.13.*get_context/) });
-    expect(plan.contextPack).not.toMatch(/definitions/);
+    expect(plan.contextPages.join("\n")).not.toMatch(/definitions/);
   });
 
   it('says why when the graph is not ready in time', async () => {

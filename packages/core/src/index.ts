@@ -22,3 +22,7 @@ export * from './review-url.js';
 export * from './hosts/index.js';
 export * from './review/measured.js';
 export * from './review/definitions.js';
+export * from './review/extras.js';
+export * from './issues.js';
+export * from './checks.js';
+export * from './incremental.js';

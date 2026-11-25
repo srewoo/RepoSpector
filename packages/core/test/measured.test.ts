@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { BASELINE_PROMPT, buildDefinitionsPrompt, buildVerifyPrompt, DEFINITIONS_ADDENDUM, mergePasses, parseBaselineReply, parseVerdicts, VERIFY_PROMPT } from '../src/review/measured.js';
+import { BASELINE_PROMPT, RECALL_PROMPT, buildDefinitionsPrompt, buildVerifyPrompt, DEFINITIONS_ADDENDUM, mergePasses, parseBaselineReply, parseVerdicts, VERIFY_PROMPT } from '../src/review/measured.js';
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 12);
 
@@ -11,6 +11,8 @@ describe('measured prompts', () => {
     // + impact rating for display (2026-11-24, user request). NOT yet re-scored: keep rules and the
     // confidence text are unchanged, but the added field may shift verdicts. Was 7b7b9ac08f33 (confidence), 197696df9a53.
     expect(sha(VERIFY_PROMPT)).toBe('51f6a68f2b98');
+    // The extension's review pass since 2026-11-24 (eval/runs/pilot-ext-s55-recall, regr-ext-s55-recall).
+    expect(sha(RECALL_PROMPT)).toBe('1090099a6415');
   });
 
   it('keeps the repository-context pass identical to the measured "callee definitions" eval arm', () => {

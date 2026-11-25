@@ -12,102 +12,20 @@ import {
   parseBaselineReply,
   parseUnifiedDiff,
   parseVerdicts,
+  RECALL_PROMPT,
   redactSecrets,
   type BaselineFinding,
   type FeedbackEntry,
-  type FindingContext,
   type MeaningMatch,
   type ReviewTarget,
-  type Verdict,
   VERIFY_PROMPT,
 } from '@repospector/core';
 import { estimateCost, type ModelChoice } from '../providers/presets.js';
-import { ProviderError, type Effort, type ModelProvider, type ProviderId } from '../providers/types.js';
+import { ProviderError, type Effort, type ModelProvider } from '../providers/types.js';
+import { ciFindings, extrasNotes, extrasRecord, incrementalReview, runExtraPasses } from './passes.js';
+import type { FindingSource, PrExtras, RepoContext, ReviewFinding, RunError, RunRecord } from './run-types.js';
 
-export type RunStatus = 'running' | 'done' | 'failed';
-/** The step in progress; data of earlier steps is on the record, so a run resumes from here. */
-export type Step = 'fetch' | 'context' | 'review' | 'verify' | 'filter';
-
-export interface ReviewFinding {
-  readonly id: string;
-  readonly file: string;
-  readonly line: number;
-  readonly claim: string;
-  /** verified: the verifier could not disprove it. suspected: refuted or matches rejected feedback. unchecked: verifier reply unreadable. */
-  readonly status: 'verified' | 'suspected' | 'unchecked';
-  readonly suspectedBecause?: string | undefined;
-  /** The verifier's 0-100 estimate that this is a real defect; findings are ordered by it. */
-  readonly confidence?: number | undefined;
-  /** The verifier's rating of how bad it is if real. Display only; order stays by confidence. */
-  readonly impact?: 'high' | 'medium' | 'low' | undefined;
-  /** Set when only the repository-context pass found it (the plain pass did not report it nearby). */
-  readonly fromContext?: true | undefined;
-  readonly fingerprint: string;
-  readonly category: 'logic';
-}
-
-export interface RunError {
-  readonly kind: string;
-  readonly message: string;
-  readonly retryable: boolean;
-}
-
-export interface RunRecord {
-  readonly id: string;
-  readonly target: ReviewTarget;
-  readonly provider: ProviderId;
-  readonly model: string;
-  readonly status: RunStatus;
-  readonly step: Step;
-  readonly startedAt: number;
-  readonly updatedAt: number;
-  readonly usage: { readonly inputTokens: number; readonly outputTokens: number };
-  /** Null when the model's price is unknown (custom model id). */
-  readonly costUsd: number | null;
-  /** Coverage and quality notes shown with the result. */
-  readonly notes: readonly string[];
-  readonly headSha?: string | undefined;
-  readonly title?: string | undefined;
-  /** Redacted diff, kept only while the run is in progress (for resume); removed when done. */
-  readonly diff?: string | undefined;
-  readonly review?: readonly BaselineFinding[] | undefined;
-  /**
-   * Repository context for the second pass. undefined: not tried yet; null: unavailable (a note says
-   * why). `text` (code from other files) is kept only while the run is in progress, like the diff.
-   */
-  readonly repoContext?: { readonly text?: string | undefined; readonly definitions: number; readonly indexedFiles: number } | null | undefined;
-  /** Findings of the repository-context pass, before merging with `review`. */
-  readonly contextReview?: readonly BaselineFinding[] | undefined;
-  /** null: the verifier replied but the reply was unreadable. */
-  readonly verdicts?: readonly Verdict[] | null | undefined;
-  readonly findings?: readonly ReviewFinding[] | undefined;
-  readonly modelsUsed?: readonly string[] | undefined;
-  /** Files in the diff that was reviewed. */
-  readonly filesReviewed?: number | undefined;
-  readonly error?: RunError | undefined;
-  /** Draft posts made from the side panel, newest last. */
-  readonly posted?: readonly PostRecord[] | undefined;
-  /** Where each finding's code is used, built on request from the repository archive (C8). */
-  readonly context?: ContextState | undefined;
-}
-
-export type ContextState =
-  | { readonly status: 'running'; readonly files: number; readonly downloadedMB: number; readonly startedAt: number }
-  | { readonly status: 'done'; readonly source: 'saved' | 'changed-files' | 'download' | 'local'; readonly files: number; readonly skipped: number; readonly reused: number; readonly ms: number; readonly perFinding: Readonly<Record<string, FindingContext>> }
-  | { readonly status: 'failed'; readonly message: string };
-
-export interface RepoContext {
-  readonly text: string;
-  readonly definitions: number;
-  readonly indexedFiles: number;
-}
-
-export interface PostRecord {
-  readonly at: number;
-  readonly url: string;
-  /** Findings now on the pull request: posted inline, in the summary, or found there already. */
-  readonly findingIds: readonly string[];
-}
+export type { ContextState, FindingSource, PostRecord, PrExtras, RepoContext, ReviewFinding, RunError, RunRecord, RunStatus, Step } from './run-types.js';
 
 export interface EngineDeps {
   readonly host: { info(): Promise<{ headSha: string; title?: string }>; diff(): Promise<string> };
@@ -121,6 +39,14 @@ export interface EngineDeps {
    * extends. Throws an Error whose message says why it is unavailable; the review then uses the diff only.
    */
   readonly repoContext?: ((input: { readonly diff: string; readonly headSha: string }) => Promise<RepoContext>) | undefined;
+  /** Rules at the PR base, linked issues and CI results. Throws → the review goes on without them. */
+  readonly extras?: ((headSha: string) => Promise<PrExtras>) | undefined;
+  /** The last finished review of this pull request, for a re-review of only what changed since. */
+  readonly previous?: { readonly headSha: string; readonly findings: readonly ReviewFinding[] } | undefined;
+  /** Paths changed between two commits, or null when that cannot be trusted (force-push): review it all. */
+  readonly changedSince?: ((from: string, to: string) => Promise<string[] | null>) | undefined;
+  /** Review-pass instructions; default RECALL_PROMPT (measured 2026-11-24, see PLAN.md). Eval arms pass others. */
+  readonly reviewPrompt?: string | undefined;
   readonly save: (run: RunRecord) => Promise<void>;
   readonly now: () => number;
 }
@@ -147,13 +73,17 @@ export function byConfidence<T extends { readonly confidence?: number | undefine
   return findings.map((f, i) => ({ f, i })).sort((a, b) => (b.f.confidence ?? -1) - (a.f.confidence ?? -1) || a.i - b.i).map(({ f }) => f);
 }
 
+const CATEGORY: Record<FindingSource, ReviewFinding['category']> = { review: 'logic', context: 'logic', rules: 'rules', requirements: 'requirements', ci: 'ci' };
+
 /**
- * The pipeline: fetch the diff, redact secrets, read repository context (code of what the diff
- * calls), the measured review pass plus a second pass with that context (merged), a verifier that
- * labels (never drops), then the team's feedback filter. Saves the record at every step so a run can resume.
+ * The pipeline: fetch the diff (only files changed since the last review, when there is one), redact
+ * secrets, read rules / linked issues / CI, read repository context, the measured review pass plus
+ * the context, rules and linked-issue passes (merged) and a walkthrough, a verifier that labels
+ * (never drops), then the team's feedback filter. Saves at every step so a run can resume.
  */
 export async function runReview(input: RunRecord, d: EngineDeps): Promise<RunRecord> {
   let run: RunRecord = { ...input, status: 'running', error: undefined };
+  let checksError: string | undefined;
   const save = async (patch: Partial<RunRecord>): Promise<void> => {
     run = { ...run, ...patch, updatedAt: d.now() };
     await d.save(run);
@@ -170,15 +100,37 @@ export async function runReview(input: RunRecord, d: EngineDeps): Promise<RunRec
     await save({ step: 'fetch' });
     const info = await d.host.info();
     if (run.headSha !== info.headSha || run.diff === undefined) {
-      const diff = redactSecrets(await d.host.diff());
+      let diff = redactSecrets(await d.host.diff());
       const notes = diff.length > MAX_DIFF_CHARS ? [`The diff is larger than ${MAX_DIFF_CHARS / 1000}k characters; only the first ${MAX_DIFF_CHARS / 1000}k were reviewed.`] : [];
-      run = { ...run, headSha: info.headSha, title: info.title ?? '', diff, filesReviewed: parseUnifiedDiff(diff).length, review: undefined, repoContext: undefined, contextReview: undefined, verdicts: undefined, findings: undefined, notes };
+      let incremental: RunRecord['incremental'];
+      let carried: ReviewFinding[] | undefined;
+      const prev = d.previous;
+      if (prev && prev.headSha !== info.headSha && d.changedSince) {
+        const changed = await d.changedSince(prev.headSha, info.headSha);
+        if (changed) {
+          const inc = incrementalReview(diff, changed, prev.findings);
+          diff = inc.diff;
+          carried = inc.carried;
+          incremental = { since: prev.headSha, files: inc.files, carried: inc.carried.length };
+        } else notes.push('The pull request history changed since the last review (or the host could not compare), so everything was reviewed again.');
+      }
+      run = { ...run, headSha: info.headSha, title: info.title ?? '', diff, filesReviewed: parseUnifiedDiff(diff).length, review: undefined, repoContext: undefined, contextReview: undefined, extras: undefined, rulesReview: undefined, requirementsReview: undefined, summary: undefined, verdicts: undefined, findings: undefined, incremental, carried, notes };
+    }
+    if (run.extras === undefined && d.extras && run.headSha) {
+      try {
+        const x = await d.extras(run.headSha);
+        checksError = x.checksError;
+        run = { ...run, extras: extrasRecord(x) };
+      } catch (e) {
+        run = { ...run, extras: null, notes: [...run.notes, `Team rules, linked issues and CI results were not read (${(e as Error).message}).`] };
+      }
     }
     const title = run.title ?? '';
     const diff = run.diff ?? '';
+    const hasDiff = diff.trim().length > 0;
 
     await save({ step: 'context' });
-    if (run.repoContext === undefined && d.repoContext && run.headSha) {
+    if (hasDiff && run.repoContext === undefined && d.repoContext && run.headSha) {
       try {
         const c = await d.repoContext({ diff, headSha: run.headSha });
         run = { ...run, repoContext: c };
@@ -189,10 +141,10 @@ export async function runReview(input: RunRecord, d: EngineDeps): Promise<RunRec
     const contextText = run.repoContext?.text ?? '';
 
     await save({ step: 'review' });
-    // The plain pass is the measured review and always runs; the context pass runs beside it, never instead.
+    // The plain pass is the measured review and always runs; the other passes run beside it, never instead.
     const plain = async (): Promise<readonly BaselineFinding[]> => {
-      if (run.review) return run.review;
-      const r = parseBaselineReply(await call(buildReviewPrompt(title, diff), 'high'));
+      if (run.review || !hasDiff) return run.review ?? [];
+      const r = parseBaselineReply(await call(buildReviewPrompt(title, diff, d.reviewPrompt ?? RECALL_PROMPT), 'high'));
       if (!r) throw new ReplyError('The model reply could not be read as a list of findings. Run the review again.');
       return r;
     };
@@ -203,10 +155,16 @@ export async function runReview(input: RunRecord, d: EngineDeps): Promise<RunRec
       if (!r) run = { ...run, notes: [...run.notes, 'The repository-context pass reply could not be read; findings come from the plain review only.'] };
       return r ?? [];
     };
-    const [first, second] = await Promise.all([plain(), withContext()]);
-    run = { ...run, review: first, ...(second ? { contextReview: second } : {}) };
-    const fromPlain = run.review ?? [];
-    const review = mergePasses(fromPlain, run.contextReview ?? []);
+    const [first, second, extra] = await Promise.all([plain(), withContext(), hasDiff ? runExtraPasses(run, title, diff, call) : Promise.resolve({ notes: [] as string[] })]);
+    run = { ...run, review: first, ...(second ? { contextReview: second } : {}), ...('summary' in extra ? { summary: extra.summary, rulesReview: extra.rulesReview, requirementsReview: extra.requirementsReview } : {}), notes: [...run.notes, ...extra.notes] };
+    // The plain pass is kept whole (as measured); the others merge into it in a fixed order, each finding remembering its pass.
+    let review: BaselineFinding[] = [...(run.review ?? [])];
+    const sources: FindingSource[] = review.map(() => 'review');
+    for (const [src, list] of [['context', run.contextReview], ['rules', run.rulesReview], ['requirements', run.requirementsReview]] as const) {
+      const merged = mergePasses(review, list ?? []);
+      sources.push(...merged.slice(review.length).map(() => src));
+      review = merged;
+    }
 
     await save({ step: 'verify' });
     if (run.verdicts === undefined) {
@@ -220,24 +178,32 @@ export async function runReview(input: RunRecord, d: EngineDeps): Promise<RunRec
     const byIndex = new Map((verdicts ?? []).map((v) => [v.index, v]));
     const labelled: ReviewFinding[] = review.map((f, i) => {
       const v = byIndex.get(i);
+      const src = sources[i] ?? 'review';
+      const category = CATEGORY[src];
       const status = !verdicts || !v ? 'unchecked' : v.keep ? 'verified' : 'suspected';
-      return { id: `f${i + 1}`, file: f.file, line: f.line, claim: f.claim, status, ...(v && !v.keep ? { suspectedBecause: v.reason } : {}), ...(v?.confidence !== undefined ? { confidence: v.confidence } : {}), ...(v?.impact ? { impact: v.impact } : {}), ...(i >= fromPlain.length ? { fromContext: true as const } : {}), fingerprint: fingerprint({ file: f.file, category: 'logic', claim: f.claim }), category: 'logic' };
+      return { id: `f${i + 1}`, file: f.file, line: f.line, claim: f.claim, status, ...(v && !v.keep ? { suspectedBecause: v.reason } : {}), ...(v?.confidence !== undefined ? { confidence: v.confidence } : {}), ...(v?.impact ? { impact: v.impact } : {}), ...(src === 'context' ? { fromContext: true as const } : {}), ...(src === 'rules' || src === 'requirements' ? { source: src } : {}), fingerprint: fingerprint({ file: f.file, category, claim: f.claim }), category };
     });
-    let notes = verdicts === null && review.length > 0 ? [...run.notes, UNREADABLE_VERIFY] : run.notes;
+    const fromCi = ciFindings(run.extras?.checks, diff, labelled.length + 1);
+    const fresh = [...labelled, ...fromCi];
+    let notes = verdicts === null && review.length > 0 ? [...run.notes, UNREADABLE_VERIFY] : [...run.notes];
     let sameMeaning: MeaningMatch | undefined;
-    if (d.meaning && d.feedback.length > 0 && labelled.length > 0) {
+    if (d.meaning && d.feedback.length > 0 && fresh.length > 0) {
       try {
-        sameMeaning = await d.meaning([...d.feedback.map((e) => e.claim), ...labelled.map((f) => f.claim)]);
+        sameMeaning = await d.meaning([...d.feedback.map((e) => e.claim), ...fresh.map((f) => f.claim)]);
       } catch (e) {
         notes = [...notes, `Meaning-based matching was unavailable (${(e as Error).message}); findings were compared with your feedback by shared words only.`];
       }
     }
-    // Rank, never delete: most likely first; applyFeedback then moves suspected ones below verified.
     if (run.repoContext?.definitions) notes = [...notes, `Also reviewed with code from other files: ${run.repoContext.definitions} definition${run.repoContext.definitions === 1 ? '' : 's'} of what this change calls, from ${run.repoContext.indexedFiles} indexed files.`];
     else if (run.repoContext) notes = [...notes, 'Read the repository: nothing this change calls is defined elsewhere in it, so no second pass was needed.'];
-    // The diff and repository code are kept only while running (for resume); only counts remain.
+    if (run.incremental) notes = [...notes, `Re-review: only the ${run.incremental.files} file${run.incremental.files === 1 ? '' : 's'} changed since ${run.incremental.since.slice(0, 7)} were reviewed; ${run.incremental.carried} earlier finding${run.incremental.carried === 1 ? '' : 's'} in other files ${run.incremental.carried === 1 ? 'is' : 'are'} listed after the new ones.`];
+    notes = [...notes, ...extrasNotes(run, checksError)];
+    // Rank, never delete: most likely first; applyFeedback then moves suspected ones below verified. Earlier findings come last.
+    const ranked = [...applyFeedback(byConfidence(fresh), d.feedback, sameMeaning), ...(run.carried ?? [])];
+    // The diff, repository code, rules and issue texts are kept only while running (for resume); only counts remain.
     const repoContext = run.repoContext ? { definitions: run.repoContext.definitions, indexedFiles: run.repoContext.indexedFiles } : run.repoContext;
-    await save({ status: 'done', findings: applyFeedback(byConfidence(labelled), d.feedback, sameMeaning), notes, diff: undefined, repoContext });
+    const extras = run.extras ? { ...run.extras, rulesText: undefined, issuesText: undefined } : run.extras;
+    await save({ status: 'done', findings: ranked, notes, diff: undefined, repoContext, extras });
   } catch (e) {
     await save({ status: 'failed', error: toRunError(e) });
   }
@@ -250,16 +216,17 @@ export interface CostEstimate {
 }
 
 /**
- * Rough cost of one review before it runs: plain review pass + verifier, plus (with repository
- * context) a second review pass with up to DEFINITIONS_MAX_CHARS of code. ~4 characters per token
- * for input; output from a short answer to a long one with thinking. Null when the price is unknown.
+ * Rough cost of one review before it runs: plain review pass + verifier + a short walkthrough, plus
+ * (with repository context) a second review pass with up to DEFINITIONS_MAX_CHARS of code. ~4
+ * characters per token for input; output from a short answer to a long one with thinking. Rules and
+ * linked-issue passes, when the pull request has them, add up to one more pass each (not included).
  */
 export function estimateReview(diffChars: number, prices: ModelChoice | null, withContext = false): CostEstimate | null {
   if (!prices) return null;
   const diff = Math.min(diffChars, MAX_DIFF_CHARS);
-  const base = (BASELINE_PROMPT.length + diff + VERIFY_PROMPT.length + diff + 2_000) / 4;
+  const base = (BASELINE_PROMPT.length + diff + VERIFY_PROMPT.length + diff + 2_000 + diff) / 4;
   const second = (BASELINE_PROMPT.length + DEFINITIONS_ADDENDUM.length + diff) / 4;
   const low = withContext ? base + second + 2_000 / 4 : base;
   const high = withContext ? base + second + DEFINITIONS_MAX_CHARS / 4 : base;
-  return { lowUsd: estimateCost(prices, low, withContext ? 3_000 : 1_500), highUsd: estimateCost(prices, high * 1.2, withContext ? 24_000 : 12_000) };
+  return { lowUsd: estimateCost(prices, low, withContext ? 4_000 : 2_500), highUsd: estimateCost(prices, high * 1.2, withContext ? 28_000 : 16_000) };
 }

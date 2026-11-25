@@ -53,7 +53,7 @@ export class GitHubHost implements ReviewHost {
 
   async post(plan: PostPlan, info: TargetInfo): Promise<PostResult> {
     // No `event` field: the review stays PENDING until the author submits it on GitHub.
-    const body = { commit_id: info.headSha, body: plan.summary, comments: plan.inline.map((c) => ({ path: c.path, line: c.line, side: 'RIGHT', body: c.body })) };
+    const body = { commit_id: info.headSha, body: plan.summary, comments: plan.inline.map((c) => ({ path: c.path, line: c.line, side: 'RIGHT', ...(c.startLine !== undefined ? { start_line: c.startLine, start_side: 'RIGHT' } : {}), body: c.body })) };
     const res = JSON.parse(await this.api.post(`${this.pr}/reviews`, body)) as { html_url?: string };
     return { posted: plan.inline.length, url: res.html_url ?? `https://${this.t.host}/${this.t.owner}/${this.t.repo}/pull/${this.t.number}`, failed: [] };
   }

@@ -13,6 +13,34 @@ const STATUS_TEXT = { verified: 'Verified', suspected: 'Suspected', unchecked: '
 export interface CardContext {
   readonly run: RunRecord;
   readonly target: ReviewTarget;
+  /** Asks the worker for a suggested fix; the card re-renders when the run record updates. */
+  readonly askFix?: ((findingId: string) => Promise<void>) | undefined;
+}
+
+const SOURCE_TAG = {
+  rules: ['Team rule', 'Found by checking the change against the team rules files at the pull request base'],
+  requirements: ['Linked issue', 'Found by comparing the change with the issue it links'],
+  ci: ['From CI', 'Reported by a CI check on a line this change adds'],
+} as const;
+
+/** The suggested change, or a button that asks for one, or why there is none. */
+function fixBlock(f: ReviewFinding, ctx: CardContext): HTMLElement | null {
+  if (f.fix) {
+    const lines = f.fix.startLine === f.fix.endLine ? `line ${f.fix.startLine}` : `lines ${f.fix.startLine}–${f.fix.endLine}`;
+    return el('details', { className: 'fix' }, el('summary', { textContent: `Suggested fix (${lines})` }), ...(f.fix.explanation ? [el('p', { className: 'muted', textContent: f.fix.explanation })] : []), el('pre', { className: 'code' }, el('code', { textContent: f.fix.replacement || '(delete these lines)' })), el('p', { className: 'muted', textContent: 'Posted with the finding as a suggestion the author can apply in one click.' }));
+  }
+  if (f.source === 'ci' || f.carried || !ctx.askFix) return null;
+  const note = el('p', { className: 'muted', role: 'status', textContent: f.fixUnavailable ? `No fix suggested: ${f.fixUnavailable}.` : '' });
+  const ask = button(f.fixUnavailable ? 'Try a fix again' : 'Suggest a fix', () => {
+    ask.disabled = true;
+    note.textContent = 'Suggesting a fix… (one model call)';
+    ctx.askFix?.(f.id).catch((e: unknown) => {
+      ask.disabled = false;
+      note.textContent = `Could not ask for a fix: ${(e as Error).message}`;
+    });
+  });
+  ask.setAttribute('aria-label', `Suggest a fix: ${f.file}:${f.line}`);
+  return el('div', { className: 'fix' }, ask, note);
 }
 
 /** How bad the finding is if real. The word carries the meaning; colour only supports it. */
@@ -74,13 +102,19 @@ export function findingCard(f: ReviewFinding, ctx: CardContext, posted: boolean,
   const pick = el('label', { htmlFor: box.id, className: 'pick' }, box, file);
   pick.title = `${f.file}:${f.line}`;
   const status = el('span', { className: `tag status-${f.status}`, textContent: posted ? `${STATUS_TEXT[f.status]} · in draft` : STATUS_TEXT[f.status] });
-  const tags = el('div', { className: 'tags' }, ...(f.impact ? [impactTag(f.impact)] : []), status, ...(f.fromContext ? [el('span', { className: 'tag', textContent: 'Used code from other files', title: 'Found by the review pass that read the code this change calls' })] : []));
+  const extra: HTMLElement[] = [];
+  if (f.fromContext) extra.push(el('span', { className: 'tag', textContent: 'Used code from other files', title: 'Found by the review pass that read the code this change calls' }));
+  if (f.source) extra.push(el('span', { className: 'tag', textContent: SOURCE_TAG[f.source][0], title: SOURCE_TAG[f.source][1] }));
+  if (f.carried) extra.push(el('span', { className: 'tag', textContent: 'From earlier review', title: 'Found by the previous review in a file the new commits did not change' }));
+  const tags = el('div', { className: 'tags' }, ...(f.impact ? [impactTag(f.impact)] : []), status, ...extra);
   const li = el('li', { className: `finding${f.status === 'suspected' ? ' is-suspected' : ''}` }, pick);
   if (dir) li.append(el('p', { className: 'path code', textContent: dir }));
   li.append(tags, el('p', { className: 'claim', textContent: f.claim }));
   if (f.suspectedBecause) li.append(el('details', { className: 'why' }, el('summary', { textContent: 'Why suspected' }), el('p', { textContent: f.suspectedBecause })));
   const where = ctx.run.context?.status === 'done' && ctx.run.headSha ? findingContext(ctx.run.context.perFinding[f.id], ctx.target, ctx.run.headSha) : null;
   if (where) li.append(where);
+  const fix = fixBlock(f, ctx);
+  if (fix) li.append(fix);
   li.append(feedbackControls(f, ctx, saved));
   return li;
 }

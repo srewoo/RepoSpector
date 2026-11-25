@@ -16,14 +16,18 @@ export interface ResultsContext {
   /** Needed to post; reading public pull requests works without it. */
   readonly hostToken?: string | undefined;
   readonly tabId?: number | undefined;
+  /** Review again: only files changed since this review when the pull request has new commits. */
   readonly again: () => void;
+  /** Review every file again. */
+  readonly full: () => void;
+  readonly askFix: (findingId: string) => Promise<void>;
 }
 
 const money = (usd: number): string => (usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`);
 const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
 
 /** Notes that limited what was reviewed: shown as a callout above the findings, not in the footer. */
-const LIMITING = /^(Repository context was not used|The diff is larger than|The verifier reply could not be read|The repository-context pass reply could not be read)/;
+const LIMITING = /^(Repository context was not used|The diff is larger than|The verifier reply could not be read|The repository-context pass reply could not be read|Team rules, linked issues and CI results were not read|The (team-rules|linked-issue) check (reply could not be read|did not run)|Re-review: )/;
 
 async function post(ctx: ResultsContext, ids: string[], status: HTMLElement, trigger: HTMLButtonElement): Promise<void> {
   trigger.disabled = true;
@@ -31,7 +35,7 @@ async function post(ctx: ResultsContext, ids: string[], status: HTMLElement, tri
   status.textContent = 'Posting…';
   try {
     const host = hostFor(ctx.target, fetchClient({ kind: ctx.target.kind, base: ctx.apiBase, token: ctx.hostToken }));
-    const out = await postFindings(ctx.run, ids, host);
+    const out = await postFindings(ctx.run, ids, host, ctx.target.kind);
     const done = ids.filter((id) => !out.failed.some((x) => x.findingId === id));
     const run: RunRecord = { ...ctx.run, posted: [...(ctx.run.posted ?? []), { at: Date.now(), url: out.url, findingIds: done }] };
     await putRun(run);
@@ -69,16 +73,26 @@ function summary(run: RunRecord, findings: readonly ReviewFinding[]): HTMLElemen
   return el('section', { className: 'summary', ariaLabel: 'Review summary' }, el('h2', { textContent: title }), ...(pills.length ? [el('div', { className: 'tags' }, ...pills)] : []), el('p', { className: 'muted', textContent: facts.join(' · ') }));
 }
 
+/** What the change does, from the walkthrough pass: overview first, file list folded. */
+function walkthrough(run: RunRecord): HTMLElement[] {
+  const s = run.summary;
+  if (!s) return [];
+  const files = s.files.length ? [el('details', {}, el('summary', { textContent: `Changes by file (${s.files.length})` }), el('ul', { className: 'notes' }, ...s.files.map((f) => el('li', {}, el('span', { className: 'code', textContent: f.path }), ` — ${f.change}`))))] : [];
+  const focus = s.focus.length ? [el('p', { className: 'muted', textContent: 'Read closely:' }), el('ul', { className: 'notes' }, ...s.focus.map((x) => el('li', { textContent: x })))] : [];
+  return [el('section', { className: 'walkthrough', ariaLabel: 'What this change does' }, el('h2', { textContent: 'What this change does' }), el('p', { textContent: s.overview }), ...focus, ...files)];
+}
+
 /** The finished review: summary, what limited it, findings to select and react to, then the rest folded away. */
 export async function results(ctx: ResultsContext): Promise<Node[]> {
   const { run } = ctx;
   const findings = run.findings ?? [];
   const limiting = run.notes.filter((n) => LIMITING.test(n));
   const other = run.notes.filter((n) => !LIMITING.test(n));
-  const out: Node[] = [summary(run, findings), ...limiting.map((n) => el('p', { className: 'callout warn', role: 'note', textContent: n })), ...postedNote(run, ctx.target.kind)];
+  const out: Node[] = [summary(run, findings), ...walkthrough(run), ...limiting.map((n) => el('p', { className: 'callout warn', role: 'note', textContent: n })), ...postedNote(run, ctx.target.kind)];
 
   const postedIds = new Set((run.posted ?? []).flatMap((p) => p.findingIds));
-  const selected = new Set(findings.filter((f) => f.status === 'verified' && !postedIds.has(f.id)).map((f) => f.id));
+  // CI problems already show on the host's diff, and earlier findings were posted before: not pre-selected.
+  const selected = new Set(findings.filter((f) => f.status === 'verified' && f.source !== 'ci' && !f.carried && !postedIds.has(f.id)).map((f) => f.id));
   const saved = new Map((await feedbackRows()).map((r) => [r.key, r]));
   const noun = ctx.target.kind === 'github' ? 'a draft review' : 'draft notes';
   const status = el('p', { role: 'status' });
@@ -88,7 +102,7 @@ export async function results(ctx: ResultsContext): Promise<Node[]> {
     postButton.disabled = selected.size === 0;
   };
   sync();
-  if (findings.length) out.push(el('ol', { className: 'findings', ariaLabel: 'Findings' }, ...findings.map((f) => findingCard(f, ctx, postedIds.has(f.id), selected, sync, saved.get(f.fingerprint)))));
+  if (findings.length) out.push(el('ol', { className: 'findings', ariaLabel: 'Findings' }, ...findings.map((f) => findingCard(f, { run, target: ctx.target, askFix: ctx.askFix }, postedIds.has(f.id), selected, sync, saved.get(f.fingerprint)))));
 
   // Secondary information, folded: ordering, page markers, where code is used, other notes.
   const markers = el('p', { className: 'muted' });
@@ -99,7 +113,9 @@ export async function results(ctx: ResultsContext): Promise<Node[]> {
   if (about.length) out.push(el('details', { className: 'about' }, el('summary', { textContent: 'About this review' }), ...about));
 
   // Actions stay in view at the bottom of the panel.
-  const actions = ctx.hostToken && findings.length ? [postButton, button('Review again', ctx.again)] : [button('Review again', ctx.again, !findings.length), ...(findings.length ? [settingsButton()] : [])];
+  const again = [button('Review again', ctx.again, !findings.length), button('Review all files', ctx.full)];
+  again[0]!.title = 'If the pull request has new commits, only the files they change are reviewed; earlier findings in other files are kept.';
+  const actions = ctx.hostToken && findings.length ? [postButton, ...again] : [...again, ...(findings.length ? [settingsButton()] : [])];
   const hint = !ctx.hostToken && findings.length ? [el('p', { className: 'muted', textContent: `To post drafts, add an access token for ${ctx.hostOrigin.replace(/^https:\/\//, '')} in settings.` })] : [];
   out.push(el('div', { className: 'actionbar' }, ...hint, el('div', { className: 'actions' }, ...actions), status));
 

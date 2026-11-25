@@ -71,6 +71,22 @@ export class GitRepo {
     throw new GitError('no base found (tried origin/HEAD, main, master); pass base explicitly');
   }
 
+  /** Paths changed from `since` to head (worktree: also uncommitted and untracked), old and new names. */
+  async changedPaths(since: string, head: Head): Promise<Set<string>> {
+    const range = head === 'worktree' ? [since] : [since, head];
+    const out = await this.git(['diff', '--name-status', '--no-color', '-M', ...range, '--']);
+    const paths = new Set(out.split('\n').flatMap((l) => l.split('\t').slice(1)).filter(Boolean));
+    if (head === 'worktree') for (const p of await this.untrackedFiles()) paths.add(p);
+    return paths;
+  }
+
+  /** Branch name and commit subjects in base..head: where issue keys usually appear. */
+  async refText(baseSha: string, head: Head): Promise<string> {
+    const tip = head === 'worktree' ? 'HEAD' : head;
+    const [branch, log] = await Promise.all([this.git(['rev-parse', '--abbrev-ref', 'HEAD']).catch(() => ''), this.git(['log', '--format=%s', '-n', '50', `${baseSha}..${tip}`]).catch(() => '')]);
+    return `${head === 'worktree' ? branch.trim() : ''}\n${log}`.replace(/[_/]/g, ' ');
+  }
+
   /** Unified diff from base to head; head 'worktree' includes uncommitted tracked changes. */
   async diff(baseSha: string, head: Head): Promise<string> {
     const range = head === 'worktree' ? [baseSha] : [baseSha, head];

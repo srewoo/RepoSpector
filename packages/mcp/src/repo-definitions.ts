@@ -3,7 +3,7 @@ import { MAX_PARSED_FILES, parseFiles } from './context.js';
 import type { GitRepo, Head } from './git.js';
 import type { GraphService } from './graph/service.js';
 import type { FileSymbols } from './graph/parser.js';
-import type { RevisionSource } from './source.js';
+import type { ReviewSource } from './review-source.js';
 
 /** How long plan_review waits for the code graph of the reviewed commit (first build of a big repo). */
 export const DEFINITIONS_WAIT_MS = 120_000;
@@ -21,7 +21,7 @@ export interface PlanDefinitions {
 export interface DefinitionsDeps {
   readonly repo: GitRepo;
   readonly head: Head;
-  readonly source: RevisionSource;
+  readonly source: ReviewSource;
   readonly graph?: GraphService | undefined;
   readonly waitMs?: number;
 }

@@ -19,6 +19,10 @@ export const StartMessageSchema = z.strictObject({
   semanticFeedback: z.optional(z.boolean()),
   /** Read the repository at the PR head for a second, context-aware pass (default on). */
   repoContext: z.optional(z.boolean()),
+  /** Review every file even when an earlier review exists (default: only files changed since it). */
+  fullReview: z.optional(z.boolean()),
+  /** Instead of a review: suggest a fix for this finding of the (finished) run. */
+  fixFindingId: z.optional(z.string().check(z.regex(/^p*f\d{1,4}$/))),
 });
 export type StartMessage = z.infer<typeof StartMessageSchema>;
 

@@ -51,7 +51,7 @@ describe('MCP server', () => {
     const { client } = await connect();
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(
-      ['export_feedback', 'finalize', 'get_agent_prompt', 'get_context', 'get_run_state', 'plan_review', 'post_review', 'record_feedback', 'submit_findings', 'verify_batch'].sort(),
+      ['export_feedback', 'finalize', 'get_agent_prompt', 'get_context', 'get_context_pack', 'get_run_state', 'plan_review', 'post_review', 'provide_files', 'provide_issues', 'provide_pr', 'record_feedback', 'skip_specialist', 'start_pr_review', 'submit_check_results', 'submit_findings', 'submit_summary', 'verify_batch'].sort(),
     );
     expect(tools.every((t) => t.annotations?.destructiveHint === false)).toBe(true);
     const post = tools.find((t) => t.name === 'post_review');

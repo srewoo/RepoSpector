@@ -22,6 +22,10 @@
     "./engine": {
       "types": "./dist/tsc/pipeline/engine.d.ts",
       "default": "./dist/tsc/pipeline/engine.js"
+    },
+    "./repo-context": {
+      "types": "./dist/tsc/pipeline/repo-context.d.ts",
+      "default": "./dist/tsc/pipeline/repo-context.js"
     }
   }
 }

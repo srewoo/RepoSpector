@@ -1,22 +1,17 @@
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { join, sep } from 'node:path';
-import { isSafeRepoPath, type LineSource } from '@repospector/core';
+import { isSafeRepoPath } from '@repospector/core';
 import type { GitRepo, Head } from './git.js';
+import { numbered, splitLines, type ReviewSource } from './review-source.js';
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const PRELOAD_CONCURRENCY = 16;
-
-function splitLines(text: string): string[] {
-  const lines = text.split('\n');
-  if (lines.at(-1) === '') lines.pop();
-  return lines;
-}
 
 /**
  * File lines at the reviewed revision. LineSource is synchronous so the core stays I/O-free;
  * callers preload the paths they are about to check.
  */
-export class RevisionSource implements LineSource {
+export class RevisionSource implements ReviewSource {
   private readonly files = new Map<string, string[] | null>();
 
   constructor(
@@ -43,12 +38,7 @@ export class RevisionSource implements LineSource {
   /** Numbered lines, clamped to the file. Empty string if the file is not loaded. */
   snippet(path: string, start: number, end: number): string {
     const lines = this.files.get(path);
-    if (!lines) return '';
-    const from = Math.max(1, start);
-    const to = Math.min(lines.length, end);
-    const out: string[] = [];
-    for (let n = from; n <= to; n++) out.push(`${n}: ${lines[n - 1] ?? ''}`);
-    return out.join('\n');
+    return lines ? numbered(lines, start, end) : '';
   }
 
   private async load(path: string): Promise<string[] | null> {

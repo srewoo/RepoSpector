@@ -9,7 +9,8 @@ import { redactSecrets } from './untrusted.js';
 export const FeedbackEntrySchema = z
   .object({
     fingerprint: z.string().min(1).max(128),
-    category: z.enum(CATEGORIES),
+    // 'ci': reactions to CI/check problems shown as findings (extension, MCP check results).
+    category: z.enum([...CATEGORIES, 'ci']),
     severity: z.enum(SEVERITIES),
     claim: z.string().min(1).max(1000),
     file: z.string().min(1).max(500),
@@ -27,7 +28,7 @@ export const SIMILAR_REJECTIONS = 3;
 /** Word-overlap (Jaccard) needed to call two claims similar. A stand-in for embeddings. */
 export const SIMILARITY = 0.5;
 
-export function feedbackEntry(f: Pick<JudgedFinding, 'fingerprint' | 'category' | 'severity' | 'claim' | 'file'>, reaction: Reaction, reason: string, at: Date): FeedbackEntry {
+export function feedbackEntry(f: Pick<JudgedFinding, 'fingerprint' | 'severity' | 'claim' | 'file'> & { readonly category: Category | 'ci' }, reaction: Reaction, reason: string, at: Date): FeedbackEntry {
   return {
     fingerprint: f.fingerprint,
     category: f.category,
@@ -58,7 +59,7 @@ export function similarity(a: string, b: string): number {
 /** What the team filter needs from a finding; MCP's JudgedFinding and the extension's findings both fit. */
 export interface FilterableFinding {
   readonly fingerprint: string;
-  readonly category: Category;
+  readonly category: Category | 'ci';
   readonly claim: string;
   readonly status: string;
   readonly suspectedBecause?: string | undefined;

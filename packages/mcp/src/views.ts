@@ -1,6 +1,7 @@
-import { redactSecrets, wrapUntrusted, type Category, type Finding, type JudgeResult } from '@repospector/core';
+import { checksLine, redactSecrets, wrapUntrusted, type Category, type Finding, type JudgeResult } from '@repospector/core';
+import type { StoredRun } from './store.js';
 import type { ReviewPlan } from './plan.js';
-import type { RevisionSource } from './source.js';
+import type { ReviewSource } from './review-source.js';
 
 const CONTEXT_LINES = 3;
 const MAX_CODE_LINES = 120;
@@ -23,7 +24,7 @@ export function referencedFiles(items: readonly unknown[]): string[] {
 }
 
 /** What the verifier sees: the claim and the cited code, not the specialist's reasoning or confidence. */
-export function packForVerifier(f: Finding, source: RevisionSource) {
+export function packForVerifier(f: Finding, source: ReviewSource) {
   const blocks: string[] = [];
   let budget = MAX_CODE_LINES;
   for (const e of f.evidence) {
@@ -46,7 +47,9 @@ export function packForVerifier(f: Finding, source: RevisionSource) {
   };
 }
 
-export function formatFinal(result: JudgeResult, plan: ReviewPlan, specialists: readonly Category[]) {
+export type FinalExtras = Pick<StoredRun, 'summary' | 'checks' | 'carried' | 'issues'>;
+
+export function formatFinal(result: JudgeResult, plan: ReviewPlan, specialists: readonly Category[], skipped: readonly { specialist: Category; reason: string }[] = [], extras: FinalExtras = {}) {
   const findings = result.kept.map((f) => ({
     id: f.id,
     file: f.file,
@@ -55,8 +58,9 @@ export function formatFinal(result: JudgeResult, plan: ReviewPlan, specialists: 
     severity: f.severity,
     category: f.category,
     claim: f.claim,
-    reasoning: f.reasoning,
+    basis: f.reasoning,
     evidence: f.evidence,
+    ...(f.fix ? { fix: f.fix } : {}),
     status: f.status,
     ...(f.suspectedBecause ? { suspectedBecause: f.suspectedBecause } : {}),
     verification: f.verdict.reason,
@@ -68,20 +72,26 @@ export function formatFinal(result: JudgeResult, plan: ReviewPlan, specialists: 
         ? `uncalibrated confidence ${f.confidence.toFixed(2)}`
         : `expected precision ${(f.expectedPrecision * 100).toFixed(0)}%`,
   }));
-  const notCovered = ['requirements: no linked issue was provided'];
+  const notCovered = extras.issues?.length ? [] : ['requirements: no linked issue or ticket was provided'];
+  if (!extras.checks) notCovered.push('checks: no CI results or local check output was provided');
   if (!specialists.includes('rules')) notCovered.push('team rules: none found, or not run at this depth');
+  for (const s of skipped) notCovered.push(`${s.specialist}: the specialist did not run (${s.reason}); this area was not reviewed`);
   return {
+    ...(extras.summary ? { walkthrough: extras.summary } : {}),
     findings,
+    ...(extras.checks ? { checks: { summary: checksLine(extras.checks.results), onChangedLines: extras.checks.diagnostics.map(({ fingerprint: _f, ...d }) => d) } } : {}),
+    ...(extras.carried?.length ? { carriedOver: { note: `Earlier findings in files this re-review did not cover (since ${plan.incremental?.since.slice(0, 12)}); they still stand.`, findings: extras.carried } } : {}),
     dropped: result.dropped,
     coverage: {
       reviewedFiles: plan.files.map((f) => f.path),
-      specialistsRun: specialists,
+      specialistsRun: specialists.filter((c) => !skipped.some((s) => s.specialist === c)),
       skipped: plan.skipped,
       notIncluded: plan.notIncluded,
       notCovered,
+      ...(plan.incremental ? { incremental: plan.incremental } : {}),
     },
     summary: `${findings.filter((f) => f.status === 'verified').length} verified and ${findings.filter((f) => f.status === 'suspected').length} suspected finding(s), ${result.dropped.length} duplicate(s) merged, ${plan.files.length} file(s) reviewed${
       plan.notIncluded.length ? `, ${plan.notIncluded.length} file(s) not reviewed (size limit)` : ''
-    }.`,
+    }${skipped.length ? `; not reviewed by: ${skipped.map((s) => s.specialist).join(', ')}` : ''}.`,
   };
 }

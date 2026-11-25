@@ -71,3 +71,17 @@ async function checkoutLocked(req: CheckoutRequest, slug: string, store: string)
   }
   return { dir, headSha };
 }
+
+/** Adds one commit (depth 1) to the repo's object store, e.g. a PR's merge base, so worktrees can diff against it. */
+export async function fetchCommit(cacheDir: string, repo: string, sha: string): Promise<void> {
+  if (!REPO_RE.test(repo) || repo.includes('..')) throw new Error(`invalid repo: ${repo}`);
+  if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`invalid commit: ${sha}`);
+  const store = join(resolve(cacheDir), 'stores', repo.replace('/', '__'));
+  await serialized(store, async () => {
+    try {
+      await git(store, 'cat-file', '-e', `${sha}^{commit}`);
+    } catch {
+      await git(store, 'fetch', '-q', '--depth=1', 'origin', sha);
+    }
+  });
+}

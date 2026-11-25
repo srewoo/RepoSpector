@@ -35,10 +35,10 @@ export function handoff(target: ReviewTarget, plan: PostPlan, commitId: string) 
   ];
   if (target.kind === 'github') {
     return {
-      handoff: { kind: 'github-pending-review' as const, host: target.host, owner: target.owner, repo: target.repo, pullNumber: target.number, commitId, body: plan.summary, comments: plan.inline.map((c) => ({ path: c.path, line: c.line, side: 'RIGHT' as const, body: c.body })) },
+      handoff: { kind: 'github-pending-review' as const, host: target.host, owner: target.owner, repo: target.repo, pullNumber: target.number, commitId, body: plan.summary, comments: plan.inline.map((c) => ({ path: c.path, line: c.line, side: 'RIGHT' as const, ...(c.startLine !== undefined ? { startLine: c.startLine, startSide: 'RIGHT' as const } : {}), body: c.body })) },
       instructions: [
         ...common,
-        'With the GitHub MCP tools, create a PENDING review on this pull request at commitId with this body, then add each comment at its path, line and side RIGHT. Do not submit the review and do not approve or request changes: it stays a draft that only the user sees until they submit it on GitHub.',
+        'With the GitHub MCP tools, create a PENDING review on this pull request at commitId with this body, then add each comment at its path, line and side RIGHT (with startLine/startSide for multi-line comments, which carry a ```suggestion block the author can commit in one click). Do not submit the review and do not approve or request changes: it stays a draft that only the user sees until they submit it on GitHub.',
         'If the user already has a pending review on this pull request, stop and ask them to submit or discard it first (GitHub allows one per person).',
       ],
     };

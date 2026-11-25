@@ -1,4 +1,4 @@
-import { buildPostPlan, type PostableFinding, type ReviewHost } from '@repospector/core';
+import { buildPostPlan, checksLine, summaryMarkdown, type HostFlavor, type PostableFinding, type ReviewHost } from '@repospector/core';
 import type { ReviewFinding, RunRecord } from '../pipeline/engine.js';
 
 export interface PostOutcome {
@@ -16,7 +16,8 @@ export interface PostOutcome {
 export class PostError extends Error {}
 
 export function toPostable(f: ReviewFinding): PostableFinding {
-  return { id: f.id, fingerprint: f.fingerprint, file: f.file, startLine: f.line, endLine: f.line, claim: f.claim, status: f.status, suspectedBecause: f.suspectedBecause, tags: [] };
+  const tags = f.source === 'ci' ? ['CI'] : f.source === 'rules' ? ['team rule'] : f.source === 'requirements' ? ['linked issue'] : [];
+  return { id: f.id, fingerprint: f.fingerprint, file: f.file, startLine: f.line, endLine: f.line, claim: f.claim, status: f.status, suspectedBecause: f.suspectedBecause, tags, ...(f.fix ? { fix: f.fix } : {}) };
 }
 
 /**
@@ -24,7 +25,7 @@ export function toPostable(f: ReviewFinding): PostableFinding {
  * notes, visible only to the token's owner until they publish. Refuses when the pull request has
  * new commits since the review, because comment lines would no longer match.
  */
-export async function postFindings(run: RunRecord, findingIds: readonly string[], host: ReviewHost): Promise<PostOutcome> {
+export async function postFindings(run: RunRecord, findingIds: readonly string[], host: ReviewHost, flavor: HostFlavor = 'github'): Promise<PostOutcome> {
   const byId = new Map((run.findings ?? []).map((f) => [f.id, f]));
   const selected = findingIds.map((id) => byId.get(id));
   if (selected.length === 0) throw new PostError('Select at least one finding to post.');
@@ -35,7 +36,10 @@ export async function postFindings(run: RunRecord, findingIds: readonly string[]
   }
   // GitLab needs hunks() before post(): it learns each file's old path there.
   const hunks = await host.hunks();
-  const plan = buildPostPlan((selected as ReviewFinding[]).map(toPostable), hunks, await host.existingMarkers());
+  // Selected in panel order (most likely first), so the inline cap keeps the strongest findings inline.
+  const order = new Map((run.findings ?? []).map((f, i) => [f.id, i]));
+  const chosen = (selected as ReviewFinding[]).sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+  const plan = buildPostPlan(chosen.map(toPostable), hunks, await host.existingMarkers(), { flavor, ...(run.summary ? { walkthrough: summaryMarkdown(run.summary) } : {}), ...(run.extras?.checks ? { extra: [checksLine(run.extras.checks)] } : {}) });
   if (plan.inline.length === 0 && plan.inSummary.length === 0) return { posted: 0, inSummary: 0, alreadyPosted: plan.alreadyPosted, failed: [], url: '' };
   const res = await host.post(plan, info);
   return { posted: res.posted, inSummary: plan.inSummary.length, alreadyPosted: plan.alreadyPosted, failed: res.failed, url: res.url };

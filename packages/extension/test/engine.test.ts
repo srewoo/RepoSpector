@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { feedbackEntry, type FeedbackEntry, type ReviewTarget } from '@repospector/core';
+import { feedbackEntry, RECALL_PROMPT, SUMMARY_PROMPT, type FeedbackEntry, type ReviewTarget } from '@repospector/core';
 import { estimateReview, newRun, runReview, type EngineDeps, type RunRecord } from '../src/pipeline/engine.js';
 import type { CompletionRequest, CompletionResult, ModelProvider } from '../src/providers/types.js';
 import { ProviderError } from '../src/providers/types.js';
@@ -8,15 +8,22 @@ const target: ReviewTarget = { kind: 'github', host: 'github.com', owner: 'o', r
 const DIFF = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,1 +1,2 @@\n a\n+const key = "AKIAABCDEFGHIJKLMNOP";\n';
 
 /** A provider that answers review and verify prompts from scripts, recording what it was sent. */
-function scripted(review: string, verify: string, opts: { fail?: ProviderError; contextReview?: string } = {}): ModelProvider & { prompts: CompletionRequest[] } {
+function scripted(review: string, verify: string, opts: { fail?: ProviderError; contextReview?: string } = {}): ModelProvider & { prompts: CompletionRequest[]; summaries: CompletionRequest[] } {
   const prompts: CompletionRequest[] = [];
+  const summaries: CompletionRequest[] = [];
   return {
     id: 'anthropic',
     model: 'claude-sonnet-5-5',
     prompts,
+    summaries,
     async complete(req): Promise<CompletionResult> {
-      prompts.push(req);
       if (opts.fail) throw opts.fail;
+      // The walkthrough pass is recorded apart, so review/verify call counts stay as measured.
+      if (req.prompt.startsWith(SUMMARY_PROMPT)) {
+        summaries.push(req);
+        return { text: '{"overview":"Adds a key loader.","files":[{"path":"src/a.ts","change":"new key"}],"focus":[]}', model: 'claude-sonnet-5-5', usage: { inputTokens: 500, outputTokens: 50 }, stop: 'end', fallbackUsed: false };
+      }
+      prompts.push(req);
       const isVerify = req.prompt.includes('<findings>');
       const isContext = req.prompt.includes('<definitions>');
       return { text: isVerify ? verify : isContext ? (opts.contextReview ?? '[]') : review, model: 'claude-sonnet-5-5', usage: { inputTokens: 1000, outputTokens: 100 }, stop: 'end', fallbackUsed: false };
@@ -49,11 +56,15 @@ describe('runReview', () => {
     expect(run.status).toBe('done');
     expect(run.findings?.map((f) => `${f.status} ${f.file}:${f.line}`)).toEqual(['verified src/a.ts:2', 'suspected src/a.ts:1']);
     expect(run.findings?.[1]?.suspectedBecause).toBe('a is exported.');
+    expect(p.prompts[0]?.prompt.startsWith(RECALL_PROMPT)).toBe(true); // the shipped review pass
     expect(p.prompts[0]?.prompt).toContain('PR title: Add key loader');
     expect(p.prompts[0]?.prompt).not.toContain('AKIAABCDEFGHIJKLMNOP');
     expect(p.prompts[0]?.system).toBeUndefined();
-    expect(run.usage).toEqual({ inputTokens: 2000, outputTokens: 200 });
-    expect(run.costUsd).toBeCloseTo((2000 * 2 + 200 * 10) / 1e6, 9);
+    // Review + verify + the walkthrough (500 in / 50 out).
+    expect(run.usage).toEqual({ inputTokens: 2500, outputTokens: 250 });
+    expect(run.costUsd).toBeCloseTo((2500 * 2 + 250 * 10) / 1e6, 9);
+    expect(run.summary).toEqual({ overview: 'Adds a key loader.', files: [{ path: 'src/a.ts', change: 'new key' }], focus: [] });
+    expect(p.summaries[0]?.effort).toBe('low');
     expect(run.diff).toBeUndefined();
     expect(d.saved.map((s) => s.step)).toEqual(['fetch', 'context', 'review', 'verify', 'filter', 'filter']);
   });

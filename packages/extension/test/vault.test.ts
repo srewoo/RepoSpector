@@ -63,7 +63,8 @@ describe('Vault', () => {
     await vault.setSecret('provider:anthropic', KEY);
     const { vault: stored } = (await local.get('vault')) as { vault: { items: Record<string, { ct: string }> } };
     const item = stored.items['provider:anthropic'];
-    if (item) item.ct = `A${item.ct.slice(1)}`;
+    // Change the first character for sure (setting it to 'A' was a no-op when it already was 'A').
+    if (item) item.ct = `${item.ct.startsWith('A') ? 'B' : 'A'}${item.ct.slice(1)}`;
     await local.set({ vault: stored });
     await expect(vault.getSecret('provider:anthropic')).rejects.toThrow(/could not decrypt/);
   });
