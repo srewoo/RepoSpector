@@ -52,6 +52,14 @@ describe('prompts', () => {
     expect(p).toMatch(/submit_findings/);
   });
 
+  it.each(CATEGORIES)('asks the %s specialist for recall: every hunk, more-likely-than-not, other implementations', (c) => {
+    const p = specialistPrompt(c);
+    expect(p).toMatch(/every changed hunk/);
+    expect(p).toMatch(/more likely real than not/);
+    expect(p).toMatch(/other implementations, overrides and callers/);
+    expect(p).not.toMatch(/that is a normal result/);
+  });
+
   it('has a verifier prompt that requires a citation either way', () => {
     expect(verifierPrompt()).toMatch(/citation/);
     expect(verifierPrompt()).toMatch(/disprove/i);

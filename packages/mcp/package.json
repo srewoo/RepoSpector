@@ -13,6 +13,7 @@
     "zod": "4.6.7"
   },
   "scripts": {
-    "release": "node release.mjs"
+    "login": "npm login",
+    "publish": "node release.mjs"
   }
 }
