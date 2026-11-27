@@ -1,5 +1,1165 @@
 [
   {
+    "id": "https://github.com/argoproj/argo-cd/pull/28027",
+    "repo": "argoproj/argo-cd",
+    "number": 28027,
+    "title": "fix: fixes parsing of dex passwords with dollar sign",
+    "golden": [
+      {
+        "comment": "After ReplaceMapSecrets, every string in every connector config is passed through EscapeDollarSignsInMap, which turns each `$` into `$$`. That also escapes values that were not resolved from argocd-secret, such as `clientSecret: $AUTHENTIK_CLIENT_SECRET`, which Dex is meant to expand from its environment, so those env-var references now reach Dex as literal strings and the connector gets wrong credentials.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "go",
+    "evidence": {
+      "fix_url": "https://github.com/argoproj/argo-cd/pull/28369",
+      "fix_kind": "fix",
+      "quote": "Fixes a regression introduced in https://github.com/argoproj/argo-cd/pull/28027 ... when dex config resolves ENV Variables that don't exist in secrets, the above PR is breaking the parsing",
+      "original_locations": [
+        {
+          "file": "util/dex/config.go",
+          "lines": "138-151"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/compose-spec/compose-go/pull/915",
+    "repo": "compose-spec/compose-go",
+    "number": 915,
+    "title": "fix(override): prevent panic on non-string list elements",
+    "golden": [
+      {
+        "comment": "convertIntoMapping now returns an error for any type other than map, string or []any, and its callers propagate it. A YAML `null` value (e.g. `networks: null` or `depends_on: null` in an override file) falls into that default branch, so merging such an override fails with 'cannot convert <nil> into a mapping' instead of keeping the base value.",
+        "severity": "High"
+      }
+    ],
+    "language": "go",
+    "evidence": {
+      "fix_url": "https://github.com/compose-spec/compose-go/pull/937",
+      "fix_kind": "fix",
+      "quote": "`networks: null`, `depends_on: null` or `models: null` in an override failed with `cannot convert <nil> into a mapping`, since #915 made `convertIntoMapping` reject unknown types.",
+      "original_locations": [
+        {
+          "file": "override/merge.go",
+          "lines": "290-324"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/compose-spec/compose-go/pull/924",
+    "repo": "compose-spec/compose-go",
+    "number": 924,
+    "title": "override: sequence merge ignores strictly-identical duplicate entries",
+    "golden": [
+      {
+        "comment": "appendWithoutDuplicates drops any override entry that is deep-equal to an entry already in the base, and is now used for every sequence including `environment`, `labels` and `build.args`. For KEY=VALUE lists where the last occurrence of a key wins, dropping the override's repeat of an earlier value leaves the stale later entry in effect, so the override no longer takes precedence.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "go",
+    "evidence": {
+      "fix_url": "https://github.com/compose-spec/compose-go/pull/937",
+      "fix_kind": "fix",
+      "quote": "Since #924, an override entry equal to one already present is dropped, which breaks KEY=VALUE lists where the last entry for a key takes effect: `[MODE=debug, MODE=release]` over `[MODE=release]` ended on `debug`",
+      "original_locations": [
+        {
+          "file": "override/merge.go",
+          "lines": "100"
+        },
+        {
+          "file": "override/merge.go",
+          "lines": "181-208"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/helm/helm/pull/32056",
+    "repo": "helm/helm",
+    "number": 32056,
+    "title": "fix: route registry client output to stdout instead of stderr",
+    "golden": [
+      {
+        "comment": "template.go and show.go now construct the registry client with `out`, the same stdout writer the command uses for its result. For OCI charts, registry.Client.Pull prints `Pulled:`/`Digest:` status lines to that writer, so `helm template` and `helm show` output is interleaved with non-YAML text and breaks anything that pipes it (e.g. to kubectl apply).",
+        "severity": "Medium"
+      }
+    ],
+    "language": "go",
+    "evidence": {
+      "fix_url": "https://github.com/helm/helm/pull/32217",
+      "fix_kind": "fix",
+      "quote": "Since v4.2.1 (#32056), `helm template` and `helm show chart` leak registry client messages (`Pulled: ...` / `Digest: ...`) into stdout, which breaks downstream YAML consumers",
+      "original_locations": [
+        {
+          "file": "pkg/cmd/template.go",
+          "lines": "88"
+        },
+        {
+          "file": "pkg/cmd/show.go",
+          "lines": "228-229"
+        },
+        {
+          "file": "pkg/cmd/root.go",
+          "lines": "406-459"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/helm/helm/pull/32081",
+    "repo": "helm/helm",
+    "number": 32081,
+    "title": "fix(kube): prevent spurious early exit in WaitForDelete during informer sync",
+    "golden": [
+      {
+        "comment": "In statusObserver, the new early `return` when every resource was skipped as Unknown (`unknownSkipped > 0 && len(rss) == 0`) means a delete-wait whose resources are already gone never reaches `cancel()`. waitForDelete then blocks until the full timeout, and the new DeadlineExceeded handling swallows that timeout, so `--wait` deletions stall for the entire timeout and still report success.",
+        "severity": "High"
+      }
+    ],
+    "language": "go",
+    "evidence": {
+      "fix_url": "https://github.com/helm/helm/pull/32230",
+      "fix_kind": "revert",
+      "quote": "Reverts helm/helm#32081 (Fixes issue #32214: '--wait hangs for the full timeout on fast resource deletions in v4.2.1', root cause: side effect of #32081)",
+      "original_locations": [
+        {
+          "file": "pkg/kube/statuswait.go",
+          "lines": "253-274"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/istio/istio/pull/57716",
+    "repo": "istio/istio",
+    "number": 57716,
+    "title": "Security/check sa for gw secrets",
+    "golden": [
+      {
+        "comment": "In ListenerSetCollection the service account recorded for the generated gateway is computed from the ListenerSet's own annotations and name (`obj.GetAnnotations()`, `getDefaultName(obj.GetName(), ...)`) instead of the parent Gateway's. Workloads of the parent gateway run under the parent's service account, so the new service-account check for secret access rejects TLS certificates for ListenerSet listeners.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "go",
+    "evidence": {
+      "fix_url": "https://github.com/istio/istio/pull/57984",
+      "fix_kind": "fix",
+      "quote": "Broken recently by https://github.com/istio/istio/pull/57716",
+      "original_locations": [
+        {
+          "file": "pilot/pkg/config/kube/gateway/gateway_collection.go",
+          "lines": "168-172"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/lf-edge/ekuiper/pull/4137",
+    "repo": "lf-edge/ekuiper",
+    "number": 4137,
+    "title": "fix(planner): binding for direct field aliases",
+    "golden": [
+      {
+        "comment": "In decorateStmt's alias-binding pass the new `|| isPrecedingAlias` condition rebinds any FieldRef with the alias's name, with no exclusion for the expression the alias itself is defined from. For a column aliased to its own name that is also referenced again (e.g. `SELECT event AS event, event FROM s`), the alias ends up pointing at itself and evaluation recurses without bound, overflowing the stack and killing the process.",
+        "severity": "High"
+      }
+    ],
+    "language": "go",
+    "evidence": {
+      "fix_url": "https://github.com/lf-edge/ekuiper/pull/4258",
+      "fix_kind": "fix",
+      "quote": "Since #4137, a SELECT that aliases a column to its own name and references the same column again, e.g. SELECT event AS event, event FROM myStream ... builds a plan where the alias `event` refers to itself. At runtime `ValuerEval.Eval` recurses forever",
+      "original_locations": [
+        {
+          "file": "internal/topo/planner/analyzer.go",
+          "lines": "125-131"
+        },
+        {
+          "file": "internal/topo/planner/analyzer.go",
+          "lines": "172-173"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/moby/moby/pull/50860",
+    "repo": "moby/moby",
+    "number": 50860,
+    "title": "daemon: filter networks before converting to API types",
+    "golden": [
+      {
+        "comment": "In matchesType (daemon/network/filter.go), the loop returns on the first type value it sees, and the values come from a map with random order. A request such as `type=builtin&type=custom` is therefore evaluated against only one arbitrary value, so GET /networks / `docker network ls` returns a random subset instead of the union of both types.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "go",
+    "evidence": {
+      "fix_url": "https://github.com/moby/moby/pull/54127",
+      "fix_kind": "fix",
+      "quote": "Regression from: https://github.com/moby/moby/pull/50860",
+      "original_locations": [
+        {
+          "file": "daemon/network/filter.go",
+          "lines": "184-194"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/theupdateframework/go-tuf/pull/753",
+    "repo": "theupdateframework/go-tuf",
+    "number": 753,
+    "title": "Surface invalid delegation path patterns and match OS-independently",
+    "golden": [
+      {
+        "comment": "IsDelegatedPath now returns (false, err) as soon as one pattern in role.Paths is malformed, before the remaining patterns are tried. A delegated role with one bad glob alongside a valid matching pattern is therefore treated as not trusted for the target, and GetRolesForTarget skips it.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "go",
+    "evidence": {
+      "fix_url": "https://github.com/theupdateframework/go-tuf/pull/820",
+      "fix_kind": "fix",
+      "quote": "Regression from #753 (unreleased): an invalid path pattern in a delegated role's `paths` caused `GetRolesForTarget` to skip the role, even when another of its patterns matched the target.",
+      "original_locations": [
+        {
+          "file": "metadata/metadata.go",
+          "lines": "543-547"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/apache/cxf/pull/3154",
+    "repo": "apache/cxf",
+    "number": 3154,
+    "title": "[CXF-9218]Respect configured ProxySelector instead of hard-wiring sys…",
+    "golden": [
+      {
+        "comment": "ProxyFactory.getSystemProxy now calls ProxySelector.getDefault() directly, replacing the SystemPropertyAction-based reads that ran privileged. Under a SecurityManager the call is unprivileged, so every caller on the stack, including user deployment code, must hold NetPermission(\"getProxySelector\") or HTTP calls fail with an AccessControlException.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "java",
+    "evidence": {
+      "fix_url": "https://github.com/apache/cxf/pull/3256",
+      "fix_kind": "fix",
+      "quote": "`NetPermission(\"getProxySelector\")` (introduced by #3154) `ProxyFactory.getSystemProxy()` calls `ProxySelector.getDefault()` without `doPrivileged`, forcing all callers including user deployments to hold this permission.",
+      "original_locations": [
+        {
+          "file": "rt/transports/http/src/main/java/org/apache/cxf/transport/http/ProxyFactory.java",
+          "lines": "37-66"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/apache/hudi/pull/17994",
+    "repo": "apache/hudi",
+    "number": 17994,
+    "title": "fix: Remove default record key and ordering fields values on the Flink side, consistent with Spark",
+    "golden": [
+      {
+        "comment": "OptionsResolver.getRecordKeyStr throws 'Primary key definition is required' whenever FlinkOptions.RECORD_KEY_FIELD is unset, and the option's default value is removed. It is now called unconditionally from HoodieTableFactory.setupHoodieKeyOptions, RowDataKeyGens.instance and Pipelines.bulkInsert, so Flink append-only (insert) tables defined without a PRIMARY KEY or record-key option, which previously fell back to auto-generated keys, can no longer be created or written.",
+        "severity": "High"
+      }
+    ],
+    "language": "java",
+    "evidence": {
+      "fix_url": "https://github.com/apache/hudi/pull/18738",
+      "fix_kind": "fix",
+      "quote": "Fix the regression introduced by https://github.com/apache/hudi/pull/17994. Flink append-only ingestion currently requires a primary key or `hoodie.datasource.write.recordkey.field`, even though insert-only writes do not require record-key based update or deduplication semantics.",
+      "original_locations": [
+        {
+          "file": "hudi-flink-datasource/hudi-flink/src/main/java/org/apache/hudi/configuration/OptionsResolver.java",
+          "lines": "155-166"
+        },
+        {
+          "file": "hudi-flink-datasource/hudi-flink/src/main/java/org/apache/hudi/table/HoodieTableFactory.java",
+          "lines": "287-302"
+        },
+        {
+          "file": "hudi-flink-datasource/hudi-flink/src/main/java/org/apache/hudi/sink/bulk/RowDataKeyGens.java",
+          "lines": "40"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/apache/iceberg/pull/15150",
+    "repo": "apache/iceberg",
+    "number": 15150,
+    "title": "Spark 4.1: Set data file sort_order_id in manifest for writes from Spark",
+    "golden": [
+      {
+        "comment": "SerializableTable now serializes every historical sort order to JSON, and sortOrders() rebuilds all of them with SortOrderParser.fromJson(schema(), json) against the current schema. A past sort order that references a column since dropped by schema evolution cannot be bound, so sortOrders() throws on the deserialized table, for example when a Spark writer on an executor looks up the table's sort orders.",
+        "severity": "High"
+      }
+    ],
+    "language": "java",
+    "evidence": {
+      "fix_url": "https://github.com/apache/iceberg/pull/16521",
+      "fix_kind": "fix",
+      "quote": "After upgraded Apache Iceberg runtime from 1.10.1 to 1.11.0, the write from spark on my workload started to fail when the table has a historical sort order that references a column that has since been dropped from the schema. This is introduced by https://github.com/apache/iceberg/pull/15150.",
+      "original_locations": [
+        {
+          "file": "core/src/main/java/org/apache/iceberg/SerializableTable.java",
+          "lines": "86-89"
+        },
+        {
+          "file": "core/src/main/java/org/apache/iceberg/SerializableTable.java",
+          "lines": "249-266"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/apache/pinot/pull/17593",
+    "repo": "apache/pinot",
+    "number": 17593,
+    "title": "Optimize ProtoBufRecordExtractor with field descriptor caching",
+    "golden": [
+      {
+        "comment": "The cached FieldDescriptor arrays are only invalidated when descriptor.getFullName() changes, but protobuf FieldDescriptors are bound to the specific Descriptor instance. When a schema evolves, new messages carry a new Descriptor with the same full name, so the stale descriptors are passed to hasField/getField on the new message and throw IllegalArgumentException (FieldDescriptor does not match message type) for every record after the change.",
+        "severity": "High"
+      }
+    ],
+    "language": "java",
+    "evidence": {
+      "fix_url": "https://github.com/apache/pinot/pull/18840",
+      "fix_kind": "fix",
+      "quote": "Fixes a regression introduced in #17593 where `ProtoBufRecordExtractor` throws `IllegalArgumentException: FieldDescriptor does not match message type` after a Confluent Schema Registry Protobuf schema evolves",
+      "original_locations": [
+        {
+          "file": "pinot-plugins/pinot-input-format/pinot-protobuf/src/main/java/org/apache/pinot/plugin/inputformat/protobuf/ProtoBufRecordExtractor.java",
+          "lines": "47-110"
+        },
+        {
+          "file": "pinot-plugins/pinot-input-format/pinot-protobuf/src/main/java/org/apache/pinot/plugin/inputformat/protobuf/ProtoBufRecordExtractor.java",
+          "lines": "124-155"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/apache/pinot/pull/18806",
+    "repo": "apache/pinot",
+    "number": 18806,
+    "title": "Replace segmentDirectoryConfigs map with ReadMode in SegmentDirectoryLoaderContext",
+    "golden": [
+      {
+        "comment": "DefaultSegmentDirectoryLoader.load now builds SegmentLocalFSDirectory with the two-argument (directory, readMode) constructor and no longer passes segmentLoaderContext, which the old call did. The directory is therefore created with a null loader context on the default path, so anything that reads the context from it (such as table task-config propagation into the index directory) silently gets nothing.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "java",
+    "evidence": {
+      "fix_url": "https://github.com/apache/pinot/pull/18863",
+      "fix_kind": "fix",
+      "quote": "#18806 ... refactored `DefaultSegmentDirectoryLoader.load` and inadvertently dropped the `segmentLoaderContext` argument when constructing `SegmentLocalFSDirectory`",
+      "original_locations": [
+        {
+          "file": "pinot-segment-local/src/main/java/org/apache/pinot/segment/local/loader/DefaultSegmentDirectoryLoader.java",
+          "lines": "47-56"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/apache/pinot/pull/18814",
+    "repo": "apache/pinot",
+    "number": 18814,
+    "title": "Make dateTimeConvert scalar function robust to typed time-value input",
+    "golden": [
+      {
+        "comment": "fromInputFormatToMillis converts the value for EPOCH/TIMESTAMP input with PinotDataType.LONG.convert(timeValue, argumentType), which for a String input goes through a strict Long parse. The previous String path (DateTimeFormatSpec.fromFormatToMillis(String)) tolerated decimal or scientific-notation strings such as \"1.4988924E12\" or \"416359.0\", so those inputs now throw NumberFormatException.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "java",
+    "evidence": {
+      "fix_url": "https://github.com/apache/pinot/pull/18940",
+      "fix_kind": "fix",
+      "quote": "#18814 widened `dateTimeConvert`'s time-value parameter to `Object` and dispatched on the input format ... Epoch values that arrive as stringified doubles therefore regressed from working to throwing.",
+      "original_locations": [
+        {
+          "file": "pinot-common/src/main/java/org/apache/pinot/common/function/scalar/DateTimeConvert.java",
+          "lines": "88-98"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/johanhaleby/occurrent/pull/647",
+    "repo": "johanhaleby/occurrent",
+    "number": 647,
+    "title": "Fix repeated payload reparsing for multi-leaf AND filters",
+    "golden": [
+      {
+        "comment": "matchesAndFilter now calls dataFieldReader.readAll for every data-field leaf of the flattened AND before evaluating any operand, which drops the short-circuit that allMatch had. When an earlier metadata operand already fails, the later data reads still run, so with a reader that refuses reads (the store-query path) a filter that used to evaluate to false now throws UnsupportedOperationException, and rejected events pay for payload reads.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "java",
+    "evidence": {
+      "fix_url": "https://github.com/johanhaleby/occurrent/pull/727",
+      "fix_kind": "fix",
+      "quote": "#647 fixed repeated payload reparsing by flattening the AND and calling `DataFieldReader.readAll` for every data-field leaf before evaluating any operand, which traded away `allMatch`'s short-circuiting.",
+      "original_locations": [
+        {
+          "file": "common/inmemory/filter-matching/src/main/java/org/occurrent/inmemory/filtermatching/FilterMatcher.java",
+          "lines": "60-130"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/quarkusio/quarkus/pull/55921",
+    "repo": "quarkusio/quarkus",
+    "number": 55921,
+    "title": "Qute: support multi-pipe CDATA delimiters",
+    "golden": [
+      {
+        "comment": "In Parser.cdata(), every '|' seen while the buffer is empty is counted into cdataPipeCount, so for the empty section {||} both pipes are taken as the opener. The closing '}' then fails the buffer.length() >= cdataPipeCount check and is appended as content, so the CDATA section never terminates and the rest of the template is swallowed or fails to parse.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "java",
+    "evidence": {
+      "fix_url": "https://github.com/quarkusio/quarkus/pull/57648",
+      "fix_kind": "fix",
+      "quote": "fixes a regression introduced in #55921, where multi-pipe CDATA support was added",
+      "original_locations": [
+        {
+          "file": "independent-projects/qute/core/src/main/java/io/quarkus/qute/Parser.java",
+          "lines": "334-358"
+        },
+        {
+          "file": "independent-projects/qute/core/src/main/java/io/quarkus/qute/Parser.java",
+          "lines": "391-395"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/spring-projects/spring-boot/pull/52246",
+    "repo": "spring-projects/spring-boot",
+    "number": 52246,
+    "title": "Improve uber jar performance by looking up classes and resources directly in nested jars",
+    "golden": [
+      {
+        "comment": "In the new UrlEncoder.encode(char[], int), every character that needs escaping goes through the two-byte branch (0xC0 | ch>>6, 0x80 | ch&0x3F) unless it is above 0x07FF, including ASCII characters such as space, '#', '%' and '?'. A space becomes the overlong sequence %C0%A0 instead of %20, so URLs built by JarUrlClassLoader for resources with such characters in their names decode to garbage and cannot be opened from a nested jar.",
+        "severity": "High"
+      }
+    ],
+    "language": "java",
+    "evidence": {
+      "fix_url": "https://github.com/spring-projects/spring-boot/pull/52280",
+      "fix_kind": "fix",
+      "quote": "Since #52246, `JarUrlClassLoader` creates the URLs of resources in nested jars using the new `UrlEncoder` ... `UrlEncoder` encodes every character that needs encoding as a two or three byte UTF-8 sequence, so a character below `0x80` is written as an invalid overlong sequence. For example, a space becomes `%c0%a0`",
+      "original_locations": [
+        {
+          "file": "loader/spring-boot-loader/src/main/java/org/springframework/boot/loader/net/util/UrlEncoder.java",
+          "lines": "62-80"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/BerriAI/litellm/pull/44295",
+    "repo": "BerriAI/litellm",
+    "number": 44295,
+    "title": "fix(responses): keep gpt-5.4/5.5 tool calls on chat and merge bridged tool calls into one choice",
+    "golden": [
+      {
+        "comment": "In responses_api_bridge_check, gpt-5.4+ function tools are now bridged to /responses only when the top-level `reasoning_effort` is set (or, when unset, only from gpt-5.6 on), on the assumption that unset effort means reasoning 'none'. An effort supplied through `extra_body` (e.g. `extra_body={'reasoning_effort': 'low'}`) is invisible to this check, so the request stays on Chat Completions with function tools and reasoning active, which OpenAI rejects with a 400.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "python",
+    "evidence": {
+      "fix_url": "https://github.com/BerriAI/litellm/pull/44344",
+      "fix_kind": "revert",
+      "quote": "#44295 keeps gpt-5.4/5.5 function tool calls on chat when `reasoning_effort` is unset. That check only sees the top-level param, so an effort sent another way still reaches OpenAI",
+      "original_locations": [
+        {
+          "file": "litellm/main.py",
+          "lines": "1170-1179"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/BerriAI/litellm/pull/48650",
+    "repo": "BerriAI/litellm",
+    "number": 48650,
+    "title": "fix(aiohttp_transport): close an owned aiohttp session when its evicted transport is collected",
+    "golden": [
+      {
+        "comment": "The new `__del__` on the aiohttp transport closes the owned ClientSession as soon as the transport object is garbage-collected. If a cached client is evicted or dropped while a streaming response is still being read, the session is closed under the live stream and the rest of the body fails with a connection-closed error.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "python",
+    "evidence": {
+      "fix_url": "https://github.com/BerriAI/litellm/pull/48920",
+      "fix_kind": "fix",
+      "quote": "Since #48650 the transport finalizer closes that session as soon as the transport is collected, so a client dropped while a body was still arriving killed the rest of the stream with `httpx.ReadError: Connection closed`.",
+      "original_locations": [
+        {
+          "file": "litellm/llms/custom_httpx/aiohttp_transport.py",
+          "lines": "292-298"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/django/django/pull/19405",
+    "repo": "django/django",
+    "number": 19405,
+    "title": "Fixed #27489 -- Renamed permissions upon model renaming.",
+    "golden": [
+      {
+        "comment": "RenamePermission._rename selects content types with `model__icontains=old_model.lower()`, so renaming a model also matches every other model in the app whose name merely contains the old name (e.g. renaming `Book` matches `Bookmark`). The permissions of those unrelated models are then rewritten to the new model's codename and name, corrupting them.",
+        "severity": "High"
+      }
+    ],
+    "language": "python",
+    "evidence": {
+      "fix_url": "https://github.com/django/django/pull/20497",
+      "fix_kind": "revert",
+      "quote": "Revert PR: 'Fixes regressions: ticket-36843, ticket-36793 ... This reverts commits f02b49d2f3bf84f5225de920ca510149f1f9f1da' (f02b49d is #19405's merge commit). Trac ticket-36843, 'RenamePermission might operate on unrelated models': 'the ephemeral operation might operate on unrelated models owing to its use of model__icontains'.",
+      "original_locations": [
+        {
+          "file": "django/contrib/auth/management/__init__.py",
+          "lines": "110-150"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/django/django/pull/19519",
+    "repo": "django/django",
+    "number": 19519,
+    "title": "Fixed #26434 -- Removed faulty clearing of ordering field when missing from explicit grouping.",
+    "golden": [
+      {
+        "comment": "The new guard in Query.clear_ordering tests `{*self.order_by, *self.extra_order_by}.issubset(self.group_by)`, but `order_by` holds field-name strings (possibly '-'-prefixed) while a tuple `group_by` holds expression objects such as `Col`. The subset test can therefore never succeed when any ordering is present, so ordering is never cleared for grouped queries and ORDER BY now leaks into count() and IN subqueries where it was previously stripped (which backends such as Oracle reject).",
+        "severity": "Medium"
+      }
+    ],
+    "language": "python",
+    "evidence": {
+      "fix_url": "https://github.com/django/django/pull/20014",
+      "fix_kind": "revert",
+      "quote": "This reverts commit ea3a71c2d09f8281d8a50ed20e40e1fb13db5cd9. The implementation was flawed, as `self.group_by` contains `Col`s, not aliases.",
+      "original_locations": [
+        {
+          "file": "django/db/models/sql/query.py",
+          "lines": "2348-2358"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/langchain-ai/langchain/pull/33035",
+    "repo": "langchain-ai/langchain",
+    "number": 33035,
+    "title": "fix: update method calls from dict to `model_dump` in `Chain`",
+    "golden": [
+      {
+        "comment": "`Chain.save()` now calls `self.model_dump()`, but `_type` is only injected in the overridden `Chain.dict()`. `model_dump()` bypasses that override, so `chain_dict` never contains `_type` and `save()` always raises 'does not support saving', even for chain types that do support it.",
+        "severity": "High"
+      }
+    ],
+    "language": "python",
+    "evidence": {
+      "fix_url": "https://github.com/langchain-ai/langchain/pull/35667",
+      "fix_kind": "fix",
+      "quote": "Fixes a regression introduced in #33035 where `Chain.save()` stopped working for chain types that support saving, including `LLMChain`.",
+      "original_locations": [
+        {
+          "file": "libs/langchain/langchain/chains/base.py",
+          "lines": "782-784"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/python/mypy/pull/20602",
+    "repo": "python/mypy",
+    "number": 20602,
+    "title": "Narrow types based on collection containment",
+    "golden": [
+      {
+        "comment": "In comparison_type_narrowing_helper the containment branch passes `expr_indices=[left_index, right_index]` to narrow_type_by_equality together with a freshly built two-element `operands` list. In a chained comparison such as `x == y in z`, those indices are positions in the whole comparison, so they do not line up with the two operands and the checker can crash or narrow the wrong expression.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "python",
+    "evidence": {
+      "fix_url": "https://github.com/python/mypy/pull/20688",
+      "fix_kind": "fix",
+      "quote": "Fix PR #20688 body: 'Dumb bug of mine, fixes #20686'. Issue #20686 'Expression `x == y in z` crashes mypy': 'I have bisected it to commit b91f53c1b2d4cd12bf4e15781e447ebdd72f2b42' (the merge commit of #20602). Fix changes `expr_indices=[left_index, right_index]` to `[0, 1]`.",
+      "original_locations": [
+        {
+          "file": "mypy/checker.py",
+          "lines": "6601-6620"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/ray-project/ray/pull/61703",
+    "repo": "ray-project/ray",
+    "number": 61703,
+    "title": "[train] Register training resources with AutoscalingCoordinator in FixedScalingPolicy",
+    "golden": [
+      {
+        "comment": "In DataConfig.configure, `exclude_resources` is now skipped whenever Ray Data's V2 cluster autoscaler is enabled, on the assumption that the scaling policy registers the training resources with the AutoscalingCoordinator. That registration only exists in the Train V2 scaling policies; with Train V1 and the V2 autoscaler nothing reserves the training CPUs/GPUs, so Data can claim them and over-subscribe the cluster.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "python",
+    "evidence": {
+      "fix_url": "https://github.com/ray-project/ray/pull/62827",
+      "fix_kind": "fix",
+      "quote": "#61703 replaced Train's use of `exclude_resources` with resource requests to Ray Data's V2 Cluster Autoscaler. This regressed the Train V1 + V2 Autoscaler combination: Train V1 has no ScalingPolicy to register training's footprint with the autoscaler, and the new logic also skipped `exclude_resources`",
+      "original_locations": [
+        {
+          "file": "python/ray/train/_internal/data_config.py",
+          "lines": "125-143"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/ray-project/ray/pull/63695",
+    "repo": "ray-project/ray",
+    "number": 63695,
+    "title": "[RLlib] Fix AlgorithmConfig.to_dict() for New API Stack",
+    "golden": [
+      {
+        "comment": "AlgorithmConfig.to_dict() now evaluates `self.total_train_batch_size` for the new API stack and only catches ValueError. When the config is used as a Tune `param_space` and `train_batch_size_per_learner` is a Tune search-space domain (e.g. `tune.choice`), the multiplication raises TypeError, so building the Tuner fails for RLlib hyperparameter sweeps.",
+        "severity": "High"
+      }
+    ],
+    "language": "python",
+    "evidence": {
+      "fix_url": "https://github.com/ray-project/ray/pull/64501",
+      "fix_kind": "fix",
+      "quote": "https://github.com/ray-project/ray/pull/63695 introduced a property for `total_train_batch_size` however this causes an issue for RLlib + Ray Tune.",
+      "original_locations": [
+        {
+          "file": "rllib/algorithms/algorithm_config.py",
+          "lines": "747-754"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/sgl-project/sglang/pull/45631",
+    "repo": "sgl-project/sglang",
+    "number": 45631,
+    "title": "[Perf] logits: Write lm_head logits straight into the fp32 logits buffer",
+    "golden": [
+      {
+        "comment": "`_compute_lm_head` now takes the FP32 `torch.mm(..., out_dtype=torch.float32, out=out)` path whenever an output buffer is supplied, not only when `use_fp32_lm_head` is enabled. A normal FP16/BF16 lm_head therefore computes its logits in FP32 and skips the rounding to the model dtype, so logits differ from the unbuffered path (prefill scoring, LoRA-wrapped heads) whenever a matching FP32 logits buffer exists.",
+        "severity": "Low"
+      }
+    ],
+    "language": "python",
+    "evidence": {
+      "fix_url": "https://github.com/sgl-project/sglang/pull/45855",
+      "fix_kind": "fix",
+      "quote": "A matching FP32 logits buffer currently makes the ordinary FP16/BF16 lm_head produce FP32 GEMM output even when FP32 lm_head is disabled. Introduced by #45631, this skips the rounding used by the unbuffered prefill-scoring path and LoRA-wrapped heads.",
+      "original_locations": [
+        {
+          "file": "python/sglang/srt/layers/logits_processor.py",
+          "lines": "1079-1106"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/vllm-project/vllm/pull/43409",
+    "repo": "vllm-project/vllm",
+    "number": 43409,
+    "title": "[CPU] Support CPU W4A16 INT4 MoE",
+    "golden": [
+      {
+        "comment": "In `AutoGPTQMoEMethod.get_fused_moe_quant_config` the `if not self.quant_config.is_sym else None` guard on `w1_zp`/`w2_zp` is removed, so symmetric GPTQ/AutoRound MoE checkpoints now always hand their `qzeros` tensors to the quant config. On GPU Marlin backends, which do not expect zero points for symmetric quantization, those meaningless zero points produce incorrect MoE outputs.",
+        "severity": "High"
+      }
+    ],
+    "language": "python",
+    "evidence": {
+      "fix_url": "https://github.com/vllm-project/vllm/pull/45656",
+      "fix_kind": "fix",
+      "quote": "#43409 removed the `if not self.quant_config.is_sym else None` guard in `AutoGPTQMoEMethod.get_fused_moe_quant_config` so that CPU could pass synthesized zero points for symmetric models. However, this caused symmetric GPU quants (Autoround and standard GPTQ with `is_sym=True`) to pass meaningless `qzeros` tensors to the Marlin kernel, producing incorrect results.",
+      "original_locations": [
+        {
+          "file": "vllm/model_executor/layers/quantization/auto_gptq.py",
+          "lines": "758-766"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/vllm-project/vllm/pull/46389",
+    "repo": "vllm-project/vllm",
+    "number": 46389,
+    "title": "Humming support for 2/3/5/6/7-bit pack-quantized weight-only inference",
+    "golden": [
+      {
+        "comment": "In `_is_wNa8o8_int` the condition changed from `is_static_int8_in and is_static_int8_out` to `is_static_int8_in or is_static_int8_out`. Static int8-activation layers that have no static int8 output (ordinary W8A8 int8 static checkpoints) now match the wNa8o8 scheme instead of the regular W8A8 path, so they are given the wrong scheme.",
+        "severity": "High"
+      }
+    ],
+    "language": "python",
+    "evidence": {
+      "fix_url": "https://github.com/vllm-project/vllm/pull/46860",
+      "fix_kind": "fix",
+      "quote": "https://github.com/vllm-project/vllm/pull/46389 broke W8A8int8_static because I changed the W8A8o8 condition from `(is_static_int8_in and is_static_int8_out)` to `(is_static_int8_in or is_static_int8_out)` accidentally",
+      "original_locations": [
+        {
+          "file": "vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors.py",
+          "lines": "679-685"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/antiwork/gumroad/pull/7141",
+    "repo": "antiwork/gumroad",
+    "number": 7141,
+    "title": "Recommend products to guest buyers in receipt emails",
+    "golden": [
+      {
+        "comment": "Removing the `return [] if purchaser.blank?` guard makes RecommendedProductsInfo#products run for every chargeable without a purchaser, not only genuine guest checkouts. A chargeable assembled from a subset of purchases (such as a lookup-form digest) also has no purchaser, so its receipt can now recommend products tied to unrelated purchases, exposing their product names in the email.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "ruby",
+    "evidence": {
+      "fix_url": "https://github.com/antiwork/gumroad/pull/7148",
+      "fix_kind": "revert",
+      "quote": "Revert #7148: 'with the guest guard removed, `RecommendedProductsInfo#products` no longer bails out for chargeables without a purchaser — and the buyer-narrowed-lookup flow builds a synthetic, purchaser-less chargeable set from raw purchase ids, not just genuine guest checkouts' (leaks the OTHER unrelated purchase's product name into the recommendation section).",
+      "original_locations": [
+        {
+          "file": "app/presenters/receipt_presenter/recommended_products_info.rb",
+          "lines": "16-27"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/chatwoot/chatwoot/pull/15499",
+    "repo": "chatwoot/chatwoot",
+    "number": 15499,
+    "title": "fix(twilio): retry transient whatsapp media downloads",
+    "golden": [
+      {
+        "comment": "The authenticated Twilio media download in download_with_auth passes max_redirects: 0, but Twilio's media endpoint normally answers with a redirect to the actual file location. The resulting redirect error is a Down::Error, which perform rescues and turns into a skipped attachment, so inbound media that previously downloaded would now be dropped.",
+        "severity": "High"
+      }
+    ],
+    "language": "ruby",
+    "evidence": {
+      "fix_url": "https://github.com/chatwoot/chatwoot/pull/15502",
+      "fix_kind": "revert",
+      "quote": "Revert PR #15502 title: 'revert(twilio): restore media downloads after redirect regression'; body: 'Reverts chatwoot/chatwoot#15499'. Original code: `Down.download(media_url, http_basic_authentication: auth_credentials, max_redirects: 0)`.",
+      "original_locations": [
+        {
+          "file": "app/services/twilio/media_download_service.rb",
+          "lines": "16-26"
+        },
+        {
+          "file": "app/services/twilio/media_download_service.rb",
+          "lines": "56-58"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/dependabot/dependabot-core/pull/13794",
+    "repo": "dependabot/dependabot-core",
+    "number": 13794,
+    "title": "`docker`: consider the tag when checking if a digest is up-to-date",
+    "golden": [
+      {
+        "comment": "digest_up_to_date? now compares each requirement's digest against digest_of(source_tag) with no handling for a nil result. If the tag's digest cannot be resolved, source_digest == nil is false, so the digest is reported as stale instead of being conservatively treated as up to date.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "ruby",
+    "evidence": {
+      "fix_url": "https://github.com/dependabot/dependabot-core/pull/13840",
+      "fix_kind": "revert",
+      "quote": "Since merging #13794, Docker updates have started failing with `update_not_possible`, causing Dependabot to close PRs when updates should have been possible.",
+      "original_locations": [
+        {
+          "file": "docker/lib/dependabot/docker/update_checker.rb",
+          "lines": "116-131"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/fastlane/fastlane/pull/30158",
+    "repo": "fastlane/fastlane",
+    "number": 30158,
+    "title": "[produce] Support App Store Connect API key for create/enable_services/disable_services",
+    "golden": [
+      {
+        "comment": "Produce.authenticate_connect_api! unconditionally reads Produce.config[:api_key] and [:api_key_path]. Produce.config can be a Configuration built from another action's options that does not declare those keys, and Configuration#[] raises for unknown keys, so those paths would crash before authenticating.",
+        "severity": "High"
+      }
+    ],
+    "language": "ruby",
+    "evidence": {
+      "fix_url": "https://github.com/fastlane/fastlane/pull/30447",
+      "fix_kind": "revert",
+      "quote": "Revert #30447: 'Reverts fastlane/fastlane#30158 --- 2 regressions since release. This needs to cook more. closes #30445, closes #30446'. #30446 (unmerged fix): '#30158 added Produce.authenticate_connect_api!, which unconditionally reads Produce.config[:api_key] and Produce.config[:api_key_path] ... Configuration#[] ... raises for any key not in available_options'.",
+      "original_locations": [
+        {
+          "file": "produce/lib/produce/module.rb",
+          "lines": "19-34"
+        },
+        {
+          "file": "produce/lib/produce/service.rb",
+          "lines": "420-428"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/rubocop/rubocop/pull/14625",
+    "repo": "rubocop/rubocop",
+    "number": 14625,
+    "title": "Store remote configuration caches in cache root.",
+    "golden": [
+      {
+        "comment": "Putting `ConfigLoader.cache_root = ResultCache.cache_root(@config_store, ...)` in set_options_to_config_loader runs it before `@config_store.apply_options!(@options)`. cache_root calls config_store.for_pwd, so the project's .rubocop.yml is loaded before `--force-default-config` is applied and the flag no longer prevents it (the spec expectation was changed to match).",
+        "severity": "Medium"
+      }
+    ],
+    "language": "ruby",
+    "evidence": {
+      "fix_url": "https://github.com/rubocop/rubocop/pull/14752",
+      "fix_kind": "fix",
+      "quote": "Fix a regression introduced by #14625 where `--force-default-config` flag fails to prevent loading of project `.rubocop.yml` files.",
+      "original_locations": [
+        {
+          "file": "lib/rubocop/cli.rb",
+          "lines": "186"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/solidusio/solidus/pull/6304",
+    "repo": "solidusio/solidus",
+    "number": 6304,
+    "title": "Create state changes in background job",
+    "golden": [
+      {
+        "comment": "log_state_change no longer passes its `name` argument when enqueuing StateChangeTrackingJob, and the job derives the name from the stateful object's model name. Payment and shipment state changes tracked through OrderUpdater will therefore be recorded under the order's name instead of 'payment' or 'shipment'.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "ruby",
+    "evidence": {
+      "fix_url": "https://github.com/solidusio/solidus/pull/6318",
+      "fix_kind": "fix",
+      "quote": "When we merged #6304, we inadvertently changed the behaviour of `Spree::OrderUpdater#log_state_change`, which used to log state changes with a name \"payment\" or \"shipment\" but now only logs state changes with the name \"order\".",
+      "original_locations": [
+        {
+          "file": "core/app/models/spree/order_updater.rb",
+          "lines": "182-196"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/solidusio/solidus/pull/6638",
+    "repo": "solidusio/solidus",
+    "number": 6638,
+    "title": "Avoid N+1s when calling `Spree::Taxon#pretty_name`",
+    "golden": [
+      {
+        "comment": "The new pretty_name assumes a taxon's ancestors are the `depth` rows immediately before it in lft order, but earlier siblings and their subtrees sit between a node and its ancestors. For any taxon that is not the first child at its level, the slice starts at the wrong index and returns the wrong ancestor names.",
+        "severity": "High"
+      }
+    ],
+    "language": "ruby",
+    "evidence": {
+      "fix_url": "https://github.com/solidusio/solidus/pull/6647",
+      "fix_kind": "revert",
+      "quote": "Reverts solidusio/solidus#6638 It introduced a bug https://github.com/solidusio/solidus/pull/6645",
+      "original_locations": [
+        {
+          "file": "core/app/models/spree/taxon.rb",
+          "lines": "95-108"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/angular/angular/pull/71095",
+    "repo": "angular/angular",
+    "number": 71095,
+    "title": "refactor(compiler): remove img/video src attribute from the URL security schema",
+    "golden": [
+      {
+        "comment": "unwrapImgVideoSrcValue maps `null`/`undefined` to `''` and is now also applied in elementAttributeInternal, i.e. to `[attr.src]` bindings. `<img [attr.src]=\"null\">` therefore sets `src=\"\"` instead of removing the attribute, and the browser fires an error event for the empty URL; the coercion should only apply to the `src` DOM property path.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "typescript",
+    "evidence": {
+      "fix_url": "https://github.com/angular/angular/pull/71799",
+      "fix_kind": "fix",
+      "quote": "The workaround introduced in #71095 converted `null` and `undefined` to `''` in `unwrapImgVideoSrcValue()`.",
+      "original_locations": [
+        {
+          "file": "packages/core/src/render3/instructions/shared.ts",
+          "lines": "328-348"
+        },
+        {
+          "file": "packages/core/src/render3/instructions/shared.ts",
+          "lines": "550"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/ant-design/ant-design/pull/57651",
+    "repo": "ant-design/ant-design",
+    "number": 57651,
+    "title": "perf(Table): optimize table filter search value normalization",
+    "golden": [
+      {
+        "comment": "In menu mode the custom `filterSearch(normalizedSearchValue, filter)` callback now receives the trimmed, lowercased string, while tree mode still passes the original `searchValue`. A user-supplied case-sensitive matcher (for example product codes) gets wrong matches in menu mode and never sees what the user actually typed; only the built-in matcher should use the normalized value.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "typescript",
+    "evidence": {
+      "fix_url": "https://github.com/ant-design/ant-design/pull/59735",
+      "fix_kind": "fix",
+      "quote": "Regression introduced by #57651.",
+      "original_locations": [
+        {
+          "file": "components/table/hooks/useFilter/FilterDropdown.tsx",
+          "lines": "121-127"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/cline/cline/pull/15185",
+    "repo": "cline/cline",
+    "number": 15185,
+    "title": "fix(core): expose only plugin commands from resident sessions",
+    "golden": [
+      {
+        "comment": "The session command list is now filtered with isPluginCommand, which only recognizes commands wrapped by PluginRegistry.wrapCommand. Commands registered through the other plugin loader (the sandboxed/subprocess path) never enter the WeakSet, so in that mode a resident session lists no plugin commands and `/command` runs never reach their handlers.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "typescript",
+    "evidence": {
+      "fix_url": "https://github.com/cline/cline/pull/15207",
+      "fix_kind": "fix",
+      "quote": "Fixes Greptile's P1 on #14505, a regression from #15185.",
+      "original_locations": [
+        {
+          "file": "sdk/packages/core/src/extensions/plugin/plugin-registry.ts",
+          "lines": "265-273"
+        },
+        {
+          "file": "sdk/packages/core/src/extensions/plugin/plugin-registry.ts",
+          "lines": "1037-1052"
+        },
+        {
+          "file": "sdk/packages/core/src/runtime/host/local-runtime-host.ts",
+          "lines": "364-368"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/cline/cline/pull/15220",
+    "repo": "cline/cline",
+    "number": 15220,
+    "title": "fix(desktop): keep schedule status current and show full errors",
+    "golden": [
+      {
+        "comment": "refreshSchedules now returns `undefined` when a newer request supersedes it (`requestId !== overviewRequestSequence.current`), but the Run-now polling loop reads the returned `overview` to find the new execution's session. If a completion-event or poll refresh starts during that loop, the awaited call returns nothing and the loop can run to its deadline without ever opening the new run's conversation.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "typescript",
+    "evidence": {
+      "fix_url": "https://github.com/cline/cline/pull/15293",
+      "fix_kind": "fix",
+      "quote": "Fixes a Run now navigation race introduced in #15220.",
+      "original_locations": [
+        {
+          "file": "apps/examples/desktop-app/webview/components/views/settings/routine-view.tsx",
+          "lines": "743-770"
+        },
+        {
+          "file": "apps/examples/desktop-app/webview/components/views/settings/routine-view.tsx",
+          "lines": "893-900"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/colinhacks/zod/pull/6415",
+    "repo": "colinhacks/zod",
+    "number": 6415,
+    "title": "perf(memory): install derived internals on a per-constructor prototype",
+    "golden": [
+      {
+        "comment": "defineLazyInternal returns early when `key in proto`, but every constructor in an init chain shares the same `_zod` prototype. When $ZodExactOptional calls $ZodOptional.init first, its own `values`/`pattern` overrides are silently dropped, so z.exactOptional(...) keeps the optional version's undefined-inclusive values and pattern (for example a template literal containing it matches the wrong strings).",
+        "severity": "Medium"
+      }
+    ],
+    "language": "typescript",
+    "evidence": {
+      "fix_url": "https://github.com/colinhacks/zod/pull/6429",
+      "fix_kind": "fix",
+      "quote": "Two regressions from #6415, both reachable from ordinary schemas",
+      "original_locations": [
+        {
+          "file": "packages/zod/src/v4/core/util.ts",
+          "lines": "1066-1087"
+        },
+        {
+          "file": "packages/zod/src/v4/core/schemas.ts",
+          "lines": "3672-3675"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/honojs/hono/pull/5205",
+    "repo": "honojs/hono",
+    "number": 5205,
+    "title": "fix(etag): stabilize digest across stream chunks",
+    "golden": [
+      {
+        "comment": "In generateDigest, a partial chunk is kept as `chunk = value.subarray(offset)` (and later filled with `chunk.set(...)`) while the loop goes on to call `reader.read()` again. If the stream producer reuses its backing buffer between pulls, the pending bytes are overwritten before they are digested, so the ETag is computed over the wrong content; the pending bytes should be copied rather than aliased.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "typescript",
+    "evidence": {
+      "fix_url": "https://github.com/honojs/hono/pull/5239",
+      "fix_kind": "fix",
+      "quote": "This regression was introduced in https://github.com/honojs/hono/pull/5205.",
+      "original_locations": [
+        {
+          "file": "src/middleware/etag/digest.ts",
+          "lines": "41-87"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/langchain-ai/langchainjs/pull/10790",
+    "repo": "langchain-ai/langchainjs",
+    "number": 10790,
+    "title": "fix(core): keep content block types separate when merging chunks",
+    "golden": [
+      {
+        "comment": "getMergeableTypeBase only strips a `_delta` suffix, so hasMismatchedMergeableType treats an Anthropic `input_json_delta` block (base `input_json`) and the `tool_use` block it continues at the same index as different types, and _findMergeTarget stops merging them. When Anthropic tool calls are streamed, the tool_use input stays empty and downstream parsing of the tool arguments fails.",
+        "severity": "High"
+      }
+    ],
+    "language": "typescript",
+    "evidence": {
+      "fix_url": "https://github.com/langchain-ai/langchainjs/pull/12230",
+      "fix_kind": "fix",
+      "quote": "Chunk merging (core, regression from #10790).",
+      "original_locations": [
+        {
+          "file": "libs/langchain-core/src/messages/base.ts",
+          "lines": "568-584"
+        },
+        {
+          "file": "libs/langchain-core/src/messages/base.ts",
+          "lines": "610"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/remix-run/react-router/pull/15039",
+    "repo": "remix-run/react-router",
+    "number": 15039,
+    "title": "Fire onError for initial-load errors when RouterProvider mounts late",
+    "golden": [
+      {
+        "comment": "The layout effect that re-synced state when `router.state.initialized` flipped before the provider subscribed is removed, and replaced by a buffered replay that is only recorded when `subscribers.size === 0`. If the router finishes initializing between render and subscription while another subscriber is already attached, nothing is buffered and the provider never receives the initialized state, so it stays on its hydration fallback.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "typescript",
+    "evidence": {
+      "fix_url": "https://github.com/remix-run/react-router/pull/15637",
+      "fix_kind": "fix",
+      "quote": "The replay introduced in #15039 only buffers updates when there are no subscribers.",
+      "original_locations": [
+        {
+          "file": "packages/react-router/lib/components.tsx",
+          "lines": "616-624"
+        },
+        {
+          "file": "packages/react-router/lib/router/router.ts",
+          "lines": "1062-1066"
+        },
+        {
+          "file": "packages/react-router/lib/router/router.ts",
+          "lines": "1396-1405"
+        },
+        {
+          "file": "packages/react-router/lib/router/router.ts",
+          "lines": "1470-1473"
+        }
+      ]
+    }
+  },
+  {
+    "id": "https://github.com/supabase/supabase/pull/50569",
+    "repo": "supabase/supabase",
+    "number": 50569,
+    "title": "Recovery codes: allow users to use recovery codes to access their account",
+    "golden": [
+      {
+        "comment": "The new recovery-code form always calls `router.push(getReturnToPath())` and tracks a `sign_in` event on success, ignoring the context the MFA form was opened with. When reached from the forgot-password flow, verifying a recovery code skips the new-password step and sends the user on to their destination without a password reset.",
+        "severity": "Medium"
+      }
+    ],
+    "language": "typescript",
+    "evidence": {
+      "fix_url": "https://github.com/supabase/supabase/pull/53305",
+      "fix_kind": "fix",
+      "quote": "This path was introduced in #50569 and has been reproduced in production.",
+      "original_locations": [
+        {
+          "file": "apps/studio/components/interfaces/SignIn/SignInRecoveryCodeForm.tsx",
+          "lines": "68-78"
+        }
+      ]
+    }
+  },
+  {
     "id": "https://github.com/vercel/next.js/pull/96301",
     "repo": "vercel/next.js",
     "number": 96301,

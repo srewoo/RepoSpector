@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -25,12 +26,12 @@ function cliProvider(llm: LlmClient, model: string) {
   };
 }
 
-function ghHost(c: MartianCase) {
+function ghHost(c: MartianCase, withDescription: boolean) {
   return {
     async info() {
-      const { stdout } = await run('gh', ['api', `repos/${c.repo}/pulls/${c.number}`, '--jq', '{sha: .head.sha, title: .title}'], { maxBuffer: 1024 * 1024 });
-      const j = JSON.parse(stdout) as { sha: string; title: string };
-      return { headSha: j.sha, title: j.title };
+      const { stdout } = await run('gh', ['api', `repos/${c.repo}/pulls/${c.number}`, '--jq', '{sha: .head.sha, title: .title, body: .body}'], { maxBuffer: 1024 * 1024 });
+      const j = JSON.parse(stdout) as { sha: string; title: string; body: string | null };
+      return { headSha: j.sha, title: j.title, ...(withDescription && j.body ? { description: j.body } : {}) };
     },
     diff: () => fetchPrDiff(c.repo, c.number),
   };
@@ -46,7 +47,7 @@ interface Entry {
 /** Writes <run>/all/predictions.json and <run>/verified/predictions.json; resumable per case. */
 type RepoContextFor = (c: MartianCase) => (input: { readonly diff: string; readonly headSha: string }) => Promise<RepoContext>;
 
-export async function runExtensionPipeline(cases: readonly MartianCase[], runDir: string, model: string, llm: LlmClient, repoContextFor?: RepoContextFor, reviewPrompt?: { readonly name: string; readonly text: string }): Promise<void> {
+export async function runExtensionPipeline(cases: readonly MartianCase[], runDir: string, model: string, llm: LlmClient, repoContextFor?: RepoContextFor, reviewPrompt?: { readonly name: string; readonly text: string }, withDescription = false): Promise<void> {
   const records = join(runDir, 'records.json');
   mkdirSync(join(runDir, 'all'), { recursive: true });
   mkdirSync(join(runDir, 'verified'), { recursive: true });
@@ -57,7 +58,7 @@ export async function runExtensionPipeline(cases: readonly MartianCase[], runDir
       const [owner = '', repo = ''] = c.repo.split('/');
       const target = { kind: 'github' as const, host: 'github.com', owner, repo, number: c.number };
       const provider = cliProvider(llm, model);
-      const result = await runReview(newRun(`case-${c.number}`, target, provider, Date.now()), { host: ghHost(c), provider, prices: null, feedback: [], ...(repoContextFor ? { repoContext: repoContextFor(c) } : {}), ...(reviewPrompt ? { reviewPrompt: reviewPrompt.text } : {}), save: async () => undefined, now: () => Date.now() });
+      const result = await runReview(newRun(`case-${c.number}`, target, provider, Date.now()), { host: ghHost(c, withDescription), provider, prices: null, feedback: [], ...(repoContextFor ? { repoContext: repoContextFor(c) } : {}), ...(reviewPrompt ? { reviewPrompt: reviewPrompt.text } : {}), save: async () => undefined, now: () => Date.now() });
       done[c.id] = result;
       writeFileSync(records, `${JSON.stringify(done, null, 2)}\n`);
       console.log(`${result.status === 'done' ? 'ok ' : 'ERR'} ${c.id} ${result.findings?.length ?? result.error?.message}${result.repoContext ? ` defs ${result.repoContext.definitions}/${result.repoContext.indexedFiles} files` : ''}`);
@@ -76,6 +77,6 @@ export async function runExtensionPipeline(cases: readonly MartianCase[], runDir
   };
   write('all', () => true);
   write('verified', (s) => s === 'verified');
-  const manifest = { reviewPrompt: reviewPrompt?.name ?? 'baseline', reviewer: repoContextFor ? 'extension engine with repository context via claude -p' : 'extension engine via claude -p', model, effort: { review: 'high', verify: 'medium' }, system: 'none', fallbacks: 'none (CLI)', cases: cases.map((c) => c.id) };
+  const manifest = { reviewPrompt: reviewPrompt?.name ?? 'baseline', reviewPromptSha: createHash('sha256').update(reviewPrompt?.text ?? '').digest('hex').slice(0, 12), prDescription: withDescription, reviewer: repoContextFor ? 'extension engine with repository context via claude -p' : 'extension engine via claude -p', model, effort: { review: 'high', verify: 'medium' }, system: 'none', fallbacks: 'none (CLI)', cases: cases.map((c) => c.id) };
   writeFileSync(join(runDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 }

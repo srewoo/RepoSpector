@@ -16,7 +16,7 @@ import { VERIFY_PROMPT, VERIFY_REPO_ADDENDUM, verifyFindings } from './verify.js
 import { fetchPrDiff, parseGoldenFile, type MartianCase } from './martian.js';
 import { parseRegressionFile } from './regressions.js';
 import { runExtensionPipeline } from './extension-run.js';
-import { RECALL_PROMPT } from '@repospector/core';
+import { CONCISE_CHECKLIST_PROMPT, CONCISE_PROMPT, RECALL_PROMPT } from '@repospector/core';
 import { extensionRepoContext } from './ext-context.js';
 import { runMcpFlow } from './mcp-flow.js';
 import { resolve } from 'node:path';
@@ -27,7 +27,7 @@ const USAGE = `usage:
   martian baseline --cases <cases.json> --run <dir> [--model sonnet] [--limit N | --pilot | --heldout] [--repo-context | --cross-file | --definitions | --context-tool]
   martian verify   --cases <cases.json> --from <dir> --run <dir> [--model sonnet] [--pilot] [--repo-context]
   martian merge    --cases <cases.json> --from <dir> --second <dir> --run <dir> [--pilot | --heldout]
-  martian extension --cases <cases.json> --run <dir> [--model sonnet] [--pilot | --heldout] [--limit N] [--repo-context] [--review-prompt baseline|recall]
+  martian extension --cases <cases.json> --run <dir> [--model sonnet] [--pilot | --heldout] [--limit N] [--repo-context] [--review-prompt baseline|recall|concise|checklist] [--pr-description]
   martian mcp-flow --cases <cases.json> --run <dir> [--model sonnet] [--heldout] [--limit N]
   martian judge    --cases <cases.json> --run <dir> [--judge-model claude-sonnet-4-5-20250929] [--votes 3]`;
 
@@ -242,6 +242,7 @@ export async function main(argv: string[]): Promise<number> {
       from: { type: 'string' },
       second: { type: 'string' },
       'repo-context': { type: 'boolean', default: false },
+      'pr-description': { type: 'boolean', default: false },
       'review-prompt': { type: 'string' },
       'cross-file': { type: 'boolean', default: false },
       definitions: { type: 'boolean', default: false },
@@ -268,9 +269,11 @@ export async function main(argv: string[]): Promise<number> {
     if (values.heldout) cases = heldoutCases(cases);
     if (values.limit) cases = cases.slice(0, Number(values.limit));
     const promptName = values['review-prompt'] ?? 'baseline';
-    if (promptName !== 'baseline' && promptName !== 'recall') throw new Error('--review-prompt must be baseline or recall');
+    const prompts: Record<string, string> = { baseline: BASELINE_PROMPT, recall: RECALL_PROMPT, concise: CONCISE_PROMPT, checklist: CONCISE_CHECKLIST_PROMPT };
+    const promptText = prompts[promptName];
+    if (!promptText) throw new Error(`--review-prompt must be one of ${Object.keys(prompts).join(', ')}`);
     const llm = new ClaudeCliClient(4);
-    await runExtensionPipeline(cases, values.run, values.model === 'sonnet' ? 'claude-sonnet-5-5' : values.model, llm, values['repo-context'] ? (c) => extensionRepoContext(c, CACHE_DIR) : undefined, { name: promptName, text: promptName === 'recall' ? RECALL_PROMPT : BASELINE_PROMPT });
+    await runExtensionPipeline(cases, values.run, values.model === 'sonnet' ? 'claude-sonnet-5-5' : values.model, llm, values['repo-context'] ? (c) => extensionRepoContext(c, CACHE_DIR) : undefined, { name: promptName, text: promptText }, values['pr-description']);
     console.log(`model spend (list price): $${llm.totalCostUsd.toFixed(2)} over ${llm.calls} calls`);
     return 0;
   }

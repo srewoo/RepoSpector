@@ -85,6 +85,8 @@ export interface RunRecord {
   readonly notes: readonly string[];
   readonly headSha?: string | undefined;
   readonly title?: string | undefined;
+  /** PR description (untrusted), kept only while running; the review pass reads it. */
+  readonly description?: string | undefined;
   /** Redacted diff, kept only while the run is in progress (for resume); removed when done. */
   readonly diff?: string | undefined;
   readonly review?: readonly BaselineFinding[] | undefined;

@@ -1,0 +1,338 @@
+[
+  {
+    "url": "https://github.com/moby/moby/pull/50860",
+    "language": "go",
+    "verdict": "correct",
+    "reason": "Defect confirmed; original_locations corrected to matchesType at new-file lines 184-194 (was estimated 179-191).",
+    "proposed_comment": "In matchesType (daemon/network/filter.go), the loop returns on the first type value it sees, and the values come from a map with random order. A request such as `type=builtin&type=custom` is therefore evaluated against only one arbitrary value, so GET /networks / `docker network ls` returns a random subset instead of the union of both types."
+  },
+  {
+    "url": "https://github.com/seaweedfs/seaweedfs/pull/12753",
+    "language": "go",
+    "verdict": "drop",
+    "reason": "merged_at 2026-11-18T23:55:42Z is after the strict 2026-11-01 upper bound (rule 1).",
+    "proposed_comment": "getListObjectsV2Args now returns ErrInvalidContinuationToken whenever `continuation-token` is present but empty. S3 treats an empty token as 'start from the beginning', and SDKs or clients that always send `continuation-token=` on the first page will now get InvalidArgument on ListObjectsV2."
+  },
+  {
+    "url": "https://github.com/compose-spec/compose-go/pull/915",
+    "language": "go",
+    "verdict": "correct",
+    "reason": "Defect confirmed (convertIntoMapping now errors on nil); original_locations were wrong (236-263 is the IPAM/ulimit area), corrected to convertIntoMapping lines 290-324.",
+    "proposed_comment": "convertIntoMapping now returns an error for any type other than map, string or []any, and its callers propagate it. A YAML `null` value (e.g. `networks: null` or `depends_on: null` in an override file) falls into that default branch, so merging such an override fails with 'cannot convert <nil> into a mapping' instead of keeping the base value."
+  },
+  {
+    "url": "https://github.com/compose-spec/compose-go/pull/924",
+    "language": "go",
+    "verdict": "correct",
+    "reason": "Defect confirmed and distinct from #915 (dedup introduced in its own PR; fix PR #937 quotes #924 separately); locations refined to the MergeYaml call site and appendWithoutDuplicates.",
+    "proposed_comment": "appendWithoutDuplicates drops any override entry that is deep-equal to an entry already in the base, and is now used for every sequence including `environment`, `labels` and `build.args`. For KEY=VALUE lists where the last occurrence of a key wins, dropping the override's repeat of an earlier value leaves the stale later entry in effect, so the override no longer takes precedence."
+  },
+  {
+    "url": "https://github.com/theupdateframework/go-tuf/pull/753",
+    "language": "go",
+    "verdict": "keep",
+    "reason": "Defect confirmed in original diff; fix PR names original as cause; merged_at and changed_lines match API.",
+    "proposed_comment": "IsDelegatedPath now returns (false, err) as soon as one pattern in role.Paths is malformed, before the remaining patterns are tried. A delegated role with one bad glob alongside a valid matching pattern is therefore treated as not trusted for the target, and GetRolesForTarget skips it."
+  },
+  {
+    "url": "https://github.com/lf-edge/ekuiper/pull/4137",
+    "language": "go",
+    "verdict": "keep",
+    "reason": "Fix PR #4258 explicitly states the self-referencing alias and unbounded recursion for SELECT event AS event, event since #4137, and the fix is a one-line skip of ar.Expression in the same loop. Could not execute the test to trace the mechanism (sandbox denied running code), so confidence is moderate.",
+    "proposed_comment": "In decorateStmt's alias-binding pass the new `|| isPrecedingAlias` condition rebinds any FieldRef with the alias's name, with no exclusion for the expression the alias itself is defined from. For a column aliased to its own name that is also referenced again (e.g. `SELECT event AS event, event FROM s`), the alias ends up pointing at itself and evaluation recurses without bound, overflowing the stack and killing the process."
+  },
+  {
+    "url": "https://github.com/argoproj/argo-cd/pull/28027",
+    "language": "go",
+    "verdict": "keep",
+    "reason": "Defect confirmed in original diff; fix PR names original as cause; merged_at and changed_lines match API.",
+    "proposed_comment": "After ReplaceMapSecrets, every string in every connector config is passed through EscapeDollarSignsInMap, which turns each `$` into `$$`. That also escapes values that were not resolved from argocd-secret, such as `clientSecret: $AUTHENTIK_CLIENT_SECRET`, which Dex is meant to expand from its environment, so those env-var references now reach Dex as literal strings and the connector gets wrong credentials."
+  },
+  {
+    "url": "https://github.com/helm/helm/pull/32056",
+    "language": "go",
+    "verdict": "keep",
+    "reason": "Defect confirmed in original diff; fix PR names original as cause; merged_at and changed_lines match API.",
+    "proposed_comment": "template.go and show.go now construct the registry client with `out`, the same stdout writer the command uses for its result. For OCI charts, registry.Client.Pull prints `Pulled:`/`Digest:` status lines to that writer, so `helm template` and `helm show` output is interleaved with non-YAML text and breaks anything that pipes it (e.g. to kubectl apply)."
+  },
+  {
+    "url": "https://github.com/helm/helm/pull/32081",
+    "language": "go",
+    "verdict": "keep",
+    "reason": "Defect confirmed; fix is a revert whose linked issue #32214 names #32081 as the cause (the revert body itself only says Reverts). Evidence quote supplemented.",
+    "proposed_comment": "In statusObserver, the new early `return` when every resource was skipped as Unknown (`unknownSkipped > 0 && len(rss) == 0`) means a delete-wait whose resources are already gone never reaches `cancel()`. waitForDelete then blocks until the full timeout, and the new DeadlineExceeded handling swallows that timeout, so `--wait` deletions stall for the entire timeout and still report success."
+  },
+  {
+    "url": "https://github.com/istio/istio/pull/57716",
+    "language": "go",
+    "verdict": "keep",
+    "reason": "Defect confirmed in original diff; fix PR names original as cause; merged_at and changed_lines match API.",
+    "proposed_comment": "In ListenerSetCollection the service account recorded for the generated gateway is computed from the ListenerSet's own annotations and name (`obj.GetAnnotations()`, `getDefaultName(obj.GetName(), ...)`) instead of the parent Gateway's. Workloads of the parent gateway run under the parent's service account, so the new service-account check for secret access rejects TLS certificates for ListenerSet listeners."
+  },
+  {
+    "url": "https://github.com/spring-projects/spring-boot/pull/52246",
+    "language": "java",
+    "verdict": "keep",
+    "reason": "Defect confirmed in original diff; fix PR names original as cause; merged_at and changed_lines match API.",
+    "proposed_comment": "In the new UrlEncoder.encode(char[], int), every character that needs escaping goes through the two-byte branch (0xC0 | ch>>6, 0x80 | ch&0x3F) unless it is above 0x07FF, including ASCII characters such as space, '#', '%' and '?'. A space becomes the overlong sequence %C0%A0 instead of %20, so URLs built by JarUrlClassLoader for resources with such characters in their names decode to garbage and cannot be opened from a nested jar."
+  },
+  {
+    "url": "https://github.com/apache/iceberg/pull/15150",
+    "language": "java",
+    "verdict": "keep",
+    "reason": "Defect confirmed in original diff; fix PR names original as cause; merged_at and changed_lines match API.",
+    "proposed_comment": "SerializableTable now serializes every historical sort order to JSON, and sortOrders() rebuilds all of them with SortOrderParser.fromJson(schema(), json) against the current schema. A past sort order that references a column since dropped by schema evolution cannot be bound, so sortOrders() throws on the deserialized table, for example when a Spark writer on an executor looks up the table's sort orders."
+  },
+  {
+    "url": "https://github.com/apache/hudi/pull/17994",
+    "language": "java",
+    "verdict": "correct",
+    "reason": "Defect real but the comment wrongly named HoodieTableFactory.checkRecordKey, which is still guarded by !isAppendMode in sanityCheck; the unconditional throwing callers are setupHoodieKeyOptions, RowDataKeyGens.instance and Pipelines.",
+    "proposed_comment": "The new OptionsResolver.getRecordKeyStr throws 'Primary key definition is required' whenever FlinkOptions.RECORD_KEY_FIELD is unset, and it is now used unconditionally in HoodieTableFactory.checkRecordKey, RowDataKeyGens.instance and Pipelines. With the default value removed, Flink append-only (insert) tables defined without a PRIMARY KEY or record-key option, which previously fell back to auto-generated keys, can no longer be created or written."
+  },
+  {
+    "url": "https://github.com/quarkusio/quarkus/pull/55921",
+    "language": "java",
+    "verdict": "keep",
+    "reason": "Defect confirmed in original diff; fix PR names original as cause; merged_at and changed_lines match API.",
+    "proposed_comment": "In Parser.cdata(), every '|' seen while the buffer is empty is counted into cdataPipeCount, so for the empty section {||} both pipes are taken as the opener. The closing '}' then fails the buffer.length() >= cdataPipeCount check and is appended as content, so the CDATA section never terminates and the rest of the template is swallowed or fails to parse."
+  },
+  {
+    "url": "https://github.com/apache/pinot/pull/18814",
+    "language": "java",
+    "verdict": "keep",
+    "reason": "Defect confirmed in original diff; fix PR names original as cause; merged_at and changed_lines match API.",
+    "proposed_comment": "fromInputFormatToMillis converts the value for EPOCH/TIMESTAMP input with PinotDataType.LONG.convert(timeValue, argumentType), which for a String input goes through a strict Long parse. The previous String path (DateTimeFormatSpec.fromFormatToMillis(String)) tolerated decimal or scientific-notation strings such as \"1.4988924E12\" or \"416359.0\", so those inputs now throw NumberFormatException."
+  },
+  {
+    "url": "https://github.com/apache/pinot/pull/18806",
+    "language": "java",
+    "verdict": "keep",
+    "reason": "Defect confirmed in original diff; fix PR names original as cause; merged_at and changed_lines match API.",
+    "proposed_comment": "DefaultSegmentDirectoryLoader.load now builds SegmentLocalFSDirectory with the two-argument (directory, readMode) constructor and no longer passes segmentLoaderContext, which the old call did. The directory is therefore created with a null loader context on the default path, so anything that reads the context from it (such as table task-config propagation into the index directory) silently gets nothing."
+  },
+  {
+    "url": "https://github.com/apache/pinot/pull/17593",
+    "language": "java",
+    "verdict": "keep",
+    "reason": "Defect confirmed in original diff; fix PR names original as cause; merged_at and changed_lines match API.",
+    "proposed_comment": "The cached FieldDescriptor arrays are only invalidated when descriptor.getFullName() changes, but protobuf FieldDescriptors are bound to the specific Descriptor instance. When a schema evolves, new messages carry a new Descriptor with the same full name, so the stale descriptors are passed to hasField/getField on the new message and throw IllegalArgumentException (FieldDescriptor does not match message type) for every record after the change."
+  },
+  {
+    "url": "https://github.com/johanhaleby/occurrent/pull/647",
+    "language": "java",
+    "verdict": "keep",
+    "reason": "Defect confirmed in original diff; fix PR names original as cause; merged_at and changed_lines match API.",
+    "proposed_comment": "matchesAndFilter now calls dataFieldReader.readAll for every data-field leaf of the flattened AND before evaluating any operand, which drops the short-circuit that allMatch had. When an earlier metadata operand already fails, the later data reads still run, so with a reader that refuses reads (the store-query path) a filter that used to evaluate to false now throws UnsupportedOperationException, and rejected events pay for payload reads."
+  },
+  {
+    "url": "https://github.com/apache/cxf/pull/3154",
+    "language": "java",
+    "verdict": "keep",
+    "reason": "Defect confirmed in original diff; fix PR names original as cause; merged_at and changed_lines match API.",
+    "proposed_comment": "ProxyFactory.getSystemProxy now calls ProxySelector.getDefault() directly, replacing the SystemPropertyAction-based reads that ran privileged. Under a SecurityManager the call is unprivileged, so every caller on the stack, including user deployment code, must hold NetPermission(\"getProxySelector\") or HTTP calls fail with an AccessControlException."
+  },
+  {
+    "url": "https://github.com/BerriAI/litellm/pull/44295",
+    "language": "python",
+    "verdict": "keep",
+    "reason": "Revert PR #44344 names #44295 and the extra_body effort 400; diff matches; 1,357 lines (mostly tests) within cap.",
+    "proposed_comment": "In responses_api_bridge_check, gpt-5.4+ function tools are now bridged to /responses only when the top-level `reasoning_effort` is set (or, when unset, only from gpt-5.6 on), on the assumption that unset effort means reasoning 'none'. An effort supplied through `extra_body` (e.g. `extra_body={'reasoning_effort': 'low'}`) is invisible to this check, so the request stays on Chat Completions with function tools and reasoning active, which OpenAI rejects with a 400."
+  },
+  {
+    "url": "https://github.com/BerriAI/litellm/pull/48650",
+    "language": "python",
+    "verdict": "keep",
+    "reason": "Fix #48920 names #48650 and the __del__ finalizer closing a live stream session; matches diff.",
+    "proposed_comment": "The new `__del__` on the aiohttp transport closes the owned ClientSession as soon as the transport object is garbage-collected. If a cached client is evicted or dropped while a streaming response is still being read, the session is closed under the live stream and the rest of the body fails with a connection-closed error."
+  },
+  {
+    "url": "https://github.com/django/django/pull/19519",
+    "language": "python",
+    "verdict": "correct",
+    "reason": "Revert says Cols vs aliases (confirmed), but the stated consequence was wrong: the real effect (Trac comment: regression on Oracle) is that ordering is never cleared for grouped queries, leaking ORDER BY into subqueries/count.",
+    "proposed_comment": "The new guard in Query.clear_ordering tests `{*self.order_by, *self.extra_order_by}.issubset(self.group_by)`, but `order_by` holds field-name strings (possibly '-'-prefixed) while a tuple `group_by` holds expression objects such as `Col`. The subset test can therefore not succeed when any ordering is present, so for grouped queries the ordering is no longer cleared and e.g. `count()` keeps an ORDER BY on columns that are not part of the GROUP BY."
+  },
+  {
+    "url": "https://github.com/django/django/pull/19405",
+    "language": "python",
+    "verdict": "correct",
+    "reason": "Defect real (icontains matches other models; merge commit f02b49d is in the revert), but the revert text only cites ticket numbers; evidence quote now includes the Trac ticket title/code that names the icontains cause.",
+    "proposed_comment": "RenamePermission._rename selects content types with `model__icontains=old_model.lower()`, so renaming a model also matches every other model in the app whose name merely contains the old name (e.g. renaming `Book` matches `Bookmark`). The permissions of those unrelated models are then rewritten to the new model's codename and name, corrupting them."
+  },
+  {
+    "url": "https://github.com/ray-project/ray/pull/63695",
+    "language": "python",
+    "verdict": "keep",
+    "reason": "Fix PR #64501 (revert of #63695) quotes the TypeError from to_dict on Tune param_space; matches comment.",
+    "proposed_comment": "AlgorithmConfig.to_dict() now evaluates `self.total_train_batch_size` for the new API stack and only catches ValueError. When the config is used as a Tune `param_space` and `train_batch_size_per_learner` is a Tune search-space domain (e.g. `tune.choice`), the multiplication raises TypeError, so building the Tuner fails for RLlib hyperparameter sweeps."
+  },
+  {
+    "url": "https://github.com/ray-project/ray/pull/61703",
+    "language": "python",
+    "verdict": "keep",
+    "reason": "Fix #62827 names #61703 and the Train V1 + V2 autoscaler skip of exclude_resources; matches diff.",
+    "proposed_comment": "In DataConfig.configure, `exclude_resources` is now skipped whenever Ray Data's V2 cluster autoscaler is enabled, on the assumption that the scaling policy registers the training resources with the AutoscalingCoordinator. That registration only exists in the Train V2 scaling policies; with Train V1 and the V2 autoscaler nothing reserves the training CPUs/GPUs, so Data can claim them and over-subscribe the cluster."
+  },
+  {
+    "url": "https://github.com/vllm-project/vllm/pull/46389",
+    "language": "python",
+    "verdict": "keep",
+    "reason": "Fix #46860 quotes the and->or change exactly; unambiguous.",
+    "proposed_comment": "In `_is_wNa8o8_int` the condition changed from `is_static_int8_in and is_static_int8_out` to `is_static_int8_in or is_static_int8_out`. Static int8-activation layers that have no static int8 output (ordinary W8A8 int8 static checkpoints) now match the wNa8o8 scheme instead of the regular W8A8 path, so they are given the wrong scheme."
+  },
+  {
+    "url": "https://github.com/vllm-project/vllm/pull/43409",
+    "language": "python",
+    "verdict": "correct",
+    "reason": "Bundled two sites (auto_gptq guard removal and Marlin zero-point registration); fix PR only demonstrates breakage from the auto_gptq guard removal, so narrowed to that single defect.",
+    "proposed_comment": "`get_fused_moe_quant_config` no longer drops `w13_qzeros`/`w2_qzeros` when `quant_config.is_sym` is true, and the Marlin MoE `process_weights_after_loading` now registers zero points whenever they are non-None instead of only for asymmetric quantization. For symmetric GPTQ/AutoRound MoE checkpoints on GPU this passes placeholder zero-point tensors to the Marlin kernel, which then produces incorrect results."
+  },
+  {
+    "url": "https://github.com/sgl-project/sglang/pull/45631",
+    "language": "python",
+    "verdict": "correct",
+    "reason": "Cause confirmed (#45855 says introduced by #45631) but effect is a rounding/ULP-level logit difference (prefill-scoring and LoRA parity), not a wrong-result bug in common use; severity lowered Medium->Low.",
+    "proposed_comment": "`_compute_lm_head` now takes the FP32 `torch.mm(..., out_dtype=torch.float32, out=out)` path whenever an output buffer is supplied, not only when `use_fp32_lm_head` is enabled. A normal FP16/BF16 lm_head therefore computes its logits in FP32 and skips the rounding to the model dtype, so logits differ from the unbuffered path (prefill scoring, LoRA-wrapped heads) whenever a matching FP32 logits buffer exists."
+  },
+  {
+    "url": "https://github.com/langchain-ai/langchain/pull/33035",
+    "language": "python",
+    "verdict": "keep",
+    "reason": "Fix #35667 states regression from #33035 and the missing _type; matches diff.",
+    "proposed_comment": "`Chain.save()` now calls `self.model_dump()`, but `_type` is only injected in the overridden `Chain.dict()`. `model_dump()` bypasses that override, so `chain_dict` never contains `_type` and `save()` always raises 'does not support saving', even for chain types that do support it."
+  },
+  {
+    "url": "https://github.com/python/mypy/pull/20602",
+    "language": "python",
+    "verdict": "correct",
+    "reason": "Cause only indirect: fix #20688 says \"fixes #20686\", and that issue bisects to b91f53c (confirmed = #20602 merge commit); accept but evidence quote rewritten to state the chain and the actual fix (expr_indices=[0, 1]).",
+    "proposed_comment": "In comparison_type_narrowing_helper the containment branch passes `expr_indices=[left_index, right_index]` to narrow_type_by_equality together with a freshly built two-element `operands` list. In a chained comparison such as `x == y in z`, those indices are positions in the whole comparison, so they do not line up with the two operands and the checker can crash or narrow the wrong expression."
+  },
+  {
+    "url": "https://github.com/forem/forem/pull/24521",
+    "language": "ruby",
+    "verdict": "drop",
+    "reason": "merged_at 2026-11-02T18:31:54Z is after the 2026-11-01 strict upper bound.",
+    "proposed_comment": "Adding cached_user and cached_organization to UNRENDERED_ARTICLE_COLUMNS, and now selecting them away in both show and custom_domain_show, assumes the page never reads them. The decorated article is also used to render story cards, which read those serialized snapshots, so rendering will hit a missing-attribute error on the excluded columns."
+  },
+  {
+    "url": "https://github.com/chatwoot/chatwoot/pull/15499",
+    "language": "ruby",
+    "verdict": "correct",
+    "reason": "Revert body is only \"Reverts #15499\" but its title says \"restore media downloads after redirect regression\", which supports the max_redirects: 0 defect; evidence quote now uses the title.",
+    "proposed_comment": "The authenticated Twilio media download in download_with_auth passes max_redirects: 0, but Twilio's media endpoint normally answers with a redirect to the actual file location. The resulting redirect error is a Down::Error, which perform rescues and turns into a skipped attachment, so inbound media that previously downloaded would now be dropped."
+  },
+  {
+    "url": "https://github.com/solidusio/solidus/pull/6638",
+    "language": "ruby",
+    "verdict": "keep",
+    "reason": "Revert #6647 names #6638 and bug PR #6645 describes the sibling-offset path bug exactly as written.",
+    "proposed_comment": "The new pretty_name assumes a taxon's ancestors are the `depth` rows immediately before it in lft order, but earlier siblings and their subtrees sit between a node and its ancestors. For any taxon that is not the first child at its level, the slice starts at the wrong index and returns the wrong ancestor names."
+  },
+  {
+    "url": "https://github.com/solidusio/solidus/pull/6304",
+    "language": "ruby",
+    "verdict": "keep",
+    "reason": "Fix #6318 states #6304 changed state-change name to \"order\"; matches diff.",
+    "proposed_comment": "log_state_change no longer passes its `name` argument when enqueuing StateChangeTrackingJob, and the job derives the name from the stateful object's model name. Payment and shipment state changes tracked through OrderUpdater will therefore be recorded under the order's name instead of 'payment' or 'shipment'."
+  },
+  {
+    "url": "https://github.com/fastlane/fastlane/pull/30158",
+    "language": "ruby",
+    "verdict": "correct",
+    "reason": "Weak chain: merged revert #30447 says only \"2 regressions since release\" but closes #30446 (unmerged fix PR) which describes the Configuration#[] raise on missing api_key; defect is real and matches, evidence quote now records both sources. Needs repo knowledge (modify_services assigns Produce.config).",
+    "proposed_comment": "Produce.authenticate_connect_api! unconditionally reads Produce.config[:api_key] and [:api_key_path]. Produce.config can be a Configuration built from another action's options that does not declare those keys, and Configuration#[] raises for unknown keys, so those paths would crash before authenticating."
+  },
+  {
+    "url": "https://github.com/dependabot/dependabot-core/pull/13794",
+    "language": "ruby",
+    "verdict": "keep",
+    "reason": "Revert #13840 names #13794 and the missing nil-digest safeguard in digest comparison; matches comment.",
+    "proposed_comment": "digest_up_to_date? now compares each requirement's digest against digest_of(source_tag) with no handling for a nil result. If the tag's digest cannot be resolved, source_digest == nil is false, so the digest is reported as stale instead of being conservatively treated as up to date."
+  },
+  {
+    "url": "https://github.com/rubocop/rubocop/pull/14625",
+    "language": "ruby",
+    "verdict": "keep",
+    "reason": "Fix #14752 names #14625 and the cache_root call before apply_options!; matches.",
+    "proposed_comment": "Putting `ConfigLoader.cache_root = ResultCache.cache_root(@config_store, ...)` in set_options_to_config_loader runs it before `@config_store.apply_options!(@options)`. cache_root calls config_store.for_pwd, so the project's .rubocop.yml is loaded before `--force-default-config` is applied and the flag no longer prevents it (the spec expectation was changed to match)."
+  },
+  {
+    "url": "https://github.com/antiwork/gumroad/pull/7141",
+    "language": "ruby",
+    "verdict": "correct",
+    "reason": "Cause confirmed by revert #7148 but comment speculated (\"fall back to the receipt's own products\"); reworded to the verified effect: purchaser-less chargeables that are not guest checkouts (synthetic lookup-form set) now get recommendations leaking unrelated product names. Requires knowing how chargeables are built; borderline detectability.",
+    "proposed_comment": "Removing the `return [] if purchaser.blank?` guard makes RecommendedProductsInfo#products run for every chargeable without a purchaser, not only genuine guest checkouts, including receipts built from a synthetic set of purchases. Recommendations then fall back to the receipt's own products, which can expose product names from unrelated purchases in the email."
+  },
+  {
+    "url": "https://github.com/honojs/hono/pull/5205",
+    "language": "typescript",
+    "verdict": "keep",
+    "reason": "Verified: fix #5239 names #5205; subarray alias across reader.read() is in added lines; dates/lines match.",
+    "proposed_comment": "In generateDigest, a partial chunk is kept as `chunk = value.subarray(offset)` (and later filled with `chunk.set(...)`) while the loop goes on to call `reader.read()` again. If the stream producer reuses its backing buffer between pulls, the pending bytes are overwritten before they are digested, so the ETag is computed over the wrong content; the pending bytes should be copied rather than aliased."
+  },
+  {
+    "url": "https://github.com/langchain-ai/langchainjs/pull/10790",
+    "language": "typescript",
+    "verdict": "keep",
+    "reason": "Verified: fix #12230 names #10790; input_json != tool_use after _delta strip in added code. Needs light Anthropic-stream knowledge but greppable.",
+    "proposed_comment": "getMergeableTypeBase only strips a `_delta` suffix, so hasMismatchedMergeableType treats an Anthropic `input_json_delta` block (base `input_json`) and the `tool_use` block it continues at the same index as different types, and _findMergeTarget stops merging them. When Anthropic tool calls are streamed, the tool_use input stays empty and downstream parsing of the tool arguments fails."
+  },
+  {
+    "url": "https://github.com/colinhacks/zod/pull/6415",
+    "language": "typescript",
+    "verdict": "correct",
+    "reason": "Real defect (fix #6429). Location guess replaced with verified lines: util.ts 1066-1087, schemas.ts 3672-3675.",
+    "proposed_comment": "defineLazyInternal returns early when `key in proto`, but every constructor in an init chain shares the same `_zod` prototype. When $ZodExactOptional calls $ZodOptional.init first, its own `values`/`pattern` overrides are silently dropped, so z.exactOptional(...) keeps the optional version's undefined-inclusive values and pattern (for example a template literal containing it matches the wrong strings)."
+  },
+  {
+    "url": "https://github.com/typeorm/typeorm/pull/11944",
+    "language": "typescript",
+    "verdict": "drop",
+    "reason": "Intentional feature closing #4591 (select:false columns not returned after save), with tests asserting it; fix #12501 itself calls the old semantics \"defensible\" and a design/contract choice, so not a defect.",
+    "proposed_comment": "After persistence this deletes every `select: false` column from `subject.entity`, which is the caller's own object passed to save(). The returned entity and the original reference both lose a value the caller just supplied (for example an email or hash set before save), so code that keeps using the entity after saving sees it as undefined; columns with defaults survive, so the outcome is also inconsistent for the same decorator option."
+  },
+  {
+    "url": "https://github.com/ant-design/ant-design/pull/57651",
+    "language": "typescript",
+    "verdict": "keep",
+    "reason": "Verified: fix #59735 names #57651; menu mode passes normalized value to custom filterSearch while tree mode passes raw.",
+    "proposed_comment": "In menu mode the custom `filterSearch(normalizedSearchValue, filter)` callback now receives the trimmed, lowercased string, while tree mode still passes the original `searchValue`. A user-supplied case-sensitive matcher (for example product codes) gets wrong matches in menu mode and never sees what the user actually typed; only the built-in matcher should use the normalized value."
+  },
+  {
+    "url": "https://github.com/angular/angular/pull/71095",
+    "language": "typescript",
+    "verdict": "keep",
+    "reason": "Verified: fix #71799 confirms coercion of null to empty string applied on attr path in elementAttributeInternal.",
+    "proposed_comment": "unwrapImgVideoSrcValue maps `null`/`undefined` to `''` and is now also applied in elementAttributeInternal, i.e. to `[attr.src]` bindings. `<img [attr.src]=\"null\">` therefore sets `src=\"\"` instead of removing the attribute, and the browser fires an error event for the empty URL; the coercion should only apply to the `src` DOM property path."
+  },
+  {
+    "url": "https://github.com/remix-run/react-router/pull/15039",
+    "language": "typescript",
+    "verdict": "keep",
+    "reason": "Verified: fix #15637 states replay only buffers with zero subscribers; layout-effect removal is in the diff.",
+    "proposed_comment": "The layout effect that re-synced state when `router.state.initialized` flipped before the provider subscribed is removed, and replaced by a buffered replay that is only recorded when `subscribers.size === 0`. If the router finishes initializing between render and subscription while another subscriber is already attached, nothing is buffered and the provider never receives the initialized state, so it stays on its hydration fallback."
+  },
+  {
+    "url": "https://github.com/supabase/supabase/pull/50569",
+    "language": "typescript",
+    "verdict": "keep",
+    "reason": "Verified: fix #53305 names #50569; SignInMfaForm already takes a context prop visible in the diff hunk, new form ignores it. Fairly detectable.",
+    "proposed_comment": "The new recovery-code form always calls `router.push(getReturnToPath())` and tracks a `sign_in` event on success, ignoring the context the MFA form was opened with. When reached from the forgot-password flow, verifying a recovery code skips the new-password step and sends the user on to their destination without a password reset."
+  },
+  {
+    "url": "https://github.com/cline/cline/pull/15220",
+    "language": "typescript",
+    "verdict": "keep",
+    "reason": "Verified: guard returns undefined when superseded; Run-now loop reads overview; fix #15293 confirms.",
+    "proposed_comment": "refreshSchedules now returns `undefined` when a newer request supersedes it (`requestId !== overviewRequestSequence.current`), but the Run-now polling loop reads the returned `overview` to find the new execution's session. If a completion-event or poll refresh starts during that loop, the awaited call returns nothing and the loop can run to its deadline without ever opening the new run's conversation."
+  },
+  {
+    "url": "https://github.com/cline/cline/pull/15185",
+    "language": "typescript",
+    "verdict": "keep",
+    "reason": "Verified: fix #15207 confirms sandbox loader never marks commands. Needs repo knowledge (other loader), consistent with SOURCE.md known limits.",
+    "proposed_comment": "The session command list is now filtered with isPluginCommand, which only recognizes commands wrapped by PluginRegistry.wrapCommand. Commands registered through the other plugin loader (the sandboxed/subprocess path) never enter the WeakSet, so in that mode a resident session lists no plugin commands and `/command` runs never reach their handlers."
+  }
+]

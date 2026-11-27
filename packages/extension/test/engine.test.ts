@@ -69,6 +69,17 @@ describe('runReview', () => {
     expect(d.saved.map((s) => s.step)).toEqual(['fetch', 'context', 'review', 'verify', 'filter', 'filter']);
   });
 
+  it('puts the PR description into the review pass only, and keeps it out of the saved record', async () => {
+    const p = scripted('[]', '[]');
+    const d = deps(p, { host: { info: async () => ({ headSha: 'abc', title: 'Add key loader', description: 'Loads keys from env.' }), diff: async () => DIFF } });
+    const run = await runReview(newRun('r1', target, p, 0), d);
+    expect(p.prompts[0]?.prompt).toContain('<description>\nLoads keys from env.\n</description>');
+    expect(run.description).toBeUndefined();
+    const plain = scripted('[]', '[]');
+    await runReview(newRun('r2', target, plain, 0), deps(plain));
+    expect(plain.prompts[0]?.prompt).not.toContain('<description>');
+  });
+
   it('with repository context: runs the plain pass and a context pass, merges them, and marks what only the context pass found', async () => {
     const context = '[{"file":"src/a.ts","line":2,"claim":"duplicate of the plain finding"},{"file":"src/b.ts","line":40,"claim":"Calls save() with arguments swapped"}]';
     const verify = '[{"index":0,"keep":true,"confidence":90,"reason":"r"},{"index":1,"keep":true,"confidence":50,"reason":"r"},{"index":2,"keep":true,"confidence":70,"reason":"r"}]';

@@ -1,6 +1,6 @@
 # Regression golden set
 
-30 public GitHub PRs that were merged and later reverted or fixed because they introduced a defect. Each case has one golden comment: what a reviewer should have said on the original PR. Built 2026-11-18.
+75 public GitHub PRs (30 in `golden.json`, 45 in `golden-2.json`) that were merged and later reverted or fixed because they introduced a defect. Each case has one golden comment: what a reviewer should have said on the original PR. Built 2026-11-18.
 
 **What it measures: recall only.** Each PR has one known bug. Other real bugs in the same PR are not labelled, so a reviewer's precision on this set is meaningless. Report recall (and recall by severity), not precision or F1.
 
@@ -20,6 +20,10 @@
 - `verification.json` records each verdict and reason, and the comment as originally proposed.
 - `evidence` in each case gives the fix PR, a quote naming the cause, and the original lines.
 
+## Batch 2 (2026-11-27, `golden-2.json`, `verification-2.json`)
+
+Same rules, plus: none of batch 1's 19 repos; target mix TypeScript 12, Python 11, Go 10, Java 9, Ruby 8. Search: one agent per language (read-only `gh`), ~150 candidates inspected in detail. Verification: three separate skeptical agents re-checked every case against the API, the original diff and the fix PR: 48 proposed → 32 keep, 13 corrected (wrong stated consequence rewritten: hudi#17994, django#19519; bundled sites narrowed: vllm#43409; severity lowered: sglang#45631; locations and evidence quotes fixed), 3 dropped (seaweedfs#12753 and forem#24521 merged after the window; typeorm#11944 an intentional, tested feature). Result: 45 cases, TypeScript 9, Python 11, Go 9, Java 9, Ruby 7; High 16, Medium 28, Low 1. Multi-range locations were split into one entry per range. Weakest on detectability (need repo knowledge): cline#15185, fastlane#30158, gumroad#7141.
+
 ## Known limits
 
 - Labels come from model agents reading PRs, verified by a second agent, not by the projects' maintainers. Expect a few comments that are imprecise; `verification.json` shows where corrections were made.
@@ -37,4 +41,4 @@ node packages/eval/dist/martian-cli.js judge --cases eval/data/regressions/cases
 
 `import --regressions` reads only `golden*.json` from the directory, so `verification.json` and the generated `cases.json` can sit beside it.
 
-All 30 cases are held out: none is used to tune prompts.
+All 75 cases are held out: none is used to tune prompts.

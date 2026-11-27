@@ -28,7 +28,7 @@ import type { FindingSource, PrExtras, RepoContext, ReviewFinding, RunError, Run
 export type { ContextState, FindingSource, PostRecord, PrExtras, RepoContext, ReviewFinding, RunError, RunRecord, RunStatus, Step } from './run-types.js';
 
 export interface EngineDeps {
-  readonly host: { info(): Promise<{ headSha: string; title?: string }>; diff(): Promise<string> };
+  readonly host: { info(): Promise<{ headSha: string; title?: string; description?: string }>; diff(): Promise<string> };
   readonly provider: ModelProvider;
   readonly prices: ModelChoice | null;
   readonly feedback: readonly FeedbackEntry[];
@@ -114,7 +114,7 @@ export async function runReview(input: RunRecord, d: EngineDeps): Promise<RunRec
           incremental = { since: prev.headSha, files: inc.files, carried: inc.carried.length };
         } else notes.push('The pull request history changed since the last review (or the host could not compare), so everything was reviewed again.');
       }
-      run = { ...run, headSha: info.headSha, title: info.title ?? '', diff, filesReviewed: parseUnifiedDiff(diff).length, review: undefined, repoContext: undefined, contextReview: undefined, extras: undefined, rulesReview: undefined, requirementsReview: undefined, summary: undefined, verdicts: undefined, findings: undefined, incremental, carried, notes };
+      run = { ...run, headSha: info.headSha, title: info.title ?? '', description: info.description, diff, filesReviewed: parseUnifiedDiff(diff).length, review: undefined, repoContext: undefined, contextReview: undefined, extras: undefined, rulesReview: undefined, requirementsReview: undefined, summary: undefined, verdicts: undefined, findings: undefined, incremental, carried, notes };
     }
     if (run.extras === undefined && d.extras && run.headSha) {
       try {
@@ -144,7 +144,7 @@ export async function runReview(input: RunRecord, d: EngineDeps): Promise<RunRec
     // The plain pass is the measured review and always runs; the other passes run beside it, never instead.
     const plain = async (): Promise<readonly BaselineFinding[]> => {
       if (run.review || !hasDiff) return run.review ?? [];
-      const r = parseBaselineReply(await call(buildReviewPrompt(title, diff, d.reviewPrompt ?? RECALL_PROMPT), 'high'));
+      const r = parseBaselineReply(await call(buildReviewPrompt(title, diff, d.reviewPrompt ?? RECALL_PROMPT, run.description), 'high'));
       if (!r) throw new ReplyError('The model reply could not be read as a list of findings. Run the review again.');
       return r;
     };
@@ -203,7 +203,7 @@ export async function runReview(input: RunRecord, d: EngineDeps): Promise<RunRec
     // The diff, repository code, rules and issue texts are kept only while running (for resume); only counts remain.
     const repoContext = run.repoContext ? { definitions: run.repoContext.definitions, indexedFiles: run.repoContext.indexedFiles } : run.repoContext;
     const extras = run.extras ? { ...run.extras, rulesText: undefined, issuesText: undefined } : run.extras;
-    await save({ status: 'done', findings: ranked, notes, diff: undefined, repoContext, extras });
+    await save({ status: 'done', findings: ranked, notes, diff: undefined, description: undefined, repoContext, extras });
   } catch (e) {
     await save({ status: 'failed', error: toRunError(e) });
   }

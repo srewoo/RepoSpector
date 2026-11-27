@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { BASELINE_PROMPT, RECALL_PROMPT, buildDefinitionsPrompt, buildVerifyPrompt, DEFINITIONS_ADDENDUM, mergePasses, parseBaselineReply, parseVerdicts, VERIFY_PROMPT, VERIFY_PROMPT_FOLD, VERIFY_PROMPT_V2 } from '../src/review/measured.js';
+import { BASELINE_PROMPT, RECALL_PROMPT, buildDefinitionsPrompt, buildVerifyPrompt, DEFINITIONS_ADDENDUM, mergePasses, parseBaselineReply, parseVerdicts, VERIFY_PROMPT, VERIFY_PROMPT_FOLD, VERIFY_PROMPT_V2, buildReviewPrompt } from '../src/review/measured.js';
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 12);
 
@@ -93,3 +93,14 @@ describe('verify prompt fold (v1 + same root cause only)', () => {
     expect(VERIFY_PROMPT_FOLD.startsWith(head)).toBe(true);
   });
 });
+
+describe('review prompt with a PR description', () => {
+  it('is unchanged without a description and adds an untrusted block with one', () => {
+    expect(buildReviewPrompt('T', 'D', RECALL_PROMPT)).toBe(`${RECALL_PROMPT}\n\nPR title: T\n\n<diff>\nD\n</diff>`);
+    expect(buildReviewPrompt('T', 'D', RECALL_PROMPT, '  ')).toBe(buildReviewPrompt('T', 'D', RECALL_PROMPT));
+    const p = buildReviewPrompt('T', 'D', RECALL_PROMPT, 'why\n'.repeat(2000));
+    expect(p).toContain('PR title: T\n\n<description>\nwhy');
+    expect(p.split('<description>\n')[1]?.split('\n</description>')[0]?.length).toBe(4000);
+  });
+});
+
