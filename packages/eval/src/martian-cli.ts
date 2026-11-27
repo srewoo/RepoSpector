@@ -29,7 +29,7 @@ const USAGE = `usage:
   martian merge    --cases <cases.json> --from <dir> --second <dir> --run <dir> [--pilot | --heldout]
   martian extension --cases <cases.json> --run <dir> [--model sonnet] [--pilot | --heldout] [--limit N] [--repo-context] [--review-prompt baseline|recall]
   martian mcp-flow --cases <cases.json> --run <dir> [--model sonnet] [--heldout] [--limit N]
-  martian judge    --cases <cases.json> --run <dir> [--judge-model claude-sonnet-4-5-20250929]`;
+  martian judge    --cases <cases.json> --run <dir> [--judge-model claude-sonnet-4-5-20250929] [--votes 3]`;
 
 const CACHE_DIR = 'eval/.cache';
 export const DEFAULT_JUDGE = 'claude-sonnet-4-5-20250929';
@@ -195,7 +195,7 @@ function runMerge(cases: MartianCase[], firstDir: string, secondDir: string, run
   console.log(`first ${n(a)} + second ${n(b)} -> merged ${n(out)} findings`);
 }
 
-async function judgeRun(cases: MartianCase[], runDir: string, judgeModel: string): Promise<void> {
+async function judgeRun(cases: MartianCase[], runDir: string, judgeModel: string, votes = 1): Promise<void> {
   const preds = readJson<Record<string, PredictionEntry>>(join(runDir, 'predictions.json'));
   const cachePath = join(runDir, '..', `judge-cache-${judgeModel}.json`);
   const cache = new Map<string, string>(existsSync(cachePath) ? Object.entries(readJson<Record<string, string>>(cachePath)) : []);
@@ -207,15 +207,15 @@ async function judgeRun(cases: MartianCase[], runDir: string, judgeModel: string
   await Promise.all(
     scored.map(async (c) => {
       const candidates = (preds[c.id]?.findings ?? []).map(candidateText);
-      perCase[c.id] = await judgeReview(c.golden.map((g) => g.comment), candidates, llm, judgeModel, cache);
+      perCase[c.id] = await judgeReview(c.golden.map((g) => g.comment), candidates, llm, judgeModel, cache, votes);
       writeJson(cachePath, Object.fromEntries(cache));
     }),
   );
   const rows = Object.values(perCase);
   const totals = totalsOf(rows);
   const judgeErrors = rows.reduce((n, r) => n + r.errors, 0);
-  const report = { judgeModel, judgePromptSha: sha(JUDGE_PROMPT), cases: scored.length, reviewerFailures: failed, judgeErrors, totals, perCase };
-  writeJson(join(runDir, `report-${judgeModel}.json`), report);
+  const report = { judgeModel, judgePromptSha: sha(JUDGE_PROMPT), votes, cases: scored.length, reviewerFailures: failed, judgeErrors, totals, perCase };
+  writeJson(join(runDir, votes > 1 ? `report-${judgeModel}-votes${votes}.json` : `report-${judgeModel}.json`), report);
   const pct = (v: number): string => `${(v * 100).toFixed(1)}%`;
   console.log(`cases ${scored.length}  TP/FP/FN ${totals.tp}/${totals.fp}/${totals.fn}`);
   console.log(`precision ${pct(totals.precision)}  recall ${pct(totals.recall)}  F1 ${pct(totals.f1)}  (judge ${judgeModel})`);
@@ -235,6 +235,7 @@ export async function main(argv: string[]): Promise<number> {
       run: { type: 'string' },
       model: { type: 'string', default: 'sonnet' },
       'judge-model': { type: 'string', default: DEFAULT_JUDGE },
+      votes: { type: 'string', default: '1' },
       limit: { type: 'string' },
       pilot: { type: 'boolean', default: false },
       heldout: { type: 'boolean', default: false },
@@ -293,7 +294,7 @@ export async function main(argv: string[]): Promise<number> {
       await runBaseline(cases, values.run, values.model, mode);
     }
     else if (cmd === 'verify') await runVerify(cases, values.from ?? '', values.run, values.model, values['repo-context']);
-    else await judgeRun(cases, values.run, values['judge-model']);
+    else await judgeRun(cases, values.run, values['judge-model'], Math.max(1, Math.min(5, Number(values.votes) || 1)));
     return 0;
   }
   console.error(USAGE);

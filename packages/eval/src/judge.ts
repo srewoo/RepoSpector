@@ -56,32 +56,49 @@ function render(golden: string, candidate: string): string {
  * matches; a candidate is marked matched only when it raises that golden's best confidence;
  * unmatched candidates are FPs. Parse failures are counted as errors, never silently as misses.
  */
+/** One judge call for a pair, cached. Vote 0 uses the original single-vote key, so old caches stay valid. */
+async function judgeOnce(prompt: string, vote: number, llm: LlmClient, model: string, cache: Map<string, string>): Promise<JudgeVerdict | null> {
+  const key = createHash('sha256').update(vote === 0 ? `${model}\0${prompt}` : `${model}\0${prompt}\0vote ${vote}`).digest('hex');
+  const cached = cache.get(key);
+  if (cached !== undefined) return parseJudgeReply(cached);
+  let text: string;
+  try {
+    text = (await llm.complete(prompt, { model })).text;
+  } catch {
+    return null;
+  }
+  const parsed = parseJudgeReply(text);
+  if (parsed) cache.set(key, text);
+  return parsed;
+}
+
+/** Majority of `votes` independent calls; null if any call is unreadable. Confidence: mean of the agreeing calls. */
+async function judgePair(prompt: string, votes: number, llm: LlmClient, model: string, cache: Map<string, string>): Promise<JudgeVerdict | null> {
+  const all = await Promise.all(Array.from({ length: votes }, (_, k) => judgeOnce(prompt, k, llm, model, cache)));
+  if (all.some((v) => v === null)) return null;
+  const vs = all as JudgeVerdict[];
+  const yes = vs.filter((v) => v.match);
+  const match = yes.length * 2 > vs.length;
+  const agreeing = match ? yes : vs.filter((v) => !v.match);
+  return { match, confidence: agreeing.reduce((n, v) => n + v.confidence, 0) / agreeing.length, reasoning: agreeing[0]?.reasoning ?? '' };
+}
+
+/**
+ * Judge every golden x candidate pair and count like Martian: a golden is a TP if any candidate
+ * matches; a candidate is marked matched only when it raises that golden's best confidence;
+ * unmatched candidates are FPs. Parse failures are counted as errors, never silently as misses.
+ * With votes > 1 each pair is the majority of that many judge calls (single calls flip ~4% of pairs).
+ */
 export async function judgeReview(
   golden: readonly string[],
   candidates: readonly string[],
   llm: LlmClient,
   model: string,
   cache: Map<string, string> = new Map(),
+  votes = 1,
 ): Promise<ReviewJudgement> {
   const tasks = golden.flatMap((g) => candidates.map((c) => ({ g, c })));
-  const verdicts = await Promise.all(
-    tasks.map(async ({ g, c }) => {
-      const prompt = render(g, c);
-      const key = createHash('sha256').update(`${model}\0${prompt}`).digest('hex');
-      let text = cache.get(key);
-      if (text === undefined) {
-        try {
-          text = (await llm.complete(prompt, { model })).text;
-        } catch {
-          return null;
-        }
-        const parsed = parseJudgeReply(text);
-        if (parsed) cache.set(key, text);
-        return parsed;
-      }
-      return parseJudgeReply(text);
-    }),
-  );
+  const verdicts = await Promise.all(tasks.map(({ g, c }) => judgePair(render(g, c), votes, llm, model, cache)));
 
   const best = new Map<string, { confidence: number; candidate: string }>();
   const candidateMatched = new Set<string>();

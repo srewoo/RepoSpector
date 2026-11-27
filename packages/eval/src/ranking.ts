@@ -39,3 +39,13 @@ export function topN(cases: readonly RankedCase[], n: number): TopN {
   }
   return { n, shown, real, precision: shown ? real / shown : 0, randomPrecision: shown ? expected / shown : 0, goldensFound, goldens, recall: goldens ? goldensFound / goldens : 0 };
 }
+
+/** Probability that a random real finding scores above a random false one (ties count ½). NaN without both kinds. */
+export function auc(scored: readonly { readonly score: number; readonly real: boolean }[]): number {
+  const pos = scored.filter((s) => s.real);
+  const neg = scored.filter((s) => !s.real);
+  if (!pos.length || !neg.length) return Number.NaN;
+  let wins = 0;
+  for (const p of pos) for (const n of neg) wins += p.score > n.score ? 1 : p.score === n.score ? 0.5 : 0;
+  return wins / (pos.length * neg.length);
+}

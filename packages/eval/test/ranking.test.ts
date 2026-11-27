@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { topN, type RankedCase } from '../src/ranking.js';
+import { auc, topN, type RankedCase } from '../src/ranking.js';
 
 // Two PRs. A: 4 findings, real ones are b and d (d matches golden G2, b matches G1).
 // B: 1 finding, real (matches G3); one golden G4 never found.
@@ -28,5 +28,17 @@ describe('topN', () => {
   it('counts a finding that matches two goldens once as shown and once as real', () => {
     const r = topN([{ order: ['a'], golden: ['G1', 'G2'], matches: [{ golden: 'G1', candidate: 'a' }, { golden: 'G2', candidate: 'a' }] }], 1);
     expect(r).toMatchObject({ shown: 1, real: 1, goldensFound: 2 });
+  });
+});
+
+describe('auc', () => {
+  it('is 1 when every real finding outranks every false one, 0.5 for ties, 0 when reversed', () => {
+    expect(auc([{ score: 90, real: true }, { score: 10, real: false }])).toBe(1);
+    expect(auc([{ score: 50, real: true }, { score: 50, real: false }])).toBe(0.5);
+    expect(auc([{ score: 10, real: true }, { score: 90, real: false }])).toBe(0);
+  });
+
+  it('is NaN without both real and false findings', () => {
+    expect(auc([{ score: 1, real: true }])).toBeNaN();
   });
 });

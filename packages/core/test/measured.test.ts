@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { BASELINE_PROMPT, RECALL_PROMPT, buildDefinitionsPrompt, buildVerifyPrompt, DEFINITIONS_ADDENDUM, mergePasses, parseBaselineReply, parseVerdicts, VERIFY_PROMPT } from '../src/review/measured.js';
+import { BASELINE_PROMPT, RECALL_PROMPT, buildDefinitionsPrompt, buildVerifyPrompt, DEFINITIONS_ADDENDUM, mergePasses, parseBaselineReply, parseVerdicts, VERIFY_PROMPT, VERIFY_PROMPT_FOLD, VERIFY_PROMPT_V2 } from '../src/review/measured.js';
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 12);
 
@@ -53,5 +53,43 @@ describe('measured prompts', () => {
 
   it('lists findings by index in the verify prompt', () => {
     expect(buildVerifyPrompt('T', 'D', [{ file: 'a.ts', line: 3, claim: 'x' }])).toContain('<findings>\n0. a.ts:3');
+  });
+});
+
+describe('verify prompt v2', () => {
+  it('keeps v1 pinned and adds the three rules to v2', () => {
+    expect(sha(VERIFY_PROMPT)).toBe('51f6a68f2b98');
+    expect(sha(VERIFY_PROMPT_V2)).toBe('15b42f288fee');
+    expect(VERIFY_PROMPT_V2).toContain('"sameAs"');
+    expect(VERIFY_PROMPT_V2).toMatch(/do not show/);
+    expect(VERIFY_PROMPT_V2).toMatch(/deliberate trade-off/);
+    expect(VERIFY_PROMPT_V2).toContain('"The PR intends this behavior" does not disprove');
+  });
+
+  it('parses sameAs and ignores a bad one without failing the reply', () => {
+    const v = parseVerdicts('[{"index":0,"keep":true,"confidence":80,"reason":"r"},{"index":1,"keep":true,"confidence":60,"sameAs":0,"reason":"r"},{"index":2,"keep":true,"sameAs":"x","reason":"r"}]');
+    expect(v?.[1]?.sameAs).toBe(0);
+    expect(v?.[2]?.sameAs).toBeUndefined();
+    expect(v).toHaveLength(3);
+  });
+
+  it('puts context in its own untrusted block only when given', () => {
+    const f = [{ file: 'a.ts', line: 1, claim: 'c' }];
+    expect(buildVerifyPrompt('t', 'd', f)).not.toContain('<definitions>');
+    expect(buildVerifyPrompt('t', 'd', f).startsWith(VERIFY_PROMPT)).toBe(true);
+    const p = buildVerifyPrompt('t', 'd', f, { prompt: VERIFY_PROMPT_V2, context: 'X' });
+    expect(p.startsWith(VERIFY_PROMPT_V2)).toBe(true);
+    expect(p).toContain('<definitions>\nX\n</definitions>');
+  });
+});
+
+describe('verify prompt fold (v1 + same root cause only)', () => {
+  it('is v1 with only the sameAs rule and field added', () => {
+    expect(sha(VERIFY_PROMPT_FOLD)).toBe('319adec02664');
+    expect(VERIFY_PROMPT_FOLD).toContain('"sameAs"');
+    expect(VERIFY_PROMPT_FOLD).not.toMatch(/35 or less|30 or less/);
+    // Everything before the reply format is v1, byte for byte.
+    const head = VERIFY_PROMPT.slice(0, VERIFY_PROMPT.indexOf('Reply with ONLY'));
+    expect(VERIFY_PROMPT_FOLD.startsWith(head)).toBe(true);
   });
 });

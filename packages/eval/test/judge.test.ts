@@ -69,6 +69,35 @@ describe('judgeReview', () => {
   });
 });
 
+describe('judgeReview with votes', () => {
+  /** Replies in turn from a script, per pair: true/false per call. */
+  function scripted(answers: boolean[]): LlmClient & { calls: number } {
+    const client = {
+      calls: 0,
+      async complete() {
+        const match = answers[client.calls++ % answers.length];
+        return { text: `{"reasoning":"r","match":${match},"confidence":0.8}`, costUsd: 0.001, turns: 1 };
+      },
+    };
+    return client;
+  }
+
+  it('takes the majority of three calls per pair', async () => {
+    expect(await judgeReview(['g'], ['c'], scripted([true, false, true]), 'm', new Map(), 3)).toMatchObject({ tp: 1, fp: 0 });
+    expect(await judgeReview(['g'], ['c'], scripted([true, false, false]), 'm', new Map(), 3)).toMatchObject({ tp: 0, fp: 1 });
+  });
+
+  it('reuses the single-vote cache entry as the first vote, so one vote stays backward compatible', async () => {
+    const cache = new Map<string, string>();
+    const llm = scripted([true]);
+    await judgeReview(['g'], ['c'], llm, 'm', cache);
+    expect(llm.calls).toBe(1);
+    await judgeReview(['g'], ['c'], llm, 'm', cache, 3);
+    expect(llm.calls).toBe(3);
+    expect(cache.size).toBe(3);
+  });
+});
+
 describe('totalsOf', () => {
   it('micro-averages like Martian\'s dashboard', () => {
     const t = totalsOf([
